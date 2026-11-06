@@ -155,6 +155,7 @@ describe('the panel and the API', () => {
     expect(html).toContain('Needs a person')
     expect(html).toContain('Cut the release')
     expect(html).toMatch(/its worker|the router|a person/)
+    expect(html, 'working and parked workers are counted apart').toMatch(/\d+\/\d+ working, \d+ parked, \d+ queued/)
     f.running.stop()
   })
 })

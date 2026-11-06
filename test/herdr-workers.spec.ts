@@ -23,7 +23,10 @@ function memoryHerdr(over: Partial<Herdr> = {}) {
     workspaceCreate: async () => ({ workspaceId: 'w2', tabId: 'w2:t1', paneId: 'w2:p1' }),
     tabCreate: async o => { calls.push(`tabCreate ${o.label} ${JSON.stringify(o.env)}`); tabs += 1; return { tabId: `w1:t${tabs}`, paneId: `w1:p${tabs}` } },
     tabRename: async () => {},
-    tabClose: async id => { calls.push(`tabClose ${id}`) },
+    tabClose: async id => {
+      calls.push(`tabClose ${id}`)
+      for (const [name, agent] of agents) if (agent.pane_id.replace(/:p/, ':t') === id) agents.delete(name)
+    },
     paneRun: async () => {},
     agentStart: async o => {
       calls.push(`agentStart ${o.name} ${o.args.join(' ')}`)
@@ -222,6 +225,35 @@ describe('herdr workers', () => {
     await after.retireOrphans(new Set())
     await new Promise(resolve => setTimeout(resolve, 50))
     expect(m.calls.filter(c => c.startsWith('tabClose')), 'settled once').toHaveLength(1)
+  })
+
+  it('a worker adopted between runs starts parked, so it holds no slot', async () => {
+    const dir = tmp()
+    const m = memoryHerdr()
+    const workers = new HerdrWorkers(options(dir, m.herdr))
+    const launched = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    const record = (await workers.find('abcd1234ef'))!
+    const seen: string[] = []
+    launched.subscribe(e => seen.push(`launched:${e.type}`))
+    workers.attach(record, () => {}, { adopted: true }).subscribe(e => seen.push(`adopted:${e.type}`))
+    await until(() => seen.includes('adopted:settled'))
+    expect(seen, 'herdr says it is idle, so it starts parked').toContain('adopted:settled')
+    expect(seen, 'only the adopted view asks herdr').not.toContain('launched:settled')
+  })
+
+  it('a tab kept for a busy agent is looked at again, and closes once the agent is idle', async () => {
+    const dir = tmp()
+    const m = memoryHerdr()
+    const workers = new HerdrWorkers(options(dir, m.herdr))
+    const busy = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    const agent = m.agents.get(agentName('#7', busy.sessionId))!
+    agent.agent_status = 'working'
+    busy.dispose()
+    await new Promise(resolve => setTimeout(resolve, 40))
+    expect(m.calls.filter(c => c.startsWith('tabClose')), 'kept while busy').toEqual([])
+    agent.agent_status = 'idle'
+    await until(() => m.calls.some(c => c.startsWith('tabClose')))
+    expect(m.calls.filter(c => c.startsWith('tabClose'))).toEqual(['tabClose w1:t1'])
   })
 
   it('a finished worker tab closes only when its own pi sits idle in it', async () => {

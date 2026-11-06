@@ -120,9 +120,10 @@ export class HerdrWorkers {
       session.dispose()
       retired.push(record)
     }
-    // A close is a timer in this process: a router restarted inside a finished worker's linger lost it.
+    // Close timers die with the process, and a tab kept for a busy agent needs another look: re-check every open one.
     const linger = this.options.lingerMs ?? 600_000
-    for (const record of this.records(true).filter(r => r.endedAt && !r.tabSettledAt && !retired.includes(r))) {
+    const open = new Set((await this.options.herdr.tabList().catch(() => [])).map(tab => tab.tabId))
+    for (const record of this.records(true).filter(r => r.endedAt && open.has(r.tabId) && !retired.includes(r))) {
       const wait = Math.max(0, Date.parse(record.endedAt!) + linger - Date.now())
       setTimeout(() => { void this.closeIfIdle(record) }, wait).unref()
     }
@@ -175,7 +176,7 @@ export class HerdrWorkers {
     return agent?.pane_id === record.paneId
   }
 
-  attach(record: WorkerRecord, report: Reporter): WorkerSession {
+  attach(record: WorkerRecord, report: Reporter, { adopted = false }: { adopted?: boolean } = {}): WorkerSession {
     const { herdr, log } = this.options
     const cursorFile = join(record.dir, 'cursor.json')
     const cursor = existsSync(cursorFile)
@@ -242,6 +243,12 @@ export class HerdrWorkers {
         watching.unref()
         timers.push(pumping, watching)
         pump()
+        // An adopted worker between runs sends nothing until its next one: ask herdr whether it is idle now.
+        if (adopted) {
+          void herdr.agentGet(record.agent).then(agent => {
+            if (agent?.pane_id === record.paneId && ['idle', 'done'].includes(agent.agent_status)) listener?.({ type: 'settled' })
+          }).catch(() => {})
+        }
         return () => { stopTimers(); listener = undefined }
       },
       abort: () => { void herdr.agentSendKeys(record.agent, ['esc']).catch(() => {}) },
@@ -261,8 +268,14 @@ export class HerdrWorkers {
       record.tabSettledAt = new Date().toISOString()
       writeFileSync(join(record.dir, 'worker.json'), JSON.stringify(record, null, 2))
     }
-    if (agent?.pane_id !== record.paneId || !['idle', 'done'].includes(agent.agent_status)) {
-      this.options.log.line('info', 'worker.tab_kept', { agent: record.agent, tab: record.tabId, status: agent?.agent_status ?? 'gone' })
+    if (agent?.pane_id === record.paneId && !['idle', 'done'].includes(agent.agent_status)) {
+      // Still busy, whoever drives it: look again after another linger rather than keep the tab forever.
+      this.options.log.line('info', 'worker.tab_kept', { agent: record.agent, tab: record.tabId, status: agent.agent_status })
+      setTimeout(() => { void this.closeIfIdle(record) }, this.options.lingerMs ?? 600_000).unref()
+      return
+    }
+    if (agent?.pane_id !== record.paneId) {
+      this.options.log.line('info', 'worker.tab_kept', { agent: record.agent, tab: record.tabId, status: 'gone' })
       settle()
       return
     }

@@ -207,6 +207,29 @@ describe('PiExecutor', () => {
     expect(f.calls_of('reported'), 'a report the engine refused is not announced').toEqual([])
   })
 
+  it('a worker between runs frees its slot for the queue, and takes it back when a new run starts', async () => {
+    const f = fixture({ maxConcurrent: 1, slotPollMs: 5 })
+    f.executor.start(ticket(), assignment())
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    for (let i = 0; i < 100 && f.sessions.length < 1; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    f.sessions[0]!.emit({ type: 'settled' })
+    await f.executor.idle()
+    expect(f.sessions, 'the queued ticket got the parked worker\'s slot').toHaveLength(2)
+    expect([f.executor.running, f.executor.parked]).toEqual([1, 1])
+    expect(f.executor.workers().find(w => w.ticketId === 'T1')?.busy).toBe(false)
+    f.sessions[0]!.emit({ type: 'turnStarted' })
+    expect([f.executor.running, f.executor.parked], 'a follow-up puts it back on a run').toEqual([2, 0])
+  })
+
+  it('the quiet flag is for workers on a run: a parked worker is quiet by design', async () => {
+    const f = fixture()
+    f.executor.start(ticket(), assignment())
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    await f.executor.idle()
+    f.sessions[0]!.emit({ type: 'settled' })
+    expect(f.executor.quiet(0).map(w => w.ticketId)).toEqual(['T2'])
+  })
+
   it('a crashed worker frees its slot at once, so a crash does not cost a worker until the next restart', async () => {
     const f = fixture({ maxConcurrent: 1, slotPollMs: 5 })
     f.executor.start(ticket(), assignment())
