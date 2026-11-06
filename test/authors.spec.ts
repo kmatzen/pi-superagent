@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { isListed } from '../src/pi/authors.ts'
-import { policyOf } from '../src/pi/router.ts'
+import { policyOf, scopeOf } from '../src/pi/router.ts'
 
 describe('bot patterns', () => {
   it('the gate rechecks the author, so a trigger stored with the old human flag cannot open a ticket', () => {
@@ -24,5 +24,31 @@ describe('bot patterns', () => {
     const bots = new Set(['pi-*', 'fleet-*'])
     expect(isListed('pi-a1b2c3d4', bots)).toBe(true)
     expect(isListed('octocat', bots)).toBe(false)
+  })
+})
+
+describe('who the router hears', () => {
+  const github = (association: string | undefined, author = 'octocat') =>
+    ({ source: 'github', meta: { ...association === undefined ? {} : { association }, author } })
+
+  it('people with write access are heard; everyone else stops at the scope, before the judge or a worker', () => {
+    const scope = scopeOf({ bots: new Set() } as never)
+    for (const association of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
+      expect(scope.scope(github(association)), association).toEqual({ listened: true, observed: false })
+    }
+    for (const association of ['NONE', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'MANNEQUIN', undefined]) {
+      expect(scope.scope(github(association)), String(association)).toEqual({ listened: false, reason: 'senderNotMember' })
+    }
+  })
+
+  it('a list of logins replaces the write-access rule: an owner off the list is not heard, a listed stranger is', () => {
+    const scope = scopeOf({ bots: new Set(), allowed: new Set(['alice', 'team-*']) } as never)
+    expect(scope.scope(github('NONE', 'alice')).listened).toBe(true)
+    expect(scope.scope(github('NONE', 'team-bob')).listened).toBe(true)
+    expect(scope.scope(github('OWNER', 'octocat')).listened).toBe(false)
+  })
+
+  it('a source with no notion of repository access is heard as before', () => {
+    expect(scopeOf({ bots: new Set() } as never).scope({ source: 'board', meta: {} }).listened).toBe(true)
   })
 })

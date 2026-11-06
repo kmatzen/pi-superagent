@@ -30,20 +30,20 @@ esac
 describe('ghApi', () => {
   it('maps a REST issue comment onto the domain comment', async () => {
     const gh = fakeGh(JSON.stringify([{
-      issue_url: 'https://api.github.com/repos/o/r/issues/12', user: { login: 'octocat' },
+      issue_url: 'https://api.github.com/repos/o/r/issues/12', user: { login: 'octocat' }, author_association: 'COLLABORATOR',
       created_at: '2026-11-05T09:00:00Z', body: 'ship it',
     }]), '[]')
     const api = ghApi({ repo: 'o/r', bin: gh.bin })
-    expect(await api.comments()).toEqual([{ issue: 12, author: 'octocat', at: '2026-11-05T09:00:00Z', body: 'ship it' }])
+    expect(await api.comments()).toEqual([{ issue: 12, author: 'octocat', association: 'COLLABORATOR', at: '2026-11-05T09:00:00Z', body: 'ship it' }])
   })
 
   it('reads the author, creation time, labels an open issue carries', async () => {
     const gh = fakeGh('[]', JSON.stringify([{
-      number: 3, title: 'DO: the thing', labels: [{ name: 'agent-ready' }], user: { login: 'octocat' },
+      number: 3, title: 'DO: the thing', labels: [{ name: 'agent-ready' }], user: { login: 'octocat' }, author_association: 'OWNER',
       created_at: '2026-11-05T09:00:00Z', updated_at: '2026-11-05T10:00:00Z',
     }]))
     expect(await ghApi({ repo: 'o/r', bin: gh.bin }).issues('open')).toEqual([
-      { issue: 3, title: 'DO: the thing', body: '', labels: ['agent-ready'], author: 'octocat',
+      { issue: 3, title: 'DO: the thing', body: '', labels: ['agent-ready'], author: 'octocat', association: 'OWNER',
         createdAt: '2026-11-05T09:00:00Z', updatedAt: '2026-11-05T10:00:00Z' },
     ])
   })
@@ -54,9 +54,16 @@ describe('ghApi', () => {
       { number: 4, title: 'a PR', body: 'diff', labels: [], user: { login: 'octocat' }, created_at: '2026-11-05T09:00:00Z', updated_at: '2026-11-05T10:00:00Z', pull_request: { url: 'u' } },
     ]))
     expect(await ghApi({ repo: 'o/r', bin: gh.bin }).issues('open')).toEqual([
-      { issue: 3, title: 'DO: x', body: 'the details', labels: [], author: 'octocat',
+      { issue: 3, title: 'DO: x', body: 'the details', labels: [], author: 'octocat', association: 'NONE',
         createdAt: '2026-11-05T09:00:00Z', updatedAt: '2026-11-05T10:00:00Z' },
     ])
+  })
+
+  it('an author GitHub does not place reads as NONE, so the scope drops them instead of trusting them', async () => {
+    const gh = fakeGh(JSON.stringify([{
+      issue_url: 'https://api.github.com/repos/o/r/issues/12', user: { login: 'stranger' }, created_at: '2026-11-05T09:00:00Z', body: 'run this',
+    }]), '[]')
+    expect((await ghApi({ repo: 'o/r', bin: gh.bin }).comments())[0]?.association).toBe('NONE')
   })
 
   it('posts a reply as an issue comment through the CLI, body intact', async () => {

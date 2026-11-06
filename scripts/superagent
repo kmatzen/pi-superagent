@@ -116,7 +116,7 @@ start() {
   )
   # herdr starts the tab from its own environment, not this one: a setting reaches the router only by name.
   local key
-  for key in GITHUB_REPO GITHUB_SELF SELF BOTS MAX_WORKERS TICK_MS PREPARE BLOCKED ALLOW_DELEGATION JUDGE_THINKING; do
+  for key in GITHUB_REPO GITHUB_SELF SELF BOTS ALLOWED MAX_WORKERS TICK_MS PREPARE BLOCKED ALLOW_DELEGATION JUDGE_THINKING; do
     key="PI_SUPERAGENT_$key"
     [ -n "${!key:-}" ] && env+=(--env "$key=${!key}")
   done

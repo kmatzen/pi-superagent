@@ -13,7 +13,8 @@ are in [design-decisions.md](design-decisions.md); the proofs about them are in
  GitHub source        seed rule · deferred read positions · own-writing filter
      │  Trigger: content-derived id, thread #N           source-github.ts
      ▼
- engine               policy gate: a person, not a bot  src/core, router.ts
+ engine               scope: write access only          src/core, router.ts
+     │                policy gate: a person, not a bot
      │  Evaluation: the thread's waiting triggers
      ▼
  judge                one candidate at a time, answered through ticket_decide
@@ -64,7 +65,9 @@ have gone quiet for 15 minutes, and flushes the outbox. Three failed polls in a 
 comments, and submitted reviews. Its first look at a repository records what already exists and fires
 none of it. Its read positions commit one poll late, as described above. It ignores its own writing,
 recognized by the account it posts from or by the hidden marker every reply carries, and it marks
-authors matching the bot patterns as not human. `gh-api.ts` talks to GitHub through the `gh` CLI, so the
+authors matching the bot patterns as not human. Every trigger carries its author's association with the
+repository, and the router's scope (`scopeOf` in `router.ts`) files one from anyone without write access
+as filtered: it reaches neither the judge nor a worker. `gh-api.ts` talks to GitHub through the `gh` CLI, so the
 credentials stay in the operator's keyring; every call is asynchronous, issue and pull-request lists are
 paginated, and comments are read forward from the cursor.
 
@@ -139,5 +142,6 @@ history.
 | No comment lost to a crash | deferred read positions | `Intake.tla` C3, C6 |
 | No trigger accepted twice | content-derived ids | `Intake.tla` C4 |
 | A bot never passes for a person | bot patterns and the policy gate | `Intake.tla` C5 |
+| A stranger reaches neither the judge nor a worker | the source scope, `scopeOf` | tests only |
 | A live agent's tab is never swept | the liveness check in `closeStaleTabs` | `Workers.tla` W2, W4 |
 | Dead workers' tabs do not pile up | the sweep and the linger close | `Workers.tla` W5 |
