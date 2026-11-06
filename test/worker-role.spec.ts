@@ -41,6 +41,20 @@ describe('the worker role', () => {
     expect(lines(join(dir, 'reports.jsonl'))).toMatchObject([{ state: 'ready', summary: 'merged the fix', question: null }])
   })
 
+  it('ticket_report carries the pull requests the work opened, and only strings', () => {
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir })
+    const report = f.tools.find(t => t.name === 'ticket_report')!
+    report.execute('c1', { state: 'ready', summary: 'opened the fix', pullRequests: ['https://github.com/o/r/pull/9', 7] })
+    report.execute('c2', { state: 'ready', summary: 'answered the question' })
+    expect(lines(join(dir, 'reports.jsonl'))).toMatchObject([
+      { state: 'ready', pullRequests: ['https://github.com/o/r/pull/9'] },
+      { state: 'ready', summary: 'answered the question' },
+    ])
+    expect(lines(join(dir, 'reports.jsonl'))[1]).not.toHaveProperty('pullRequests')
+  })
+
   it('the guard refuses delegation inside the worker, where it now runs', () => {
     const f = fakePi()
     workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp(), PI_SUPERAGENT_WORKSPACE: '/w' })

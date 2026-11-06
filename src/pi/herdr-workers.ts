@@ -210,7 +210,9 @@ export class HerdrWorkers {
         else if (event.type === 'inbox_error') log.line('warn', 'worker.inbox_error', { agent: record.agent, error: String(event.error) })
       }
       for (const r of fresh('reports.jsonl', 'reports')) {
-        report(String(r.state), String(r.summary), typeof r.question === 'string' ? r.question : null, r.origin === 'silent' ? 'silent' : 'worker')
+        const pulls = Array.isArray(r.pullRequests) ? r.pullRequests.filter((p): p is string => typeof p === 'string') : []
+        report(String(r.state), String(r.summary), typeof r.question === 'string' ? r.question : null, r.origin === 'silent' ? 'silent' : 'worker',
+          pulls.length ? pulls : undefined)
       }
       if (`${cursor.events}/${cursor.reports}` !== before) writeFileSync(cursorFile, JSON.stringify(cursor))
     }

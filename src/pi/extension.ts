@@ -7,7 +7,8 @@ import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type Out
 import { SqliteRepositories } from './store.ts'
 import { SessionInbox } from './sink-session-inbox.ts'
 import { GithubSource, REPLY_MARKER, type GithubApi } from './source-github.ts'
-import { ghApi } from './gh-api.ts'
+import { ghApi, ghPulls } from './gh-api.ts'
+import { parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi } from './pulls.ts'
 import { CommentOutbox } from './outbox.ts'
 import { PiExecutor } from './executor.ts'
 import { renderCandidateFor, SessionAssessor, type SessionPilot } from './assessor.ts'
@@ -17,11 +18,11 @@ import { openWorkerView } from './worker-view.ts'
 import { herdrCli, type Herdr } from './herdr.ts'
 import { HerdrWorkers } from './herdr-workers.ts'
 import { reportTool, type ReportOrigin } from './report-tool.ts'
-import { receiptText, type ReportedRun } from './receipts.ts'
+import { pullEndText, receiptText, type ReportedRun } from './receipts.ts'
 import { workerRole } from './worker-role.ts'
 import { createPanelServer } from './server.ts'
 import { guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
-import { briefFor, loadSdk, policyOf, scopeOf, type RouterConfig, type SdkSurface } from './router.ts'
+import { briefFor, loadSdk, policyOf, pullBrief, scopeOf, type RouterConfig, type SdkSurface } from './router.ts'
 
 export interface PiLike {
   registerTool(tool: RegisteredTool): void
@@ -60,6 +61,7 @@ export interface ExtensionDeps {
   herdr?: Herdr
   now?: () => string
   githubApi?: GithubApi
+  pullApi?: PullApi
   /** Tests read worker files and check worker liveness in milliseconds, not seconds. */
   workerTiming?: { pollMs?: number; livenessMs?: number }
 }
@@ -101,16 +103,18 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   })
   const issueOf = (m: OutboundMessage): string | undefined =>
     m.channel.source === 'github' ? (m.channel.address as { issue?: string } | undefined)?.issue : undefined
+  const repoOf = (m: OutboundMessage): string | undefined => (m.channel.address as { repo?: string } | undefined)?.repo
   const outbox = new CommentOutbox({
     accepts: m => m.channel.source === 'github' && Boolean(githubApi && issueOf(m)),
     post: async (m, body, retry) => {
       const issue = Number(issueOf(m))
+      const repo = repoOf(m)
       if (!issue || !githubApi) return
       try {
         // GitHub may have taken the last attempt before the process died: on a retry, look first.
-        const seen = retry && githubApi.commentsFor ? await githubApi.commentsFor(issue) : []
+        const seen = retry && githubApi.commentsFor ? await githubApi.commentsFor(issue, repo) : []
         if (seen.some(c => c.body.trimEnd() === `${body}\n\n${REPLY_MARKER}`)) return
-        await githubApi.postComment(issue, body)
+        await githubApi.postComment(issue, body, repo)
       } catch (error) {
         log.line('warn', 'outbox.github_failed', { issue, error: String(error).slice(0, 200) })
         throw error
@@ -210,7 +214,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const channel = ticket.channels[0]
     if (!channel) return
     const said = origin === 'launch' ? ''
-      : createHash('sha1').update(JSON.stringify([run.state, run.summary, run.question ?? null])).digest('hex').slice(0, 12)
+      : createHash('sha1').update(JSON.stringify([run.state, run.summary, run.question ?? null, run.pullRequests ?? []])).digest('hex').slice(0, 12)
     outbox.send({ id: `report:${assignmentId}:${origin}:${said}`, channel, kind: 'reply', ticketId: ticket.id,
       text: receiptText(channel.thread, origin, run, relaunched) })
   }
@@ -229,6 +233,47 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       }
     }
     announce(ticket, assignmentId, origin, run, fresh)
+    pullEnded(ticket.id)
+  }
+  const home = cfg.githubRepo ?? ''
+  // The engine ends a ticket with its pull request but posts nothing, so the issue hears it here, once per ticket.
+  const pullEnded = (ticketId: string): void => {
+    const ticket = repos.tickets.get(ticketId)
+    const outcome = ticket?.ended?.outcome
+    const channel = ticket?.channels[0]
+    if (!ticket || !channel || ticket.ended?.by !== 'executor' || (outcome !== 'merged' && outcome !== 'closed')) return
+    const pulls = (ticket.follows ?? []).filter(f => f.own && f.closed)
+      .flatMap(f => { const pull = parseThread(f.thread.replace(/^github:/, ''), home); return pull ? [pullUrl(pull)] : [] })
+    outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, outcome, pulls) })
+  }
+  const follower = new PullFollower({
+    home, api: deps.pullApi ?? ghPulls(), openThreads: () => github?.openThreads(), positions: repos.kv,
+    self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, now: () => Date.now(),
+    receive: trigger => { engine.receive(trigger) },
+    warn: (event, fields) => log.line('warn', event, fields),
+    closed: (thread, pull, outcome, at) => {
+      const key = `github:${thread.id}`
+      const waiting = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && !f.closed)).map(t => t.id)
+      engine.threadClosed(thread, outcome, at)
+      log.line('info', 'pull.closed', { thread: thread.id, outcome, url: pullUrl(pull), tickets: waiting.length })
+      for (const id of waiting) pullEnded(id)
+    },
+  })
+  // Bound before the engine reads the report: a ready report completes a ticket that follows no open pull request.
+  const follow = (ticket: Ticket, urls: readonly string[]): readonly string[] => {
+    const followed: string[] = []
+    for (const url of urls) {
+      const pull = parsePull(url)
+      if (!pull) { log.line('warn', 'pull.unreadable', { ticket: ticket.id, ref: url.slice(0, 200) }); continue }
+      try {
+        engine.bindThread(ticket.id, threadOfPull(pull, home), true)
+        followed.push(pullUrl(pull))
+        log.line('info', 'pull.followed', { ticket: ticket.id, url: pullUrl(pull) })
+      } catch (error) {
+        log.line('warn', 'pull.follow_failed', { ticket: ticket.id, url: pullUrl(pull), error: String(error).slice(0, 200) })
+      }
+    }
+    return followed
   }
   const herdrWorkers = cfg.workers === 'herdr'
     ? new HerdrWorkers({ herdr: deps.herdr ?? herdrCli(cfg.herdrBin), stateDir: cfg.dataDir, log,
@@ -301,12 +346,16 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const brief = briefFor(ticket, `${cfg.worktreeRoot}/${ticket.id}`) + (before
         ? `\nA previous worker on this ticket stopped (${before.summary}); anything it changed is still in the workspace, so check it before starting over.`
         : '')
-      const issue = ticket.channels[0]?.source === 'github' ? (ticket.channels[0].address as { issue?: string }).issue : undefined
-      if (!issue || !cfg.githubRepo) return brief
+      const address = ticket.channels[0]?.source === 'github' ? ticket.channels[0].address as { issue?: string; repo?: string } : undefined
+      const issue = address?.issue
+      const repo = address?.repo ?? cfg.githubRepo
+      // Without gh the worker cannot open a pull request, so it is not asked to.
+      const pulls = cfg.blockedCommands?.includes('gh') ? '' : `\n${pullBrief(issue && repo ? `${repo}#${issue}` : undefined)}`
+      if (!issue || !repo) return brief + pulls
       // A comment the worker posts itself carries no reply footer, so the router would read it as the
       // operator asking again on this thread.
-      return `${brief}\nThe request is GitHub issue ${cfg.githubRepo}#${issue}: read it with \`gh issue view ${issue} --repo ${cfg.githubRepo} --comments\`. `
-        + 'Do not comment on the issue yourself; ticket_report is how your result reaches it.'
+      return `${brief}\nThe request is GitHub issue ${repo}#${issue}: read it with \`gh issue view ${issue} --repo ${repo} --comments\`. `
+        + 'Do not comment on the issue yourself; ticket_report is how your result reaches it.' + pulls
     },
     renderInput: input => input.kind === 'trigger'
       ? (repos.triggers.get(input.triggerId) ? `${repos.triggers.get(input.triggerId)!.actor.id}: ${repos.triggers.get(input.triggerId)!.text}` : undefined)
@@ -315,6 +364,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       : input.kind === 'text' ? input.text : `[${input.kind}]`,
     inbox: new SessionInbox(`${cfg.dataDir}/inbox`),
     reported,
+    follow,
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
   })
   executorRef = executor
@@ -414,13 +464,22 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       if (pollFailures) { pollFailures = 0; writeHealth(cfg.dataDir, null) }
     }
     for (const trigger of triggers) engine.receive(trigger)
+    try {
+      await follower.reconcile(repos.tickets.open())
+    } catch (error) {
+      // The rest of the pass still runs: judgements, launches and replies must not wait on one pull request.
+      log.line('error', 'pull.reconcile_failed', { error: String(error).slice(0, 200) })
+    }
     // The conversation a ticket lives in can end on GitHub: a merge closes the issue it names, and
-    // closing without merging is a person saying no. Either way the ticket stops and says so.
+    // closing without merging is a person saying no. Either way the ticket stops and says so, unless it
+    // follows its own pull request, whose close ends it (above).
     const openThreads = github?.openThreads()
     if (openThreads) {
       for (const ticket of repos.tickets.open()) {
         const channel = ticket.channels[0]
-        if (!channel || channel.source !== 'github' || openThreads.has(channel.thread)) continue
+        if (!channel || channel.source !== 'github' || !channel.thread.startsWith('#') || openThreads.has(channel.thread)) continue
+        // A merge closes the issue it names: the ticket ends with its pull request once the work finishes, not as a stop.
+        if (ticket.follows?.some(f => f.own && f.closed)) continue
         try {
           engine.stopTicket(ticket.id, 'the conversation closed on GitHub')
           outbox.send({

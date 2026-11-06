@@ -1,6 +1,7 @@
 /** The Assessor port: renders each Candidate and sends it to the judge, one at a time; the judge's
  *  `ticket_decide` call brings the answer back. */
 import type { Assessor, AssessmentOutcome, Candidate, Engine } from '../core/index.ts'
+import { threadUrl } from './pulls.ts'
 
 export interface SessionPilot {
   // Must not block the engine's loop: request() runs inside an engine command.
@@ -25,9 +26,9 @@ export const renderCandidate = (c: Candidate): string => [
 /** GitHub threads carry only `#<issue>`; the judge should see the URL it describes and what counts as a request. */
 export const renderCandidateFor = (repo?: string) => (c: Candidate): string => {
   const base = renderCandidate(c)
-  if (!repo || !c.thread.key.startsWith('github:')) return base
-  const issue = c.thread.key.slice('github:'.length).replace('#', '')
-  return `${base.replace(`Thread ${c.thread.key}`, `Thread ${c.thread.key} (https://github.com/${repo}/issues/${issue})`)}
+  const url = c.thread.key.startsWith('github:') ? threadUrl(c.thread.key.slice('github:'.length), repo ?? '') : undefined
+  if (!url) return base
+  return `${base.replace(`Thread ${c.thread.key}`, `Thread ${c.thread.key} (${url})`)}
 `
     + 'This is GitHub: a person writing to the agent. accept is the answer for a concrete action '
     + 'the person asks the agent to take, including a request that calls itself a test. ignore is the answer for '

@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { ghApi } from '../src/pi/gh-api.ts'
+import { ghApi, ghPulls } from '../src/pi/gh-api.ts'
 import { REPLY_MARKER } from '../src/pi/source-github.ts'
 
 const dirs: string[] = []
@@ -80,5 +80,57 @@ describe('ghApi', () => {
     writeFileSync(bin, '#!/bin/bash\necho "boom" >&2\nexit 1\n')
     chmodSync(bin, 0o755)
     await expect(ghApi({ repo: 'o/r', bin }).comments()).rejects.toThrow()
+  })
+})
+
+/** A fake `gh` for pull requests in any repository: every call is recorded, and each path answers from a fixture. */
+function fakePullsGh() {
+  const dir = tmp()
+  const bin = join(dir, 'gh')
+  writeFileSync(bin, `#!/bin/bash
+printf '%s\n' "$*" >> "$(dirname "$0")/calls.log"
+case "$*" in
+  "api repos/x/y/pulls/9") echo '{"state":"closed","merged_at":"2026-11-06T10:00:00Z","closed_at":"2026-11-06T10:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
+  "api repos/x/y/pulls/10") echo '{"state":"closed","merged_at":null,"closed_at":"2026-11-06T11:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
+  "api repos/x/y/pulls/11") echo '{"state":"open","merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z"}' ;;
+  "api repos/x/y/pulls/404") echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  "api repos/x/y/pulls/502") echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
+  "api repos/x/y/issues/11/comments?per_page=100&since="*) echo '[{"user":{"login":"rev"},"author_association":"MEMBER","created_at":"2026-11-06T09:00:00Z","body":"rename it"}]' ;;
+  "api repos/x/y/pulls/11/reviews?per_page=100") echo '[{"id":5,"user":{"login":"rev"},"author_association":"OWNER","state":"APPROVED","submitted_at":"2026-11-06T09:30:00Z","body":""},{"id":6,"state":"PENDING"}]' ;;
+  "api -X POST repos/x/y/issues/11/comments --input -") cat - > "$(dirname "$0")/posted.json" ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+  chmodSync(bin, 0o755)
+  return { bin, calls: () => readFileSync(join(dir, 'calls.log'), 'utf8').trim().split('\n'), posted: () => JSON.parse(readFileSync(join(dir, 'posted.json'), 'utf8')) }
+}
+
+describe('ghPulls', () => {
+  it('reads a pull request as merged, closed or open, and one GitHub does not have as absent', async () => {
+    const api = ghPulls(fakePullsGh().bin)
+    expect(await api.pull('x/y', 9)).toEqual({ open: false, merged: true, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T10:00:00Z' })
+    expect(await api.pull('x/y', 10)).toEqual({ open: false, merged: false, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T11:00:00Z' })
+    expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, createdAt: '2026-11-05T09:00:00Z' })
+    expect(await api.pull('x/y', 404)).toBeUndefined()
+    await expect(api.pull('x/y', 502), 'any other failure is an error, not a closed pull request').rejects.toThrow(/502/)
+  })
+
+  it("reads one pull request's comments from a time, and its submitted reviews, with each author's standing", async () => {
+    const gh = fakePullsGh()
+    const api = ghPulls(gh.bin)
+    expect(await api.comments('x/y', 11, '2026-11-06T08:00:00Z')).toEqual([
+      { issue: 11, author: 'rev', association: 'MEMBER', at: '2026-11-06T09:00:00Z', body: 'rename it' },
+    ])
+    expect(gh.calls()).toContain('api repos/x/y/issues/11/comments?per_page=100&since=2026-11-06T08%3A00%3A00Z')
+    expect(await api.reviews('x/y', 11)).toEqual([
+      { pr: 11, id: 5, author: 'rev', association: 'OWNER', state: 'APPROVED', at: '2026-11-06T09:30:00Z', body: '' },
+    ])
+  })
+
+  it('posts on the repository a conversation lives in, not only the watched one', async () => {
+    const gh = fakePullsGh()
+    await ghApi({ repo: 'o/r', bin: gh.bin }).postComment(11, 'addressed', 'x/y')
+    expect(gh.calls()).toEqual(['api -X POST repos/x/y/issues/11/comments --input -'])
+    expect(gh.posted().body).toContain('addressed')
   })
 })

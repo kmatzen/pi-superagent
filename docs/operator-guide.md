@@ -26,13 +26,22 @@ open ticket. An ignore posts nothing on the issue; the reason is in the engine l
   hear fewer people, list the logins in `PI_SUPERAGENT_ALLOWED`; the list then replaces the rule.
 - **Follow-ups.** Comment on the same issue. While its ticket is open, your comments go straight to its
   worker.
-- **Pull requests.** A comment on a pull request's conversation reaches the agent like any other. A
-  submitted review, whether it approves or requests changes, fires a fresh judgement, and the answer
-  lands in the pull request's conversation.
+- **Pull requests.** When the work changes a repository, the worker opens a pull request and names it in
+  its report, and the receipt on the issue links it. The ticket then waits for review, shown on the panel
+  as `review of #N`: your comments and reviews on the pull request go to the same worker. Merge it, and
+  the ticket ends and the issue says it is done. Close it unmerged, and the ticket ends too; a comment on
+  the issue starts the work again. A pull request in another repository works the same way, checked every
+  two minutes. A request that changes no repository, such as a question, an investigation or an
+  operation, ends with its report.
+- **Who opens the pull request.** The worker, with the `gh` on this machine, so the pull request's author
+  is whoever `gh` is signed in as. Blocking `gh` for workers (`PI_SUPERAGENT_BLOCKED`) turns pull requests
+  off: workers then report without one.
+- **Pull requests no ticket opened.** A comment or a submitted review on one reaches the judge like any
+  other request, and the answer lands in the pull request's conversation.
 - **Questions from a worker.** A worker that needs you reports *blocked* with one question. The question
   is posted on the issue (and listed on the panel under *Needs a person*); answer it with a comment.
-- **Stopping.** Close the issue, or merge the pull request that closes it. Within one poll the ticket
-  stops and says so on the thread. Reopen the issue to run the request again. Without GitHub, the panel
+- **Stopping.** Close the issue. Within one poll the ticket stops and says so on the thread. A ticket
+  waiting on its own pull request ends with that pull request instead, as above. Reopen the issue to run the request again. Without GitHub, the panel
   API stops a ticket too:
   `curl -X POST -H 'x-superagent-request: 1' http://127.0.0.1:8788/api/tickets/<id>/stop`.
 
@@ -96,6 +105,10 @@ means the judge is wedged; `restart` fixes it.
 **Someone else's issue gets no acknowledgement.** Check that they can write to the repository, or that
 their login is in `PI_SUPERAGENT_ALLOWED` when that is set. The panel's count of filtered triggers rises
 by one for each request it dropped this way.
+
+**A ticket stays open after its worker reported ready.** It is waiting for its pull request: the panel
+shows `review of #N`. Merge or close the pull request; the ticket ends within one poll, or within two
+minutes for a pull request in another repository.
 
 **`status` exits 2.** Read `~/.pi/superagent/health.json`. A failing `source` means the router cannot
 reach GitHub; check `gh auth status`. The error clears on the next good poll.

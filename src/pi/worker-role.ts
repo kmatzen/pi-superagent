@@ -23,9 +23,9 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
 
   // Counted per settle cycle, not per run: an automatic retry starts a new run after a report already filed.
   let reported = false
-  pi.registerTool(reportTool((state, summary, question) => {
+  pi.registerTool(reportTool((state, summary, question, _origin, pullRequests) => {
     reported = true
-    append('reports.jsonl', { state, summary, question: question ?? null })
+    append('reports.jsonl', { state, summary, question: question ?? null, ...(pullRequests?.length ? { pullRequests } : {}) })
   }))
   guardExtension({
     blocked: (env.PI_SUPERAGENT_BLOCKED ?? '').split(',').map(s => s.trim()).filter(Boolean),

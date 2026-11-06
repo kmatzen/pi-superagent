@@ -56,7 +56,10 @@ export interface ExecutorOptions {
   inbox?: { write(prefix: string, body: string): void }
   slotPollMs?: number
   /** Every report the engine accepted, with who ended the run: the deployment tells the person. */
-  reported?(ticket: Ticket, assignmentId: string, origin: ReportOrigin, report: Filed): void
+  reported?(ticket: Ticket, assignmentId: string, origin: ReportOrigin, report: Filed & { pullRequests?: readonly string[] }): void
+  /** Runs before the engine reads the report, because a ready report completes a ticket that follows no open pull
+   *  request yet. Returns the pull requests the ticket now follows. */
+  follow?(ticket: Ticket, pullRequests: readonly string[]): readonly string[]
 }
 
 interface Live {
@@ -132,16 +135,17 @@ export class PiExecutor {
   // Bound to the session that owns the ticket: a report from a worker the domain has already replaced or
   // stopped is not a ticket write.
   private reporter(ticket: Ticket, own: () => WorkerSession | undefined): Reporter {
-    return (state, summary, question, origin = 'worker') => {
+    return (state, summary, question, origin = 'worker', pullRequests) => {
       const live = this.live.get(ticket.id)
       if (!live || live.session.sessionId !== own()?.sessionId) return
-      this.file(ticket, live.assignmentId, origin, report(state, summary, question))
+      this.file(ticket, live.assignmentId, origin, report(state, summary, question), pullRequests)
     }
   }
 
-  private file(ticket: Ticket, assignmentId: string, origin: ReportOrigin, filed: Filed): void {
+  private file(ticket: Ticket, assignmentId: string, origin: ReportOrigin, filed: Filed, pullRequests?: readonly string[]): void {
+    const followed = pullRequests?.length ? this.options.follow?.(ticket, pullRequests) ?? [] : []
     this.engine.report(ticket.id, filed)
-    this.options.reported?.(ticket, assignmentId, origin, filed)
+    this.options.reported?.(ticket, assignmentId, origin, followed.length ? { ...filed, pullRequests: followed } : filed)
   }
 
   private bind(ticket: Ticket, assignment: Assignment, session: WorkerSession): void {

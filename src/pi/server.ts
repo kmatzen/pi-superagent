@@ -4,6 +4,7 @@ import type { Engine, Ticket } from '../core/index.ts'
 import type { SqliteRepositories } from './store.ts'
 import type { SessionAssessor } from './assessor.ts'
 import type { RouterConfig } from './router.ts'
+import { threadUrl } from './pulls.ts'
 
 export interface PanelSource {
   repos: SqliteRepositories
@@ -27,13 +28,14 @@ const within = (at: string, ms: number, now: string): boolean => Date.parse(at) 
 /** A ticket's home is its GitHub issue page. */
 export const issueUrl = (t: Ticket, repo?: string): string => {
   const c = t.channels[0]
-  const issue = c?.source === 'github' ? (c.address as { issue?: string }).issue : undefined
-  return repo && issue ? `https://github.com/${repo}/issues/${issue}` : ''
+  return (c?.source === 'github' && threadUrl(c.thread, repo ?? '')) || ''
 }
 
 const waitingOn = (t: Ticket): string => {
   const a = t.assignments.at(-1)
   if (t.attention) return `a person: ${(t.attention as { question?: string }).question ?? ''}`.trim()
+  const review = (t.follows ?? []).filter(f => f.own && !f.closed).map(f => f.thread.replace(/^github:/, ''))
+  if (a?.report?.state === 'ready' && review.length) return `review of ${review.join(', ')}`
   if (a?.report?.state === 'waiting') return 'a trigger'
   if (a?.state === 'running') return 'its worker'
   if (a?.state === 'pending' || !a) return 'the router'

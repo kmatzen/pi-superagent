@@ -127,10 +127,32 @@ their words do not count. (`Ticket.tla` I1.)
 GitHub ends a conversation in three ways: a merge closes the issue it names, a close says no, and a
 deletion says never mind. All three look the same from a poll, because the thread leaves the set of open
 issues and pull requests. The router then stops the ticket with a person's stop, posts one notice on the
-thread, and stays quiet until the issue is reopened.
+thread, and stays quiet until the issue is reopened. A ticket that follows its own pull request is the
+exception: that pull request's merge or close ends it, as merged or as closed, not as a stop.
 
 Closing the issue is the one stop that needs no tool and no knowledge of the system. Tickets on threads
 from other sources are left alone: the router can only tell whether a GitHub thread is open.
+
+## Work that changes a repository ends with its pull request
+
+A worker whose work changes a repository opens a pull request and names it in `ticket_report`. The router
+binds the pull request to the ticket before the engine reads the report, so *ready* then means awaiting
+review rather than done. Comments and reviews on the pull request go to the worker. The merge ends the
+ticket as merged, a close ends it as closed, and the router says which on the issue. A report that names
+no pull request ends the ticket as before.
+
+The work decides, not the request. A deployment, an answer or an investigation changes no repository, and a
+ticket made to wait for a pull request would never end; the worker knows by the end of its run whether it
+opened one. The worker opens it, not the router, because the worker knows which repository the work
+belongs in: the watched repository is often only where people ask. Only a pull request URL counts, since
+`#5` may be an issue, and a ticket bound to an issue would wait for a merge that never comes. The binding
+comes first because the engine completes a ticket on a *ready* report unless it already follows an open
+pull request. The lifecycle itself is the vendored engine's (`bindThread`, `threadClosed`, and upstream's
+`docs/003-execution.md`); the router feeds it facts.
+
+The watched repository's pull requests cost nothing extra: their comments and reviews arrive with every
+poll. One in another repository is read every two minutes, three calls each time, so a dozen open reviews
+stay well inside GitHub's hourly limit.
 
 ## A review is a request; opening a pull request is not
 
