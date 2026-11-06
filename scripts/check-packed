@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# check-packed — prove the tarball, not the checkout. It packs the package, installs it the way a user does
+# (globally, so the command is npm's symlink into the package), and runs both halves from that install: the
+# superagent command against a stand-in herdr, and the extension inside a real pi. A file left out of the
+# tarball, or a path that resolves only in this repository, passes every test here and fails there.
+# Every step prints what it proved; a step without its evidence is a failure, and the exit code says so.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FAKE="$ROOT/test/fixtures/fake-herdr"
+[ -x "$FAKE" ] || chmod +x "$FAKE" 2>/dev/null || { echo "check-packed: run it from a checkout" >&2; exit 1; }
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/sa-packed.XXXXXX")"
+cleanup() {
+  local job
+  for job in $(jobs -p); do kill "$job" 2>/dev/null; wait "$job" 2>/dev/null; done
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+fail() { echo "check-packed: FAIL: $*" >&2; exit 1; }
+ok() { echo "check-packed: ok: $*"; }
+# Nothing from the caller's environment reaches the install: a PI_SUPERAGENT_GITHUB_REPO inherited here
+# would point the proof's router at a real repository, and it would answer there.
+clean() { env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LANG="${LANG:-C}" "$@"; }
+# `superagent start` frees its panel port by killing whatever holds it, so the proof never uses one in use.
+PORT="$(node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+[ -n "$PORT" ] || fail "no free port for the panel"
+
+tgz="$(cd "$WORK" && npm pack "$ROOT" --silent 2>/dev/null | tail -n 1)"
+[ -n "$tgz" ] && [ -f "$WORK/$tgz" ] || fail "npm pack made no tarball"
+ok "packed $tgz, $(tar -tzf "$WORK/$tgz" | wc -l | tr -d ' ') files"
+
+clean npm install -g --prefix "$WORK/prefix" "$WORK/$tgz" --no-audit --no-fund >"$WORK/install.log" 2>&1 \
+  || fail "npm install -g of the tarball failed: $(tail -n 5 "$WORK/install.log")"
+BIN="$WORK/prefix/bin/superagent"
+PKG="$WORK/prefix/lib/node_modules/pi-superagent"
+[ -L "$BIN" ] || fail "npm linked no superagent command"
+[ -e "$PKG/node_modules/@earendil-works/pi-coding-agent" ] && fail "the install pulled a copy of pi: it must stay an optional peer"
+ok "installed: superagent -> $(readlink "$BIN"), no copy of pi beside it"
+
+# The command half, through the symlink, against the stand-in herdr: never the live router or its herdr.
+# Its own HOME as well as --state: a script that applied --state late once wrote its stop marker into the
+# live state directory, and a HOME of its own leaves no default for any path to fall back to.
+HERDR="$WORK/herdr"; STATE="$WORK/state"
+mkdir -p "$HERDR" "$STATE" "$WORK/home"
+sa() {
+  env -i HOME="$WORK/home" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LANG="${LANG:-C}" \
+    PI_SUPERAGENT_STATE="$STATE" PI_SUPERAGENT_HERDR="$FAKE" FAKE_HERDR_DIR="$HERDR" FAKE_HERDR_READY="$STATE/ready" \
+    PI_SUPERAGENT_GRACE=1 PI_SUPERAGENT_PANEL_PORT="$PORT" PI_SUPERAGENT_HERDR_WORKSPACE=sa-packed \
+    "$BIN" --session sa-packed --state "$STATE" "$@" 2>&1
+}
+out="$(sa status)"; code=$?
+[ "$code" -eq 1 ] && [ -n "$out" ] || fail "status before start: exit $code with '$out', wanted 1 and a sentence"
+ok "status: exit 1, \"$out\""
+out="$(sa start)"; code=$?
+[ "$code" -eq 0 ] && [[ "$out" == *"running: herdr agent sa-packed"* ]] || fail "start: exit $code with '$out'"
+ok "start: exit 0, \"$out\""
+out="$(sa stop)"; code=$?
+[ "$code" -eq 0 ] && [[ "$out" == stopped* ]] && [ -f "$STATE/stopped" ] || fail "stop: exit $code with '$out', marker in $STATE: $(ls "$STATE")"
+ok "stop: exit 0, \"$out\", its marker in the state directory it was given"
+
+# The extension half: pi loads the installed package through its manifest, as `pi install` would, in the
+# router role. Its own state directory, the stand-in herdr, no panel, no repository: it touches nothing live.
+command -v pi >/dev/null || fail "pi is not on PATH: the extension half has nothing to run in"
+ROUTER="$WORK/router"
+mkdir -p "$ROUTER"
+sleep 120 | clean PI_SUPERAGENT_ROLE=router PI_SUPERAGENT_STATE="$ROUTER" PI_SUPERAGENT_HERDR_BIN="$FAKE" \
+  FAKE_HERDR_DIR="$WORK/herdr-router" PI_SUPERAGENT_HERDR_WORKSPACE=sa-packed \
+  pi -ne --offline --no-session -e "$PKG" --mode rpc >"$WORK/pi.out" 2>&1 &
+for _ in $(seq 1 90); do
+  grep -qE ' judge\.(opened|open_failed)' "$ROUTER/engine.log" 2>/dev/null && break
+  sleep 1
+done
+log="$(cat "$ROUTER/engine.log" 2>/dev/null)"
+[ -f "$ROUTER/ready" ] || fail "the installed extension never became the router: $(tail -n 5 "$WORK/pi.out")"
+grep -q ' router.start ' <<<"$log" || fail "the router wrote no router.start line"
+ok "pi loaded the installed package and its router is ready"
+grep -E 'ERR_MODULE_NOT_FOUND|Cannot find (module|package)' <<<"$log" && fail "a module did not resolve from the install"
+judge="$(grep -E ' judge\.(opened|open_failed)' <<<"$log" | head -n 1)"
+[ -n "$judge" ] || fail "the judge neither opened nor failed in 90 s"
+[[ "$judge" == *judge.opened* ]] || fail "the judge did not open: ${judge:0:300}"
+ok "the judge opened through pi's own SDK: ${judge#* INFO  }"
+echo "check-packed: the tarball works as installed"

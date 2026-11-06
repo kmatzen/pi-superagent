@@ -130,8 +130,11 @@ is running, and what did the judge decide.
 ```sh
 npm install
 npm run check            # typecheck and the full suite: no model calls, no network
+npm run check:packed     # pack, install globally into a temporary prefix, run both halves from there
 scripts/check-formal     # model-check all three specifications (about five minutes; needs a JDK)
 ```
+
+`npm publish` runs the first two first and stops on a failure.
 
 The suite clears every `PI_SUPERAGENT_*` variable before it runs (`test/setup.ts`), so no test can reach a
 live router.
