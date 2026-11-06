@@ -93,8 +93,9 @@ reach GitHub; check `gh auth status`. The error clears on the next good poll.
 `ticket_report`, so whatever it concluded is still in its tab. The worker is still open: a reply on the
 issue steers it, and closing the issue drops the ticket.
 
-**The issue says the worker crashed.** The ticket keeps its mandate, but nothing runs it until the router
-restarts: `superagent restart` gives it a fresh worker, and closing the issue drops it.
+**The issue says the worker crashed.** The router has already started a fresh worker on it, once, and the
+new worker's brief says what happened. If the issue says the fresh worker crashed too, nothing runs the
+ticket until `superagent restart`, and closing the issue drops it.
 
 **The issue says a worker could not start.** The notice quotes the error, usually from the setup script
 (`PI_SUPERAGENT_PREPARE`). The router retries on every poll, without posting again, until the cause is

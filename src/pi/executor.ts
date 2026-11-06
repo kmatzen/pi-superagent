@@ -155,6 +155,8 @@ export class PiExecutor {
         if (ids.length) this.engine.inputsRead(ticket.id, ids)
       } else if (event.type === 'failed') {
         this.file(ticket, assignment.id, 'crash', report('failed', `the worker crashed: ${event.error}`))
+        // A dead session does no work: free its slot now, or every crash costs a worker until the next restart.
+        if (this.live.get(ticket.id) === live) { live.unsubscribe(); this.live.delete(ticket.id); live.session.dispose() }
       }
     })
     this.live.set(ticket.id, live)

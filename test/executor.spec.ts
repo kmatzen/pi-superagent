@@ -207,6 +207,18 @@ describe('PiExecutor', () => {
     expect(f.calls_of('reported'), 'a report the engine refused is not announced').toEqual([])
   })
 
+  it('a crashed worker frees its slot at once, so a crash does not cost a worker until the next restart', async () => {
+    const f = fixture({ maxConcurrent: 1, slotPollMs: 5 })
+    f.executor.start(ticket(), assignment())
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    for (let i = 0; i < 100 && f.sessions.length < 1; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    f.sessions[0]!.emit({ type: 'failed', error: 'its pi left' })
+    await f.executor.idle()
+    expect(f.sessions, 'the queued ticket got the freed slot').toHaveLength(2)
+    expect(f.executor.workers().map(w => w.ticketId)).toEqual(['T2'])
+    expect(f.sessions[0]!.disposed).toBe(1)
+  })
+
   it('reports a session that died mid-run', async () => {
     const f = fixture()
     f.executor.start(ticket(), assignment())

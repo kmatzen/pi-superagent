@@ -69,7 +69,8 @@ const live: Array<{ stop(): void }> = []
 afterEach(() => { for (const r of live.splice(0)) r.stop() })
 
 function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
-                 options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number } = {}) {
+                 options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number;
+                   workerTiming?: { pollMs?: number; livenessMs?: number } } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [] }
   const api: GithubApi = options.githubApi ?? {
@@ -114,7 +115,8 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   }
   const pi = fakePi()
   before?.(dir)
-  const running = createRouterExtension(pi, { config, sdk, ...(herdr ? { herdr } : {}), githubApi: api, now: () => new Date().toISOString() })
+  const running = createRouterExtension(pi, { config, sdk, ...(herdr ? { herdr } : {}), githubApi: api, now: () => new Date().toISOString(),
+    ...(options.workerTiming ? { workerTiming: options.workerTiming } : {}) })
   live.push(running)
   // A deterministic stand-in for the model: the tests bind the wiring, not the judgement.
   const decide = (kind: 'accept' | 'ignore') => {
@@ -298,6 +300,27 @@ describe('the router extension', () => {
     appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"ready","summary":"keys rotated"}\n')
     await until(() => f.receipts('460').includes('keys rotated'))
     expect(f.receipts('460')).toContain('ready: keys rotated')
+  })
+
+  it('a crashed worker gets one fresh worker by itself, told what happened; a second crash waits for a person', async () => {
+    const h = memoryHerdr()
+    const f = fixture(true, undefined, undefined, h.herdr, { workerTiming: { pollMs: 10, livenessMs: 20 } })
+    f.addComment('461', 'octocat', 'rotate the staging keys')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    const starts = () => h.calls.filter(c => c === 'agentStart').length
+    expect(starts()).toBe(1)
+    h.agents.clear()
+    await until(() => starts() === 2 && f.receipts('461').includes('started a fresh worker'))
+    const briefs = readdirSync(join(f.dir, 'workers')).filter(d => d.length === 36)
+      .flatMap(d => readdirSync(join(f.dir, 'workers', d, 'inbox')).map(n => readFileSync(join(f.dir, 'workers', d, 'inbox', n), 'utf8')))
+    expect(briefs.join('\n'), 'the fresh worker hears what happened to the last one')
+      .toContain('A previous worker on this ticket stopped (the worker crashed')
+    h.agents.clear()
+    await until(() => f.receipts('461').includes('Nothing is working on this ticket now'))
+    expect(starts(), 'one fresh worker per ticket, not a loop').toBe(2)
   })
 
   it('after a router restart the herdr worker is taken over, not started a second time', async () => {

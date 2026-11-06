@@ -87,6 +87,19 @@ operator's personal tools (`gh`, for instance), and the operator's identity is n
 The shared-machine brief exists because workers run side by side with each other and with people:
 sequential builds, bounded parallel jobs, and no process left running after the report.
 
+## A crash gets one fresh worker, not a loop
+
+When a worker crashes, the router retries the ticket once on its own, through the engine's retry. The
+crashed attempt ends on record, the comments it never read go to the new worker, and the new worker's brief
+says what happened, because the old one's changes are still in the workspace. A second crash on the same
+ticket waits for a person. Either way, the crashed worker's slot is freed at once.
+
+A lost tab or a killed process is usually bad luck, and one retry rides it out without waking anyone. A
+worker that crashes every time is a bug, and looping on it would open a new tab every few seconds while
+hiding the problem. One retry per ticket per router process is the same bound that startup recovery uses,
+and the lifecycle model already covers it: `Ticket.tla` lets a retry happen at any moment after a failed
+report.
+
 ## A person's stop is final
 
 Once a person stops a ticket, nothing revives it: no new message, no wake-up, no retry. A request made
