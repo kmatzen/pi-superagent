@@ -43,7 +43,9 @@ const ghCall = ({ bin = 'gh', tokenFile }: GhOptions) => (args: string[], stdin?
   child.on('close', code => code === 0
     ? resolve(out)
     : reject(new Error(`gh ${args.slice(0, 2).join(' ')} exited ${code}: ${err.trim().slice(0, 300)}`)))
-  child.stdin.end(stdin ?? '')
+  // gh may exit before reading stdin (for example, on an auth failure). Its exit reports the cause.
+  child.stdin.on('error', (error: NodeJS.ErrnoException) => { if (error.code !== 'EPIPE') reject(error) })
+  child.stdin.end(stdin)
 })
 
 type ReviewRow = { id: number; user?: { login: string } | null; author_association?: string; state: string; submitted_at?: string; body?: string }

@@ -26,7 +26,7 @@ async function boot(withTicket: boolean) {
   const port = 43_000 + Math.floor((dirs.length * 37) % 400)
   const issues: IssueState[] = []
   const comments: IssueComment[] = []
-  const config: RouterConfig = { dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi', bots: new Set(['fleet-*']), githubRepo: 'o/r', tickMs: 600_000, panelPort: port }
+  const config: RouterConfig = { dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi', bots: new Set(['fleet-*']), githubRepo: 'o/r', prepare: 'true', tickMs: 600_000, panelPort: port }
   let reportTool: RegisteredTool | undefined
   const sdk: SdkSurface = {
     createAgentSession: async options => {
@@ -75,7 +75,7 @@ it('the panel links tickets to their GitHub issue and names the source', async (
   const port = 43_900 + Math.floor((dirs.length * 13) % 80)
   const issues: IssueState[] = []
   const config: RouterConfig = { dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi', bots: new Set(['fleet-*']),
-    tickMs: 600_000, panelPort: port, githubRepo: 'o/r' }
+    tickMs: 600_000, panelPort: port, githubRepo: 'o/r', prepare: 'true' }
   const sdk: SdkSurface = {
     createAgentSession: async () => ({ session: { sessionId: 'w', prompt: async () => {}, subscribe: () => () => {}, abort: () => {}, dispose: () => {} } }),
     SessionManager: { inMemory: () => ({}) },
