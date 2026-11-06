@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# herdr stand-in for scripts/superagent: workspaces, tabs and agents are files, so the script's contract is
+# testable without a terminal. JSON results on stdout, JSON errors on stderr with status 1, like herdr.
+DIR="${FAKE_HERDR_DIR:?}"
+mkdir -p "$DIR"
+printf '%s\n' "$*" >> "$DIR/calls"
+fail() { printf '{"error":{"code":"%s","message":"%s"}}\n' "$1" "$2" >&2; exit 1; }
+[ -n "${FAKE_HERDR_DOWN:-}" ] && fail server_unreachable "no herdr server"
+arg() { local want="$1"; shift; while [ $# -gt 0 ]; do [ "$1" = "$want" ] && { echo "$2"; return; }; shift; done; }
+
+case "$1 $2" in
+  "workspace list")
+    printf '{"result":{"workspaces":['
+    n=0; [ -f "$DIR/workspaces" ] && while read -r label; do n=$((n+1)); [ $n -gt 1 ] && printf ','; printf '{"workspace_id":"w%s","label":"%s"}' "$n" "$label"; done < "$DIR/workspaces"
+    printf ']}}\n' ;;
+  "workspace create")
+    arg --label "$@" >> "$DIR/workspaces"
+    n=$(wc -l < "$DIR/workspaces" | tr -d ' ')
+    printf '{"result":{"type":"workspace_created","workspace":{"workspace_id":"w%s"},"tab":{"tab_id":"w%s:t0"},"root_pane":{"pane_id":"w%s:p0"}}}\n' "$n" "$n" "$n" ;;
+  "tab create")
+    n=$(( $(cat "$DIR/tabs" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$DIR/tabs"
+    printf '%s\n' "$*" > "$DIR/tab.$n.args"
+    printf '{"result":{"type":"tab_created","tab":{"tab_id":"w1:t%s"},"root_pane":{"pane_id":"w1:p%s"}}}\n' "$n" "$n" ;;
+  "tab rename"|"pane run") echo '{"result":{"type":"ok"}}' ;;
+  "tab close")
+    pane="w1:p${3#w1:t}"
+    for f in "$DIR"/agent.*; do [ -f "$f" ] && [ "$(cat "$f")" = "$pane" ] && rm -f "$f"; done
+    echo '{"result":{"type":"ok"}}' ;;
+  "agent start")
+    name="$3"; pane="$(arg --pane "$@")"
+    # FAKE_HERDR_BUSY=n: the tab's shell is still starting for the first n attempts.
+    busy=$(cat "$DIR/busy" 2>/dev/null || echo 0)
+    if [ "$busy" -lt "${FAKE_HERDR_BUSY:-0}" ]; then echo $((busy+1)) > "$DIR/busy"; fail agent_pane_busy "agent target pane $pane is not an available shell"; fi
+    [ -f "$DIR/agent.$name" ] && fail agent_name_in_use "agent $name already exists"
+    printf '%s' "$pane" > "$DIR/agent.$name"
+    printf '%s\n' "$*" > "$DIR/start.$name.args"
+    [ -n "${FAKE_HERDR_READY:-}" ] && : > "$FAKE_HERDR_READY"
+    printf '{"result":{"type":"agent_started","agent":{"name":"%s","pane_id":"%s","agent":"pi","agent_status":"idle"},"argv":[]}}\n' "$name" "$pane" ;;
+  "agent get")
+    [ -f "$DIR/agent.$3" ] || fail agent_not_found "agent target $3 not found"
+    printf '{"result":{"type":"agent_info","agent":{"name":"%s","pane_id":"%s","agent":"pi","agent_status":"idle"}}}\n' "$3" "$(cat "$DIR/agent.$3")" ;;
+  "agent send-keys")
+    [ -f "$DIR/agent.$3" ] || fail agent_not_found "agent target $3 not found"
+    # In pi a second ctrl+c exits, unless the test says this pi is stuck.
+    case " $* " in *" ctrl+c ctrl+c "*) [ -z "${FAKE_HERDR_STUCK:-}" ] && rm -f "$DIR/agent.$3" ;; esac
+    echo '{"result":{"type":"ok"}}' ;;
+  *) fail bad_request "unexpected: $*" ;;
+esac

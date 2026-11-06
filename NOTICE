@@ -1,0 +1,20 @@
+# NOTICE — vendored code
+
+`src/core/**` and `test/core-engine.spec.ts` are vendored from:
+
+- project: **dsh-superagent-prototype** (DeepSeek research prototype)
+- repository: https://github.com/deepseek-ai/dsh-superagent-prototype
+- license: MIT (full text in `vendor/dsh-superagent/LICENSE`)
+- commit: `8c32a9dc5d72c033816c6a8110b37f40cf94fba4` (2026-10-31, "feat: add the dsh-superagent research prototype")
+
+`vendor/dsh-superagent/docs/**` carries their nine design documents, kept because they are the
+specification of the state machine in `src/core` and the reason each rule exists. When a rule in
+`src/core` looks arbitrary, the answer is usually in `001-domain.md` (concepts and rejected concepts),
+`002-authorization.md` (the gate and the admission table), or `003-execution.md` (reports and attention).
+
+Their code is research code and says so. We vendor the domain, not the deployment: their executor
+(`src/executor/dsh.ts`), their Feishu and GitHub sources, and their panel are replaced here by pi
+sessions, our own sources, and the fleet board.
+
+See `ADAPTATION.md` for every deviation from the vendored files, and the upstream SHA each one was
+measured against.

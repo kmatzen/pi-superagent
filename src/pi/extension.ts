@@ -1,0 +1,551 @@
+/** The package entry point: in a router session this extension is the supervisor; elsewhere it is inert. */
+import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy } from '../core/index.ts'
+import { SqliteRepositories } from './store.ts'
+import { SessionInbox } from './sink-session-inbox.ts'
+import { GithubSource, type GithubApi } from './source-github.ts'
+import { ghApi } from './gh-api.ts'
+import { CommentOutbox } from './outbox.ts'
+import { PiExecutor } from './executor.ts'
+import { renderCandidateFor, SessionAssessor, type SessionPilot } from './assessor.ts'
+import { openJudge, type Judge } from './judge.ts'
+import { openLog } from './log.ts'
+import { openWorkerView } from './worker-view.ts'
+import { herdrCli, type Herdr } from './herdr.ts'
+import { HerdrWorkers } from './herdr-workers.ts'
+import { reportTool, type Reporter } from './report-tool.ts'
+import { workerRole } from './worker-role.ts'
+import { createPanelServer } from './server.ts'
+import { guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
+import { briefFor, loadSdk, policyOf, type RouterConfig, type SdkSurface } from './router.ts'
+
+export interface PiLike {
+  registerTool(tool: RegisteredTool): void
+  sendUserMessage(text: string, options?: { deliverAs?: 'text' | 'prompt' }): void
+  on(event: string, handler: (payload?: unknown) => void): () => void
+}
+
+export interface RegisteredTool {
+  name: string
+  label: string
+  description: string
+  parameters: Record<string, unknown>
+  // pi calls `definition.execute(toolCallId, params, signal, onUpdate, ctx)`. A tool registered with any
+  // other key name registers cleanly, shows up in the model's tool list, and fails every call with
+  // `definition.execute is not a function` — which is how the router judged nothing for 188 evals.
+  execute(id: string, args: Record<string, unknown>): Promise<{ content: Array<{ type: 'text'; text: string }> }> | { content: Array<{ type: 'text'; text: string }> }
+}
+
+export const DECIDE_SCHEMA = {
+  type: 'object',
+  properties: {
+    evalId: { type: 'string' },
+    kind: { type: 'string', enum: ['accept', 'ignore', 'stop', 'unavailable'] },
+    title: { type: 'string' }, scope: { type: 'string' }, reason: { type: 'string' },
+    acknowledgement: { type: 'string' }, rules: { type: 'array', items: { type: 'string' } },
+    name: { type: 'string' }, note: { type: 'string' }, ticketId: { type: 'string' },
+  },
+  required: ['evalId', 'kind', 'reason'],
+}
+
+const STR = { type: 'object', properties: {}, additionalProperties: false }
+
+export interface ExtensionDeps {
+  config: RouterConfig
+  sdk?: SdkSurface
+  herdr?: Herdr
+  now?: () => string
+  githubApi?: GithubApi
+}
+
+export interface RunningRouter {
+  tick(): Promise<void>
+  stop(): void
+  workers(): ReturnType<PiExecutor['workers']>
+  tools: RegisteredTool[]
+  engine: Engine
+  assessor: SessionAssessor
+  setPaused(v: boolean): void
+  isPaused(): boolean
+  /** What the panel's health line reads; the script reads the file the extension writes. */
+  load(): { running: number; queued: number; maxWorkers: number }
+}
+
+const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] })
+
+export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningRouter {
+  const cfg = deps.config
+  const repos = new SqliteRepositories(`${cfg.dataDir}/tickets.db`)
+  const log = openLog(cfg.dataDir)
+  log.line('info', 'router.start', {
+    dataDir: cfg.dataDir, panelPort: cfg.panelPort ?? 0,
+    sdkPath: cfg.sdkPath ?? 'package-name', githubRepo: cfg.githubRepo ?? '',
+  })
+  const issueOf = (m: OutboundMessage): string | undefined =>
+    m.channel.source === 'github' ? (m.channel.address as { issue?: string } | undefined)?.issue : undefined
+  const outbox = new CommentOutbox({
+    accepts: m => m.channel.source === 'github' && Boolean(githubApi && issueOf(m)),
+    post: (m, body) => {
+      const issue = issueOf(m)
+      if (issue && githubApi) {
+        return githubApi.postComment(Number(issue), body).catch((error: unknown) => {
+          log.line('warn', 'outbox.github_failed', { issue, error: String(error).slice(0, 200) })
+          throw error
+        })
+      }
+    },
+  }, repos.kv)
+  const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({ repo: cfg.githubRepo }) : undefined)
+  const github = githubApi
+    ? new GithubSource(githubApi, { repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots }, repos.kv)
+    : undefined
+  github?.bootstrap()
+  let paused = false
+
+  // Judgement prompts go to a headless session. Sending them into this session is what made the operator's
+  // pane look wedged: one model turn per candidate, every keystroke queued behind it.
+  let judge: Judge | undefined
+  let judgeFailed = false
+  const judgeQueue: string[] = []
+  // Opening a session takes 20-45 seconds measured, and every eval that arrives in that window used to
+  // start its own: the log showed eight judges open at once and the panel unable to answer a request.
+  let judgeOpening: Promise<void> | undefined
+  const openTheJudge = (): Promise<void> => judgeOpening ??= doOpenJudge()
+  const doOpenJudge = async (): Promise<void> => {
+    if (judge) return
+    try {
+      const sdk = deps.sdk ?? await loadSdk(cfg)
+      judge = await openJudge(sdk, {
+        cwd: cfg.dataDir, tools: [decideTool], ...(cfg.judgeThinking ? { thinking: cfg.judgeThinking } : {}), log,
+        // A turn that ended without ticket_decide holds the one in-flight slot until the eval's deadline;
+        // free it now, and the engine's expiry requeues the eval.
+        onSettled: () => {
+          const unanswered = assessor.inFlightEval
+          if (!unanswered) return
+          log.line('warn', 'judge.settled_without_decision', { eval: unanswered })
+          assessor.release(unanswered)
+        },
+      })
+      for (const body of judgeQueue.splice(0)) judge.prompt(body)
+    } catch (error) {
+      judgeFailed = true
+      log.line('error', 'judge.open_failed', { error: String(error).slice(0, 220), queued: judgeQueue.length })
+      for (const body of judgeQueue.splice(0)) pi.sendUserMessage(body, { deliverAs: 'text' })
+    }
+  }
+  const pilot: SessionPilot = {
+    deliver: body => {
+      const evalId = /Assess eval (\S+)/.exec(body)?.[1] ?? ''
+      if (judge) {
+        log.line('info', 'eval.deliver', { eval: evalId, bytes: body.length, target: 'judge' })
+        judge.prompt(body)
+        return
+      }
+      // Never park a judgement in the operator's pane while the judge is merely starting: it is answered
+      // twice, and the pane is the thing that must stay usable. The pane is the fallback only when the
+      // judge cannot open at all.
+      judgeQueue.push(body)
+      if (judgeFailed) {
+        log.line('warn', 'eval.deliver', { eval: evalId, bytes: body.length, target: 'pane-fallback' })
+        pi.sendUserMessage(body, { deliverAs: 'text' })
+        return
+      }
+      log.line('info', 'eval.deliver', { eval: evalId, bytes: body.length, target: 'judge-starting' })
+      void openTheJudge()
+    },
+  }
+  let engine!: Engine
+  let executorRef: PiExecutor | undefined
+  const assessor: SessionAssessor = new SessionAssessor(() => engine, pilot, { render: renderCandidateFor(cfg.githubRepo) })
+  // The core tells its executor to start, deliver to and stop workers from inside its commands. This was a
+  // placeholder, so an ended ticket kept its worker and its slot, and a follow-up never reached the worker.
+  // Each call runs once the command has finished: a worker must not act on a write that could still roll back.
+  const afterCommit = (what: string, run: () => void): void => {
+    setImmediate(() => {
+      try { run() } catch (error) { log.line('error', 'executor.port_failed', { what, error: String(error).slice(0, 200) }) }
+    })
+  }
+  const policy = (): Policy => ({ ...policyOf(cfg), ...(paused ? { paused: true } : {}) })
+
+  engine = new Engine({
+    repo: repos,
+    scope: { scope: () => ({ listened: true, observed: false }) },
+    policy,
+    assessor,
+    executor: {
+      start: (ticket, assignment) => afterCommit('start', () => executorRef?.start(repos.tickets.get(ticket.id) ?? ticket, assignment)),
+      deliver: (ticket, assignment) => afterCommit('deliver', () => {
+        const fresh = repos.tickets.get(ticket.id)
+        if (fresh) executorRef?.deliver(fresh, assignment)
+      }),
+      stop: (ticket, assignment, reason) => afterCommit('stop', () => executorRef?.stop(ticket, assignment, reason)),
+    },
+    outbox,
+    now: deps.now ?? (() => new Date().toISOString()),
+  })
+
+  // A worker's last word goes back to the thread it came from, wherever the worker runs.
+  const receipts = (ticket: { id: string; channels: Array<{ thread: string }> }, send: Reporter): Reporter => (state, summary, question) => {
+    send(state, summary, question)
+    const channel = ticket.channels[0]
+    if (channel && ['ready', 'failed', 'cancelled'].includes(state)) {
+      engine.reply({ channel, text: `${channel.thread} ${state}: ${summary}`, ticketId: ticket.id } as never)
+    }
+  }
+  const herdrWorkers = cfg.workers === 'herdr'
+    ? new HerdrWorkers({ herdr: deps.herdr ?? herdrCli(cfg.herdrBin), stateDir: cfg.dataDir, log })
+    : undefined
+
+  const executor = new PiExecutor(engine, {
+    launch: async ({ ticket, report: send }) => {
+      const channel = ticket.channels[0]
+      const report = receipts(ticket, send)
+      // A ticket with no workspace is the ticket's failure, with the command's own output as the summary.
+      const workspace = prepareWorkspace({
+        root: cfg.worktreeRoot, ticketId: ticket.id, stateDir: cfg.dataDir,
+        ...(cfg.prepare ? { prepare: cfg.prepare } : {}),
+        ...(cfg.blockedCommands ? { blockedCommands: cfg.blockedCommands } : {}),
+      })
+      if (herdrWorkers) {
+        return herdrWorkers.launch({
+          ticket, thread: channel?.thread ?? ticket.id, workspace: workspace.dir, report,
+          env: {
+            ...(cfg.blockedCommands?.length ? { PI_SUPERAGENT_BLOCKED: cfg.blockedCommands.join(',') } : {}),
+            ...(cfg.allowDelegation ? { PI_SUPERAGENT_ALLOW_DELEGATION: '1' } : {}),
+          },
+        })
+      }
+      const sdk = deps.sdk ?? await loadSdk(cfg)
+      // The guard rides in as an inline extension because pi enforces policy at its tool_call hook; the
+      // `toolGuard` option this used to pass does not exist, so pi ignored it and workers had every tool.
+      const resourceLoader = new sdk.DefaultResourceLoader({
+        cwd: workspace.dir, agentDir: sdk.getAgentDir(),
+        extensionFactories: [guardExtension({
+          blocked: cfg.blockedCommands ?? [], workspace: workspace.dir, allowDelegation: cfg.allowDelegation ?? false,
+        })],
+      })
+      await resourceLoader.reload()
+      const { session } = await sdk.createAgentSession({
+        cwd: workspace.dir,
+        sessionManager: sdk.SessionManager.inMemory(workspace.dir),
+        customTools: [reportTool(report)],
+        resourceLoader,
+      })
+      const view = openWorkerView({ dir: join(cfg.dataDir, 'workers'), log }, {
+        ticketId: ticket.id, thread: channel?.thread ?? ticket.id, title: ticket.title, sessionId: session.sessionId, workspace: workspace.dir,
+      })
+      const unwatch = session.subscribe(event => view.event(event as { type: string } & Record<string, unknown>))
+      log.line('info', 'worker.opened', { ticket: ticket.id, session: session.sessionId, workspace: workspace.dir, watch: view.path })
+      return {
+        sessionId: session.sessionId,
+        workspace: workspace.dir,
+        watch: view.path,
+        // pi refuses a prompt mid-turn unless it is told to steer or queue it.
+        prompt: (body: string, mode: 'steer' | 'followUp') => {
+          session.prompt(body, { streamingBehavior: mode }).catch((error: unknown) =>
+            log.line('error', 'worker.prompt_failed', { ticket: ticket.id, mode, error: String(error).slice(0, 200) }))
+        },
+        subscribe: (listener) => session.subscribe(event => {
+          if (event.type === 'agent_start') listener({ type: 'turnStarted' })
+          else if (event.type === 'agent_settled') listener({ type: 'settled' })
+          else listener({ type: 'activity' })
+        }),
+        abort: () => session.abort(),
+        dispose: () => { unwatch(); view.close('stopped'); session.dispose() },
+      }
+    },
+  }, {
+    worktreeFor: ticket => `${cfg.worktreeRoot}/${ticket.id}`,
+    briefFor: ticket => {
+      const brief = briefFor(ticket, `${cfg.worktreeRoot}/${ticket.id}`)
+      const issue = ticket.channels[0]?.source === 'github' ? (ticket.channels[0].address as { issue?: string }).issue : undefined
+      if (!issue || !cfg.githubRepo) return brief
+      // A comment the worker posts itself carries no reply footer, so the router would read it as the
+      // operator asking again on this thread.
+      return `${brief}\nThe request is GitHub issue ${cfg.githubRepo}#${issue}: read it with \`gh issue view ${issue} --repo ${cfg.githubRepo} --comments\`. `
+        + 'Do not comment on the issue yourself; ticket_report is how your result reaches it.'
+    },
+    renderInput: input => input.kind === 'trigger'
+      ? (repos.triggers.get(input.triggerId) ? `${repos.triggers.get(input.triggerId)!.actor.id}: ${repos.triggers.get(input.triggerId)!.text}` : undefined)
+      // A text Input is the operator's own words: rendering it as `[text]` would deliver the literal
+      // string to the worker and mark the answer read.
+      : input.kind === 'text' ? input.text : `[${input.kind}]`,
+    inbox: new SessionInbox(`${cfg.dataDir}/inbox`),
+    ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
+  })
+  executorRef = executor
+
+  const decideTool: RegisteredTool = {
+    name: 'ticket_decide', label: 'Judge a candidate',
+    description: 'Answer one eval the engine delivered: accept (title, scope, reason, acknowledgement), ignore, stop (ticketId), or unavailable.',
+    parameters: DECIDE_SCHEMA,
+    execute: (_id, args) => {
+      const a = args as unknown as { evalId: string; kind: AssessmentOutcome['kind'] } & Record<string, string>
+      // One open ticket per thread: a message on a thread with an open ticket belongs to that ticket's worker.
+      // The judge accepted a second ticket on TASK-44 with the first one in its prompt.
+      const thread = assessor.threadOf(a.evalId)
+      const owner = a.kind === 'accept' && thread
+        ? repos.tickets.open().find(t => t.channels.some(c => `${c.source}:${c.thread}` === thread))
+        : undefined
+      if (owner) {
+        log.line('warn', 'eval.accept_overruled', { eval: a.evalId, thread, ticket: owner.id })
+        a.kind = 'ignore' as AssessmentOutcome['kind']
+        a.reason = `${thread} already has open ticket ${owner.id}; its worker gets this thread's messages`
+      }
+      log.line('info', 'eval.decided', { eval: a.evalId, kind: a.kind, reason: (a.reason ?? '').slice(0, 300) })
+      assessor.decide(a.evalId, a as unknown as AssessmentOutcome)
+      return text(`decided ${a.kind}`)
+    },
+  }
+  void openTheJudge()
+
+  // Core asks the assessor only when an eval starts, and never expires one whose candidate was not
+  // delivered: an eval in flight when the last process died waits forever unless this one asks again.
+  const now = new Date().toISOString()
+  let reasked = 0
+  for (const thread of repos.threads.active()) {
+    const evaluation = thread.evaluating
+    if (!evaluation || (evaluation.delivered && evaluation.deadline <= now)) continue
+    const candidate = engine.candidate(evaluation.primary ?? evaluation.triggerIds[0] ?? '')
+    if (candidate) { assessor.request(candidate); reasked += 1 }
+  }
+  log.line('info', 'evals.reasked', { count: reasked })
+
+  const tools: RegisteredTool[] = [
+    decideTool,
+    {
+      name: 'tickets_open', label: 'List open tickets',
+      description: 'Every open ticket with its state and what it waits for.',
+      parameters: STR,
+      execute: () => text(repos.tickets.open().map(t => ({
+        id: t.id, title: t.title, thread: t.channels[0]?.thread,
+        assignment: t.assignments.at(-1)?.state ?? 'queued',
+        waiting: t.attention ? (t.attention as { question?: string }).question ?? 'a person' : null,
+      }))),
+    },
+    {
+      name: 'ticket_show', label: 'Show one ticket',
+      description: 'One ticket as history: its triggers, decision, assignments and reports.',
+      parameters: { type: 'object', properties: { ticketId: { type: 'string' } }, required: ['ticketId'] },
+      execute: (_id, args) => {
+        const t = repos.tickets.get((args as unknown as { ticketId: string }).ticketId)
+        return text(t ?? 'no such ticket')
+      },
+    },
+    {
+      name: 'engine_tick', label: 'Run one pass now',
+      description: 'Poll GitHub, judge what is due, start queued work, and post receipts.',
+      parameters: STR,
+      execute: async () => { await tick(); return text(paused ? 'paused: tick skipped' : 'tick done') },
+    },
+    {
+      name: 'engine_pause', label: 'Pause or resume processing',
+      description: 'Pause stops new work; running workers keep going. Resume with false.',
+      parameters: { type: 'object', properties: { paused: { type: 'boolean' } }, required: ['paused'] },
+      execute: (_id, args) => { paused = Boolean((args as unknown as { paused: boolean }).paused); return text(`paused=${paused}`) },
+    },
+  ]
+  for (const tool of tools) pi.registerTool(tool)
+
+  let sweeps = 0
+  process.on('uncaughtException', (error: unknown) => log.line('error', 'uncaught', { error: String(error).slice(0, 300) }))
+  process.on('unhandledRejection', (error: unknown) => log.line('error', 'unhandled_rejection', { error: String(error).slice(0, 300) }))
+
+  async function tick(): Promise<void> {
+    if (paused) return
+    await recovered
+    const started = Date.now()
+    for (const trigger of await (github?.poll() ?? Promise.resolve([]))) engine.receive(trigger)
+    // One session answers every judgement, so the number in flight is the load on it. Past the cap the
+    // sweep still runs occasionally, and new evals wait their turn instead of flooding the session.
+    // evaluateDue is the only thing that expires a stuck eval, so gating it is how 54 stale judgements
+    // sat in flight forever. Concurrency is bounded where it belongs: the assessor asks one at a time.
+    sweeps += 1
+    engine.evaluateDue()
+    log.line('info', 'tick', {
+      n: sweeps, inflight: repos.threads.active().filter(t => t.evaluating).length,
+      running: executor.workers().length, open: repos.tickets.open().length, ms: Date.now() - started,
+    })
+    for (const ticket of repos.tickets.open()) {
+      const assignment = ticket.assignments.at(-1)
+      if (assignment && assignment.state === 'pending') executor.start(ticket, assignment)
+    }
+    // A worker that stops emitting events is not finished: without this the slot is held and the ticket
+    // reads as running until the router restarts.
+    for (const quiet of executor.quiet(cfg.workerQuietMinutes ?? 15)) {
+      engine.report(quiet.ticketId, {
+        state: 'blocked',
+        summary: `the worker sent no event for ${Math.round(quiet.quietSeconds / 60)} minutes in ${quiet.workspace}`,
+        question: 'steer it, stop it, or accept the work it has done',
+      } as never)
+    }
+    // Replies go out before the wait on worker capacity: with every slot busy, idle() resolves only when a
+    // worker ends, and an acknowledgement must not wait an hour behind it.
+    outbox.flush()
+    await executor.idle()
+    outbox.flush()
+  }
+
+  // An assignment marked running with no session in this process is a ghost: the worker died with the
+  // previous router, and 'running' would block the queue forever.
+  const recover = async (ticket: ReturnType<typeof repos.tickets.open>[number]): Promise<void> => {
+    const assignment = ticket.assignments.at(-1)
+    if (assignment?.state !== 'running') return
+    try {
+      // A herdr worker runs in its own process and outlives the router: take it over instead of starting another.
+      const survivor = herdrWorkers ? await herdrWorkers.find(ticket.id) : undefined
+      if (survivor && herdrWorkers) {
+        executor.adopt(ticket, assignment, send => herdrWorkers.attach(survivor, receipts(ticket, send)))
+        log.line('info', 'worker.adopted', { ticket: ticket.id, agent: survivor.agent, tab: survivor.tabId })
+        return
+      }
+      engine.assignmentInterrupted(ticket.id, assignment.id)
+      // The engine keeps an assignment whose last report is settled, assuming a live session holds it;
+      // after a restart nothing holds it, so the router says so on the ticket instead of pretending.
+      const kept = repos.tickets.open().find(item => item.id === ticket.id)?.assignments.at(-1)
+      if (kept?.state === 'running' && !executor.workers().some(w => w.ticketId === ticket.id)) {
+        engine.report(ticket.id, {
+          state: 'failed', summary: 'the worker did not survive the router restart; nothing is running', question: null,
+        } as never)
+        // Once per process, from the record: the mandate stands, so the work gets a fresh worker. A relaunch
+        // loop is bounded by this loop running only at startup.
+        executor.start(ticket, kept)
+      }
+    } catch (error) {
+      log.line('error', 'recover.failed', { ticket: ticket.id, error: String(error).slice(0, 200) })
+      console.error('superagent: recovery of', ticket.id, 'failed:', String(error).slice(0, 180))
+    }
+  }
+  const recovered = (async () => {
+    for (const ticket of repos.tickets.open()) await recover(ticket)
+    if (!herdrWorkers) return
+    const adopted = new Set(executor.workers().map(w => w.sessionId))
+    for (const r of await herdrWorkers.retireOrphans(adopted)) log.line('info', 'worker.retired', { ticket: r.ticketId, agent: r.agent, tab: r.tabId })
+    for (const tab of await herdrWorkers.closeStaleTabs(cfg.herdrWorkspace ?? 'superagent')) log.line('info', 'worker.stale_tab_closed', { tab })
+  })()
+
+  const timer = setInterval(() => { void tick() }, cfg.tickMs ?? 30_000)
+  const off = pi.on('agent_settled', () => { void tick() })
+
+  const panel = cfg.panelPort
+    ? createPanelServer({
+      repos, engine, assessor, config: cfg,
+      load: () => panelLoad(), isPaused: () => paused, workers: () => executor.workers(),
+      log: (level, event, fields) => log.line(level, event, fields), setPaused: (v: boolean) => { paused = v },
+      now: deps.now ?? (() => new Date().toISOString()),
+    })
+    : undefined
+  // A panel that cannot bind must not take the supervisor down: pi treats any uncaught exception as fatal
+  // (`pi exiting due to uncaughtException: listen EADDRINUSE ... :8788`), so the page that shows the
+  // engine's health was killing the engine. Bind the requested port, fall back to an ephemeral one, and
+  // record which.
+  if (panel) {
+    let fallback = false
+    panel.server.on('error', (error: Error) => {
+      writeFileSync(join(cfg.dataDir, 'panel-error.txt'), `${new Date().toISOString()} ${error.message}\n`)
+      log.line('error', 'panel.error', { port: (panel.server.address() as { port?: number } | null)?.port ?? cfg.panelPort, error: error.message })
+      if (fallback) return
+      fallback = true
+      panel.server.listen(0, '127.0.0.1')
+    })
+    panel.server.on('listening', () => log.line('info', 'panel.bound', { port: (panel.server.address() as { port?: number } | null)?.port ?? cfg.panelPort }))
+    panel.server.listen(cfg.panelPort, '127.0.0.1')
+  }
+
+  const panelLoad = () => {
+    const open = repos.tickets.open()
+    return {
+      // A session in this process is the only thing that can be running; an assignment left 'running' by a
+      // dead router is not work, and counting it is how the panel hides a stall.
+      running: executor.workers().length,
+      queued: open.filter(t => { const a = t.assignments.at(-1); return !a || a.state === 'pending' }).length,
+      maxWorkers: cfg.maxConcurrent ?? 4,
+    }
+  }
+
+  return {
+    tick, tools, engine, assessor, workers: () => executor.workers(),
+    setPaused: (v: boolean) => { paused = v },
+    isPaused: () => paused,
+    load: panelLoad,
+    stop: () => { clearInterval(timer); off(); panel?.server.close(); executor.detach() },
+  }
+}
+
+
+/** A session is the supervisor only when the start script says so; everyone else loads a no-op. */
+export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
+  if (env.PI_SUPERAGENT_ROLE !== 'router') return null
+  const dataDir = env.PI_SUPERAGENT_STATE
+  if (!dataDir) throw new Error('PI_SUPERAGENT_STATE is required for role=router')
+  return {
+    dataDir, worktreeRoot: env.PI_SUPERAGENT_WORKTREES ?? `${dataDir}/work`,
+    self: env.PI_SUPERAGENT_SELF ?? 'pi-superagent',
+    bots: new Set((env.PI_SUPERAGENT_BOTS ?? 'pi-*,fleet-*').split(',').map(s => s.trim()).filter(Boolean)),
+    ...(env.PI_SUPERAGENT_MAX_WORKERS ? { maxConcurrent: Number(env.PI_SUPERAGENT_MAX_WORKERS) } : {}),
+    ...(env.PI_SUPERAGENT_TICK_MS ? { tickMs: Number(env.PI_SUPERAGENT_TICK_MS) } : {}),
+    ...(env.PI_SUPERAGENT_PANEL_PORT ? { panelPort: Number(env.PI_SUPERAGENT_PANEL_PORT) } : {}),
+    ...(env.PI_SUPERAGENT_PREPARE ? { prepare: env.PI_SUPERAGENT_PREPARE } : {}),
+    ...(env.PI_SUPERAGENT_BLOCKED ? { blockedCommands: env.PI_SUPERAGENT_BLOCKED.split(',').map(s => s.trim()).filter(Boolean) } : {}),
+    ...(env.PI_SUPERAGENT_ALLOW_DELEGATION === '1' ? { allowDelegation: true } : {}),
+    ...(env.PI_SUPERAGENT_SDK_PATH ? { sdkPath: env.PI_SUPERAGENT_SDK_PATH } : {}),
+    // Workers are real pi sessions in herdr tabs unless the deployment says otherwise.
+    workers: 'herdr',
+    ...(env.PI_SUPERAGENT_HERDR_BIN ? { herdrBin: env.PI_SUPERAGENT_HERDR_BIN } : {}),
+    ...(env.PI_SUPERAGENT_JUDGE_THINKING ? { judgeThinking: env.PI_SUPERAGENT_JUDGE_THINKING } : {}),
+    // No default login for `self`: the operator and the agent share one, so the reply footer is the agent's
+    // identity, and naming the shared login here silently drops every comment the operator writes.
+    ...(env.PI_SUPERAGENT_GITHUB_REPO ? { githubRepo: env.PI_SUPERAGENT_GITHUB_REPO } : {}),
+    ...(env.PI_SUPERAGENT_GITHUB_SELF ? { githubSelf: env.PI_SUPERAGENT_GITHUB_SELF } : {}),
+  }
+}
+
+const ACTIVE = Symbol.for('pi-superagent.router')
+type HostWithRouter = typeof globalThis & { [ACTIVE]?: boolean }
+
+/** Why this load must not start a router, or null when it is the appointed one. */
+export function activationRefusal(env: NodeJS.ProcessEnv, argv: readonly string[], routerActive: boolean): string | null {
+  // The judge and every worker are sessions in this process: they load this extension and see this
+  // environment, and each one used to boot another router that started more sessions.
+  if (routerActive) return 'a router is already running in this process'
+  // A pi that a worker runs from its shell inherits the environment, but not the start script's command line.
+  const appointed = env.PI_SUPERAGENT_SESSION_ID
+  if (appointed && !argv.includes(appointed)) return 'not the process the start script launched'
+  return null
+}
+
+export default function superagent(pi: PiLike): void {
+  if (workerRole(pi as never, process.env)) return
+  const config = configFrom(process.env)
+  if (!config) return
+  const host = globalThis as HostWithRouter
+  const refusal = activationRefusal(process.env, process.argv, host[ACTIVE] === true)
+  if (refusal) {
+    openLog(config.dataDir).line('info', 'router.inert', { reason: refusal, pid: process.pid })
+    return
+  }
+  host[ACTIVE] = true
+  let running: RunningRouter
+  try {
+    running = createRouterExtension(pi, { config })
+  } catch (error) {
+    host[ACTIVE] = false
+    throw error
+  }
+  const problems = setupProblems({ root: config.worktreeRoot, stateDir: config.dataDir })
+  writeFileSync(`${config.dataDir}/setup.json`, JSON.stringify({ problem: problems[0] ?? null, problems, at: new Date().toISOString() }))
+  writeFileSync(`${config.dataDir}/health.json`, JSON.stringify({ runtime: { state: 'ready', at: new Date().toISOString() } }))
+  // `ready` is what `superagent start` waits for: a session that booted is not the same as a supervisor
+  // that is listening, and the health check must not report 0 between the two.
+  writeFileSync(`${config.dataDir}/ready`, JSON.stringify({ at: new Date().toISOString(), githubRepo: config.githubRepo ?? null }))
+  // pi emits this before /reload loads the new copy, so the reloaded router may claim the process again.
+  pi.on('session_shutdown', () => {
+    running.stop()
+    host[ACTIVE] = false
+    rmSync(`${config.dataDir}/ready`, { force: true })
+  })
+}
+
+export type { RouterConfig }
+export { type SessionPilot, type Candidate, type SdkSurface }
