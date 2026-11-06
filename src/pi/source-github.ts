@@ -7,6 +7,8 @@ import type { Trigger } from '../core/index.ts'
 export interface IssueComment {
   issue: number
   author: string
+  /** GitHub's author_association (OWNER, MEMBER, COLLABORATOR, NONE...): the router's scope reads write access from it. */
+  association: string
   at: string
   body: string
 }
@@ -17,6 +19,7 @@ export interface IssueState {
   body?: string
   labels: string[]
   author: string
+  association: string
   createdAt: string
   updatedAt: string
 }
@@ -37,6 +40,7 @@ export interface PrReview {
   pr: number
   id: number
   author: string
+  association: string
   state: string
   at: string
   body: string
@@ -142,7 +146,7 @@ export class GithubSource {
           at: issue.createdAt,
           text: `${issue.title}${issue.body ? `\n\n${issue.body.slice(0, 4000)}` : ''}`,
           channel: { source: 'github', thread: key, address: { issue: String(issue.issue) } },
-          meta: { labels: issue.labels, via: 'issue' },
+          meta: { labels: issue.labels, via: 'issue', association: issue.association, author: issue.author },
         })
       }
     }
@@ -176,7 +180,7 @@ export class GithubSource {
         at: r.at,
         text: `PR #${r.pr}: ${r.author} ${state}${r.body ? `\n\n${r.body.slice(0, 4000)}` : ''}`,
         channel: { source: 'github', thread: `#${r.pr}`, address: { issue: String(r.pr) } },
-        meta: { via: 'review', state: r.state },
+        meta: { via: 'review', state: r.state, association: r.association, author: r.author },
       })
     }
     return out
@@ -197,7 +201,8 @@ export class GithubSource {
       at: c.at,
       text: c.body,
       channel: { source: 'github', thread: `#${c.issue}`, address: { issue: String(c.issue) } },
-      meta: {},
+      // The scope sees a trigger's source and meta only, so who wrote it travels in meta as well.
+      meta: { association: c.association, author: c.author },
     }
   }
 }

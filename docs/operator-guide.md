@@ -20,6 +20,10 @@ The judge accepts a concrete action someone asks the agent to take, even one tha
 It ignores chatter, notes addressed to other people, and new requests on a thread that already has an
 open ticket. An ignore posts nothing on the issue; the reason is in the engine log.
 
+- **Who can ask.** People with write access to the repository: its owner, members of the organization
+  that owns it, and collaborators. Anyone else's issues, comments and reviews are dropped before the judge
+  sees them, and the panel counts them as filtered. To hear someone else, add them as a collaborator. To
+  hear fewer people, list the logins in `PI_SUPERAGENT_ALLOWED`; the list then replaces the rule.
 - **Follow-ups.** Comment on the same issue. While its ticket is open, your comments go straight to its
   worker.
 - **Pull requests.** A comment on a pull request's conversation reaches the agent like any other. A
@@ -83,6 +87,10 @@ long build, let it be; the flag clears when the worker reports.
 `grep eval.decided ~/.pi/superagent/engine.log | tail`: `kind=ignore` comes with the judge's reason, and a
 clearer comment or a reopened issue asks again. A `judge.prompt` line with no `eval.decided` after it
 means the judge is wedged; `restart` fixes it.
+
+**Someone else's issue gets no acknowledgement.** Check that they can write to the repository, or that
+their login is in `PI_SUPERAGENT_ALLOWED` when that is set. The panel's count of filtered triggers rises
+by one for each request it dropped this way.
 
 **`status` exits 2.** Read `~/.pi/superagent/health.json`. A failing `source` means the router cannot
 reach GitHub; check `gh auth status`. The error clears on the next good poll.

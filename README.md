@@ -18,8 +18,9 @@ byte-for-byte. This repository binds it to pi, herdr and GitHub.
 ## How a request travels
 
 1. **Trigger.** A new issue is a request; so is a comment on an issue or a pull request, and so is a
-   submitted review. On its first look at a repository the router records what is already there and
-   fires none of it.
+   submitted review. Only people with write access to the repository are heard: on a public repository
+   anyone can open an issue, and a request starts a worker with a shell on your machine. On its first
+   look at a repository the router records what is already there and fires none of it.
 2. **Judgement.** The judge, a headless pi session, reads the request with its link and answers through
    a tool: *accept*, *ignore* (chatter, a note to a colleague, a thread that already has a ticket) or
    *stop*.

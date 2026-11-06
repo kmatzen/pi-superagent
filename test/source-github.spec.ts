@@ -5,15 +5,15 @@ import { GithubSource, REPLY_MARKER, type GithubApi, type IssueComment, type Iss
 const HOUR = 3_600_000
 const at = new Date(Date.now() - HOUR).toISOString()
 const comment = (over: Partial<IssueComment> = {}): IssueComment => ({
-  issue: 12, author: 'octocat', at: at, body: 'ship the panel tonight', ...over,
+  issue: 12, author: 'octocat', association: 'OWNER', at: at, body: 'ship the panel tonight', ...over,
 })
 const issue = (over: Partial<IssueState> = {}): IssueState => ({
-  issue: 12, title: 'DO: ship the panel', labels: [], author: 'octocat',
+  issue: 12, title: 'DO: ship the panel', labels: [], author: 'octocat', association: 'OWNER',
   createdAt: at, updatedAt: at, ...over,
 })
 
 const review = (over: Partial<PrReview> = {}): PrReview => ({
-  pr: 77, id: 500, author: 'octocat', state: 'CHANGES_REQUESTED', at: at, body: 'use the cursor, not a scan', ...over,
+  pr: 77, id: 500, author: 'octocat', association: 'OWNER', state: 'CHANGES_REQUESTED', at: at, body: 'use the cursor, not a scan', ...over,
 })
 
 function fixture(comments: IssueComment[], issues: IssueState[], reviews: PrReview[] = []) {
@@ -82,6 +82,24 @@ describe('GithubSource', () => {
     f.source.bootstrap()
     const [trigger] = await f.source.poll()
     expect(trigger?.human).toBe(false)
+  })
+
+  it("every trigger carries its author's standing in the repository, which is all the router's scope sees", async () => {
+    const comments: IssueComment[] = []
+    const issues: IssueState[] = []
+    const reviews: PrReview[] = []
+    const f = fixture(comments, issues, reviews)
+    f.source.bootstrap()
+    await f.source.poll()
+    issues.push(issue({ issue: 13, author: 'stranger', association: 'NONE' }))
+    comments.push(comment({ author: 'helper', association: 'COLLABORATOR' }))
+    reviews.push(review({ author: 'teammate', association: 'MEMBER' }))
+    const metas = (await f.source.poll()).map(t => t.meta)
+    expect(metas).toEqual([
+      expect.objectContaining({ via: 'issue', association: 'NONE', author: 'stranger' }),
+      { association: 'COLLABORATOR', author: 'helper' },
+      expect.objectContaining({ via: 'review', association: 'MEMBER', author: 'teammate' }),
+    ])
   })
 
   it('a cold start reads a day back, not the whole repository history', () => {

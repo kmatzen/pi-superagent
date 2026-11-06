@@ -1,6 +1,6 @@
 /** The router's shared surface: config, the SDK seam, the worker brief, and the admissibility policy. */
 import { isListed } from './authors.ts'
-import type { Policy, Ticket } from '../core/index.ts'
+import type { Policy, SourceScope, Ticket } from '../core/index.ts'
 
 export interface RouterConfig {
   herdrWorkspace?: string
@@ -27,6 +27,8 @@ export interface RouterConfig {
   blockedCommands?: readonly string[]
   /** Off by default: a worker that delegates escapes its mandate, workspace and report. */
   allowDelegation?: boolean
+  /** Login patterns the router hears; set, the list replaces the write-access rule (see scopeOf). */
+  allowed?: ReadonlySet<string>
 }
 
 export interface SdkSurface {
@@ -79,5 +81,23 @@ export function policyOf(config: RouterConfig): Policy {
       : { admissible: false, reason: 'not human' }),
     revalidate: () => true,
     admitsInferred: rules => rules.length > 0,
+  }
+}
+
+/** GitHub's author associations that come with write access; MEMBER is any member of the owning organization. */
+const WRITERS: ReadonlySet<string> = new Set(['OWNER', 'MEMBER', 'COLLABORATOR'])
+
+/** Who the router hears at all. On a public repository anyone can open an issue, and an issue starts a worker
+ *  with a shell on this machine, so a stranger's issue, comment or review stops here: before the judge spends
+ *  a turn on it, and before it reaches a worker as input. */
+export function scopeOf(config: RouterConfig): SourceScope {
+  return {
+    scope: ({ source, meta }) => {
+      if (source !== 'github') return { listened: true, observed: false }
+      const heard = config.allowed
+        ? isListed(typeof meta.author === 'string' ? meta.author : '', config.allowed)
+        : WRITERS.has(String(meta.association))
+      return heard ? { listened: true, observed: false } : { listened: false, reason: 'senderNotMember' }
+    },
   }
 }

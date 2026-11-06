@@ -37,9 +37,9 @@ async function boot(withTicket: boolean) {
     githubApi: { issues: async () => [...issues], comments: async () => [...comments], postComment: async () => {} } })
   await new Promise(r => running.tick().then(() => setTimeout(r as () => void, 30)))
   const addComment = (n: number, body: string) => {
-    if (!issues.some(i => i.issue === n)) issues.push({ issue: n, title: 'DO: the thing', labels: [], author: 'pi',
+    if (!issues.some(i => i.issue === n)) issues.push({ issue: n, title: 'DO: the thing', labels: [], author: 'pi', association: 'OWNER',
       createdAt: '2026-11-04T09:00:00Z', updatedAt: new Date().toISOString() })
-    comments.push({ issue: n, author: 'octocat', at: new Date().toISOString(), body })
+    comments.push({ issue: n, author: 'octocat', association: 'OWNER', at: new Date().toISOString(), body })
   }
   if (withTicket) {
     addComment(500, 'cut the release tonight')
@@ -73,7 +73,7 @@ it('the panel links tickets to their GitHub issue and names the source', async (
     githubApi: { comments: async () => [], issues: async () => [...issues], postComment: async () => {} },
   })
   await running.tick()
-  issues.push({ issue: 150, title: 'DO: tidy the panel', body: 'Link tickets to issues.', author: 'octocat',
+  issues.push({ issue: 150, title: 'DO: tidy the panel', body: 'Link tickets to issues.', author: 'octocat', association: 'OWNER',
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), labels: [] })
   await running.tick()
   running.assessor.waiting().forEach(w => running.assessor.decide(w.evalId, { kind: 'accept', title: 'Tidy the panel', scope: 'links', reason: 'asked', acknowledgement: 'on it' }))

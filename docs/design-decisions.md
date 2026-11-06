@@ -10,7 +10,21 @@ submission, no board and no label vocabulary.
 
 Each extra door grows its own answers to "is this a person?" and "is this addressed to me?", and the
 agent's behavior then depends on which door a request happened to use. With one door, the identity rules
-live in one file (`source-github.ts`) and the admission rule in one function (`policyOf` in `router.ts`).
+live in one file (`source-github.ts`), and who is heard and who may start work in two functions
+(`scopeOf` and `policyOf` in `router.ts`).
+
+## Only people with write access are heard
+
+The router hears an author only when GitHub says they can write to the repository: the OWNER, MEMBER and
+COLLABORATOR author associations. Anyone else's issue, comment or review is stored as filtered and goes no
+further: no judgement, no ticket, no input to a running worker. `PI_SUPERAGENT_ALLOWED` replaces the rule
+with a list of logins.
+
+On a public repository anyone can open an issue, and an accepted issue starts a worker with a shell on
+the operator's machine. The judge cannot be that boundary, since a stranger's request reads like the
+owner's. The admission gate cannot either: a comment on an issue that already has a ticket goes straight
+to its worker and is never admitted again. So the check sits at the source scope, the engine's first step,
+where it covers every way in. An author whose association is missing counts as having none.
 
 ## The first look is silent
 

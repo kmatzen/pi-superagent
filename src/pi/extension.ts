@@ -21,7 +21,7 @@ import { receiptText, type ReportedRun } from './receipts.ts'
 import { workerRole } from './worker-role.ts'
 import { createPanelServer } from './server.ts'
 import { guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
-import { briefFor, loadSdk, policyOf, type RouterConfig, type SdkSurface } from './router.ts'
+import { briefFor, loadSdk, policyOf, scopeOf, type RouterConfig, type SdkSurface } from './router.ts'
 
 export interface PiLike {
   registerTool(tool: RegisteredTool): void
@@ -190,7 +190,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
 
   engine = new Engine({
     repo: repos,
-    scope: { scope: () => ({ listened: true, observed: false }) },
+    scope: scopeOf(cfg),
     policy,
     assessor,
     executor: {
@@ -576,6 +576,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     // identifies the agent, and naming the shared account here would drop every comment the operator writes.
     ...(env.PI_SUPERAGENT_GITHUB_REPO ? { githubRepo: env.PI_SUPERAGENT_GITHUB_REPO } : {}),
     ...(env.PI_SUPERAGENT_GITHUB_SELF ? { githubSelf: env.PI_SUPERAGENT_GITHUB_SELF } : {}),
+    ...(env.PI_SUPERAGENT_ALLOWED?.trim() ? { allowed: new Set(env.PI_SUPERAGENT_ALLOWED.split(',').map(s => s.trim()).filter(Boolean)) } : {}),
   }
 }
 

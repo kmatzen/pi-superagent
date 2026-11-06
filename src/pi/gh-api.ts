@@ -10,6 +10,8 @@ export interface GithubApiOptions {
 // A pull request's conversation comments arrive with an /issues/N url too (a pull request is issue N);
 // a row with no number is skipped, never filed under #0.
 const issueOf = (url: string): number => Number(/\/issues\/(\d+)/.exec(url)?.[1] ?? 0)
+// An absent association reads as no access: the scope then drops the author instead of trusting them.
+const associationOf = (row: { author_association?: string }): string => row.author_association ?? 'NONE'
 
 export function ghApi(options: GithubApiOptions): GithubApi {
   const bin = options.bin ?? 'gh'
@@ -41,14 +43,14 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     async comments(since) {
       const query = `repos/${options.repo}/issues/comments?per_page=100&sort=created&direction=asc${since ? `&since=${encodeURIComponent(since)}` : ''}`
       const rows = JSON.parse((await call(['api', query])) || '[]') as Array<Record<string, never | string>>
-      return (rows as unknown as Array<{ issue_url: string; user?: { login: string }; created_at: string; body: string }>)
+      return (rows as unknown as Array<{ issue_url: string; user?: { login: string }; author_association?: string; created_at: string; body: string }>)
         .filter(r => /\/issues\/\d+/.test(r.issue_url))
-        .map(r => ({ issue: issueOf(r.issue_url), author: r.user?.login ?? 'anonymous', at: r.created_at, body: r.body }))
+        .map(r => ({ issue: issueOf(r.issue_url), author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
     },
 
     async issues(state) {
       // GitHub pages at 100; an unpaginated read hides every issue past the newest page, forever.
-      const rows: Array<{ number: number; title: string; body?: string | null; labels?: Array<{ name: string }>; user?: { login: string }; created_at: string; updated_at: string; pull_request?: unknown }> = []
+      const rows: Array<{ number: number; title: string; body?: string | null; labels?: Array<{ name: string }>; user?: { login: string }; author_association?: string; created_at: string; updated_at: string; pull_request?: unknown }> = []
       for (let page = 1; ; page += 1) {
         const got = JSON.parse((await call(['api', `repos/${options.repo}/issues?state=${state}&per_page=100&page=${page}`])) || '[]')
         rows.push(...got)
@@ -57,7 +59,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       // The issues endpoint lists pull requests too; opening a pull request is a delivery, not a request.
       return rows.filter(r => !r.pull_request).map(r => ({
         issue: r.number, title: r.title, body: r.body ?? '', labels: (r.labels ?? []).map(l => l.name),
-        author: r.user?.login ?? 'anonymous', createdAt: r.created_at, updatedAt: r.updated_at,
+        author: r.user?.login ?? 'anonymous', association: associationOf(r), createdAt: r.created_at, updatedAt: r.updated_at,
       }))
     },
 
@@ -76,9 +78,9 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       const out: PrReview[] = []
       for (const pr of open) {
         const rows = JSON.parse((await call(['api', `repos/${options.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as
-          Array<{ id: number; user?: { login: string } | null; state: string; submitted_at?: string; body?: string }>
+          Array<{ id: number; user?: { login: string } | null; author_association?: string; state: string; submitted_at?: string; body?: string }>
         for (const r of rows) if (r.id > sinceId && r.submitted_at) {
-          out.push({ pr: pr.number, id: r.id, author: r.user?.login ?? 'anonymous', state: r.state, at: r.submitted_at, body: r.body ?? '' })
+          out.push({ pr: pr.number, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at, body: r.body ?? '' })
         }
       }
       return out.sort((a, b) => a.id - b.id)
@@ -86,8 +88,8 @@ export function ghApi(options: GithubApiOptions): GithubApi {
 
     async commentsFor(issue) {
       const rows = JSON.parse((await call(['api', `repos/${options.repo}/issues/${issue}/comments?per_page=100&sort=created&direction=desc`])) || '[]') as
-        Array<{ user?: { login: string }; created_at: string; body: string }>
-      return rows.map(r => ({ issue, author: r.user?.login ?? 'anonymous', at: r.created_at, body: r.body }))
+        Array<{ user?: { login: string }; author_association?: string; created_at: string; body: string }>
+      return rows.map(r => ({ issue, author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
     },
   }
 }
