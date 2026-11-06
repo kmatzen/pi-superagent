@@ -20,8 +20,9 @@ a reply on your issue. No labels, no board, no ceremony.
 
 ## How a request travels
 
-1. **Trigger** — your issue (title + body) or a comment on one. Existing issues at first start are seeded
-   silent; a new issue, a reopened one, or a new comment fires.
+1. **Trigger** — your issue (title + body), a comment on an issue or a pull request, or a submitted
+   review. Existing ones at first start are seeded silent; a new issue, a reopened one, a new comment,
+   or a new review fires.
 2. **Judgement** — a headless pi session reads the request with its URL and answers `accept`, `ignore`
    (chatter, questions to a person, requests that already own a ticket) or `stop`.
 3. **Ticket + worker** — accept opens a ticket; the executor starts a herdr tab named for the issue, running
@@ -73,7 +74,7 @@ matters. State lives in `PI_SUPERAGENT_STATE`: `tickets.db`, `engine.log`, `work
 | Path | What it is |
 | --- | --- |
 | `src/core/` | the vendored engine — byte-identical to the upstream commit named in `ADAPTATION.md`. |
-| `src/pi/source-github.ts` | issues and comments → Triggers, with the durable read position. |
+| `src/pi/source-github.ts` | issues, comments and reviews → Triggers, with durable read positions. |
 | `src/pi/gh-api.ts` | GitHub through the `gh` CLI: credentials stay in the operator's keyring. |
 | `src/pi/herdr.ts`, `herdr-workers.ts` | the herdr CLI client and worker lifecycle (tabs, records, sweeps). |
 | `src/pi/executor.ts`, `worker-role.ts` | Assignments → pi sessions; the worker guard that refuses delegation. |

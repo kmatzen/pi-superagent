@@ -29,6 +29,8 @@ The judge is a model reading your words with one rule: a concrete action asked o
 - Good: "Rename X to Y in repo Z. Keep W unchanged." Bounded, actionable, yours.
 - Ignored: "what do you think about…", notes to other humans, "this issue needs no action".
 - One request per issue; follow-ups as comments on the same issue reach the same ticket's worker.
+- A comment on a pull request reaches the agent too, and a submitted review ("changes requested")
+  fires a fresh judgement; replies post into the PR's conversation.
 - A ticket you want killed: comment "stop" on the issue, use the panel, or
   `curl -X POST -H 'x-superagent-request: 1' http://127.0.0.1:8788/api/tickets/<id>/stop`.
 

@@ -81,6 +81,15 @@ bugs — the fleet runs one supervisor per repo and SSHes where it needs GPUs.
 Deleting the directory resets the system, which makes the crash model in the
 specs exactly the operational reality.
 
+## A review is a request; opening a PR is not
+
+A submitted review — "changes requested", "approved" — is a person speaking about delivered work, on
+the same conversation the ticket already owns. It fires a fresh judgement and the reply posts into the
+PR's own thread (a PR is issue N on GitHub, so the reply path needs no second address). Opening a PR is
+**not** a trigger: a PR is a delivery, and making every opening one turns the agent into a mandatory
+reviewer of its own fleet's output — a self-feeding loop. Reviews ride the same deferred-cursor rule as
+comments; a first look seeds the review cursor silent, so a restart never rereads history as requests.
+
 ## Formal specs live beside the code and run in one command
 
 `formal/*.tla` + `scripts/check-formal`, checked to exhaustion; every spec
