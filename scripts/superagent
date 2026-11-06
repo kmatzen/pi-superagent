@@ -31,10 +31,9 @@ GRACE="${PI_SUPERAGENT_GRACE:-30}"
 # it healthy, what is the history of one piece of work). Loopback only; the API refuses a caller that does
 # not say what it is, and any non-local Host.
 PANEL_PORT="${PI_SUPERAGENT_PANEL_PORT:-8788}"
-# The router's judge runs through pi's SDK: the global install's entry file, because importing its
-# directory fails resolution and the package name is not resolvable from the state directory. Resolved
-# only on start: `npm root -g` costs a second, and the health check runs status every five minutes.
-SDK_PATH="${PI_SUPERAGENT_SDK_PATH:-}"
+# The router's judge runs through pi's SDK, and pi hands its own to the extension: inside pi, importing the
+# package name resolves to the running pi wherever it is installed. PI_SUPERAGENT_SDK_PATH, an entry file,
+# overrides that and passes through with the other settings.
 # pi with no session argument can open the session picker and sit there ("Press any key to continue"),
 # and a router parked on the picker answers nothing: every assessment expired as `timeout` (188 of them,
 # measured on the panel) because sendUserMessage had no running session to turn. One stable id, created
@@ -81,7 +80,6 @@ start() {
     return 1
   fi
   rm -f "$STOP_MARKER"
-  [ -n "$SDK_PATH" ] || SDK_PATH="$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent/dist/index.js"
   if [ -z "$SESSION_ID" ]; then
     [ -f "$STATE/session-id" ] || uuidgen | tr 'A-Z' 'a-z' > "$STATE/session-id"
     SESSION_ID="$(cat "$STATE/session-id")"
@@ -111,12 +109,12 @@ start() {
   local env=(
     --env PI_SUPERAGENT_ROLE=router --env "PI_SUPERAGENT_STATE=$STATE"
     --env "PI_SUPERAGENT_WORKTREES=$WORKTREES" --env "PI_SUPERAGENT_PANEL_PORT=$PANEL_PORT"
-    --env "PI_SUPERAGENT_SDK_PATH=$SDK_PATH" --env "PI_SUPERAGENT_SESSION_ID=$SESSION_ID"
+    --env "PI_SUPERAGENT_SESSION_ID=$SESSION_ID"
     --env "PI_SUPERAGENT_HERDR_BIN=$HERDR_BIN" --env "PI_SUPERAGENT_HERDR_WORKSPACE=$WORKSPACE_LABEL"
   )
   # herdr starts the tab from its own environment, not this one: a setting reaches the router only by name.
   local key
-  for key in GITHUB_REPO GITHUB_SELF SELF BOTS ALLOWED MAX_WORKERS TICK_MS PREPARE BLOCKED ALLOW_DELEGATION JUDGE_THINKING; do
+  for key in GITHUB_REPO GITHUB_SELF SELF BOTS ALLOWED MAX_WORKERS TICK_MS PREPARE BLOCKED ALLOW_DELEGATION JUDGE_THINKING SDK_PATH; do
     key="PI_SUPERAGENT_$key"
     [ -n "${!key:-}" ] && env+=(--env "$key=${!key}")
   done
