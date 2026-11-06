@@ -13,6 +13,15 @@ const issueOf = (url: string): number => Number(/\/issues\/(\d+)/.exec(url)?.[1]
 
 export function ghApi(options: GithubApiOptions): GithubApi {
   const bin = options.bin ?? 'gh'
+  const openPulls = async (): Promise<Array<{ number: number }>> => {
+    const open: Array<{ number: number }> = []
+    for (let page = 1; ; page += 1) {
+      const got = JSON.parse((await call(['api', `repos/${options.repo}/pulls?state=open&per_page=100&page=${page}`])) || '[]')
+      open.push(...got)
+      if (got.length < 100) break
+    }
+    return open
+  }
   // Asynchronous on purpose: execFileSync held the router's event loop for every round trip (1.5-4 s a
   // pass), and the panel and the judge froze with it.
   const call = (args: string[], stdin?: string): Promise<string> => new Promise((resolve, reject) => {
@@ -57,14 +66,13 @@ export function ghApi(options: GithubApiOptions): GithubApi {
                  JSON.stringify({ body: `${body}\n\n${REPLY_MARKER}` }))
     },
 
+    async pullsOpen() {
+      return (await openPulls()).map(pr => pr.number)
+    },
+
     async reviews(sinceId) {
       // Reviews have no repo-level feed: read the open PRs and pull each one's reviews above the cursor.
-      const open: Array<{ number: number }> = []
-      for (let page = 1; ; page += 1) {
-        const got = JSON.parse((await call(['api', `repos/${options.repo}/pulls?state=open&per_page=100&page=${page}`])) || '[]')
-        open.push(...got)
-        if (got.length < 100) break
-      }
+      const open = await openPulls()
       const out: PrReview[] = []
       for (const pr of open) {
         const rows = JSON.parse((await call(['api', `repos/${options.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as

@@ -31,6 +31,9 @@ The judge is a model reading your words with one rule: a concrete action asked o
 - One request per issue; follow-ups as comments on the same issue reach the same ticket's worker.
 - A comment on a pull request reaches the agent too, and a submitted review ("changes requested")
   fires a fresh judgement; replies post into the PR's conversation.
+- Closing an issue — or merging the pull request that names it — stops its ticket and posts the
+  receipt; reopening starts a fresh judgement. If the router cannot reach GitHub, `superagent status`
+  says `running with 1 failing part(s)` (exit 2) within about a minute and a half.
 - A ticket you want killed: comment "stop" on the issue, use the panel, or
   `curl -X POST -H 'x-superagent-request: 1' http://127.0.0.1:8788/api/tickets/<id>/stop`.
 

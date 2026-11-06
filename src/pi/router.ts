@@ -57,6 +57,9 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   `Finish with the ticket_report tool: state one of ready, blocked, failed, cancelled; summary = what a`,
   `reviewer needs; question = the single yes/no the operator must answer, and only for state=blocked.`,
   'Do not edit the ticket and do not post reply comments: the router writes receipts, you report.',
+  'This machine is shared: budget CPU and memory. Run builds and tests sequentially, cap parallel jobs',
+  '(make -j4, pytest -n4, not an unbounded fan-out), avoid pulling huge caches, and stop every process',
+  'you started before you report.',
 ].join('\n')
 
 export function policyOf(config: RouterConfig): Policy {
