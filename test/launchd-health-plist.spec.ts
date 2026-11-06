@@ -10,6 +10,11 @@ describe('launchd/com.example.superagent-health.plist', () => {
     expect(plist).toMatch(/superagent --respect-stop start/)
   })
 
+  it('runs the installed superagent command, not a script in one particular checkout', () => {
+    expect(plist).not.toMatch(/scripts\/superagent<|cd "/)
+    expect(plist).toMatch(/<string>superagent --respect-stop status/)
+  })
+
   it('keeps a deliberate stop deliberate, and never runs as a KeepAlive pair with the router', () => {
     expect(plist).toContain('--respect-stop')
     expect(plist).not.toMatch(/<key>KeepAlive<\/key>/)
