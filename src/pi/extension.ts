@@ -200,7 +200,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     policy,
     assessor,
     executor: {
-      start: (ticket, assignment) => afterCommit('start', () => executorRef?.start(repos.tickets.get(ticket.id) ?? ticket, assignment)),
+      start: (ticket, assignment) => afterCommit('start', () => {
+        // A poll can launch the assignment before this callback, and a crash can already have replaced it.
+        const fresh = repos.tickets.get(ticket.id)
+        const latest = fresh?.assignments.at(-1)
+        if (fresh && !fresh.ended && latest?.id === assignment.id && latest.state === 'pending') executorRef?.start(fresh, latest)
+      }),
       deliver: (ticket, assignment) => afterCommit('deliver', () => {
         const fresh = repos.tickets.get(ticket.id)
         if (fresh) executorRef?.deliver(fresh, assignment)
