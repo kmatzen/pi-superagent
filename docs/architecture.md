@@ -9,11 +9,11 @@ is [design-decisions.md](design-decisions.md); the proofs about them are
 ## The path of one request
 
 ```
- GitHub issue / comment          (the only front door)
+ GitHub issue / comment / review  (the only front door)
         │  poll, ~60 s
         ▼
- source-github.ts ── seed rule, comment cursor, human/bot marking
-        │  Trigger {issue, comment, human}
+ source-github.ts ── seed rule, cursors, human/bot marking
+        │  Trigger {issue, comment, review, human}
         ▼
  gate (assessor.ts)  ── human? asking? for-this-repo?   [judge.ts: model verdict]
         │  accepted trigger
@@ -43,8 +43,8 @@ outbox queue keyed by trigger id sends each acknowledgement once. `src/core/**`
 is never edited — see the byte-identical rule in
 [design-decisions.md](design-decisions.md).
 
-**`src/pi/source-github.ts` — the intake source.** Polls one repo's issues and
-comments. Three rules carry all the safety:
+**`src/pi/source-github.ts` — the intake source.** Polls one repo's issues,
+comments and submitted reviews. Three rules carry all the safety:
 
 - *Seed silence*: the first look records currently-open issues and fires none of
   them — importing a repo with existing issues must not fan a storm of requests.

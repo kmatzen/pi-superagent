@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { GithubSource, REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
+import { GithubSource, REPLY_MARKER, type GithubApi, type IssueComment, type IssueState, type PrReview } from '../src/pi/source-github.ts'
 
 // Dates live one hour back from the run: a cold start reads a day, and pinned fixture dates expire.
 const HOUR = 3_600_000
@@ -12,7 +12,11 @@ const issue = (over: Partial<IssueState> = {}): IssueState => ({
   createdAt: at, updatedAt: at, ...over,
 })
 
-function fixture(comments: IssueComment[], issues: IssueState[]) {
+const review = (over: Partial<PrReview> = {}): PrReview => ({
+  pr: 77, id: 500, author: 'octocat', state: 'CHANGES_REQUESTED', at: at, body: 'use the cursor, not a scan', ...over,
+})
+
+function fixture(comments: IssueComment[], issues: IssueState[], reviews: PrReview[] = []) {
   const kv = new Map<string, unknown>()
   const store = { get: <T,>(k: string) => kv.get(k) as T | undefined, set: (k: string, v: unknown) => { kv.set(k, v) } }
   const posted: Array<{ issue: number; body: string }> = []
@@ -20,6 +24,7 @@ function fixture(comments: IssueComment[], issues: IssueState[]) {
     comments: async since => comments.filter(c => !since || Date.parse(c.at) >= Date.parse(since)),
     issues: async () => issues,
     postComment: async (issue, body) => { posted.push({ issue, body }) },
+    reviews: async sinceId => reviews.filter(r => r.id > sinceId),
   }
   const source = new GithubSource(api, { repo: 'o/r', self: 'superagent[bot]', bots: new Set(['github-actions[bot]']) }, store)
   return { source, api, kv, store, posted }
@@ -166,5 +171,42 @@ describe('GithubSource', () => {
     expect(await f.source.poll()).toHaveLength(0)
     issues.push(issue({ updatedAt: new Date(Date.now() + HOUR).toISOString() }))
     expect(await f.source.poll()).toHaveLength(1)
+  })
+
+  it('a submitted review is a trigger on the PR thread, addressed for the reply', async () => {
+    const reviews: PrReview[] = []
+    const f = fixture([], [], reviews)
+    f.source.bootstrap()
+    await f.source.poll()
+    reviews.push(review())
+    const triggers = await f.source.poll()
+    expect(triggers).toHaveLength(1)
+    expect(triggers[0]!.id).toBe('github:#77:review:500')
+    expect(triggers[0]!.text).toContain('changes requested')
+    expect(triggers[0]!.channel).toMatchObject({ thread: '#77', address: { issue: '77' } })
+  })
+  it('the first look at reviews is silent history, not a replay of requests', async () => {
+    const f = fixture([], [], [review(), review({ id: 501 })])
+    f.source.bootstrap()
+    expect(await f.source.poll()).toHaveLength(0)
+    expect(await f.source.poll()).toHaveLength(0)
+  })
+  it('a crash before the next poll rewinds the review cursor: the request is seen again', async () => {
+    const reviews = [] as PrReview[]
+    const f = fixture([], [], reviews)
+    f.source.bootstrap()
+    await f.source.poll()
+    reviews.push(review())
+    expect(await f.source.poll()).toHaveLength(1)
+    // A restart is a fresh source over the same store: the cursor never reached it, so the review fires again.
+    const api: GithubApi = { comments: async () => [], issues: async () => [], postComment: async () => {}, reviews: async sinceId => reviews.filter(r => r.id > sinceId) }
+    const restarted = new GithubSource(api, { repo: 'o/r', self: 'superagent[bot]' }, f.store)
+    expect(await restarted.poll()).toHaveLength(1)
+  })
+  it("the agent's own review and a bot's review are not requests", async () => {
+    const f = fixture([], [], [review({ author: 'superagent[bot]' }), review({ id: 502, author: 'github-actions[bot]' })])
+    f.source.bootstrap()
+    await f.source.poll()
+    expect(await f.source.poll()).toHaveLength(0)
   })
 })

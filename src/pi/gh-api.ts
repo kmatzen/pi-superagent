@@ -1,6 +1,6 @@
 /** GitHub through the `gh` CLI: the credentials stay in the operator's keyring, out of this process. */
 import { spawn } from 'node:child_process'
-import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from './source-github.ts'
+import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState, type PrReview } from './source-github.ts'
 
 export interface GithubApiOptions {
   repo: string
@@ -55,6 +55,25 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     async postComment(issue, body) {
       await call(['api', '-X', 'POST', `repos/${options.repo}/issues/${issue}/comments`, '--input', '-'],
                  JSON.stringify({ body: `${body}\n\n${REPLY_MARKER}` }))
+    },
+
+    async reviews(sinceId) {
+      // Reviews have no repo-level feed: read the open PRs and pull each one's reviews above the cursor.
+      const open: Array<{ number: number }> = []
+      for (let page = 1; ; page += 1) {
+        const got = JSON.parse((await call(['api', `repos/${options.repo}/pulls?state=open&per_page=100&page=${page}`])) || '[]')
+        open.push(...got)
+        if (got.length < 100) break
+      }
+      const out: PrReview[] = []
+      for (const pr of open) {
+        const rows = JSON.parse((await call(['api', `repos/${options.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as
+          Array<{ id: number; user?: { login: string } | null; state: string; submitted_at?: string; body?: string }>
+        for (const r of rows) if (r.id > sinceId && r.submitted_at) {
+          out.push({ pr: pr.number, id: r.id, author: r.user?.login ?? 'anonymous', state: r.state, at: r.submitted_at, body: r.body ?? '' })
+        }
+      }
+      return out.sort((a, b) => a.id - b.id)
     },
 
     async commentsFor(issue) {
