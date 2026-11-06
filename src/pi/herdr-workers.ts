@@ -130,9 +130,9 @@ export class HerdrWorkers {
     return retired
   }
 
-  /** Tabs of superseded workers outlive their purpose: a restart adopts a worker, a stop starts a newer one,
-   *  and the older tab stays. Worker tabs carry a `thread · title` label; one that no record owns, or whose
-   *  agent herdr no longer knows, is litter. */
+  /** Tabs of this router's dead workers outlive their purpose. A tab is closed only when one of this state
+   *  directory's records owns it and herdr no longer knows its agent: a tab with no record here may belong to
+   *  another router sharing the workspace, and closing those killed every live worker whenever one started. */
   async closeStaleTabs(workspaceLabel: string): Promise<string[]> {
     const ws = (await this.options.herdr.workspaces()).find(w => w.label === workspaceLabel)?.workspace_id
     if (!ws) return []
@@ -144,15 +144,11 @@ export class HerdrWorkers {
       // no longer knows (`agent_not_found`) is a dead pi, and its record — live only because no one retired
       // it — is a zombie. Tab goes, record stays for the audit.
       const owner = records.find(r => r.tabId === tab.tabId)
-      if (owner) {
-        const live = await this.options.herdr.agentGet(owner.agent)
-          .then(a => a !== undefined)
-          .catch(e => !(e instanceof HerdrError && e.code === 'agent_not_found'))
-        if (live) continue
-      } else if (records.some(r => !r.tabId && Date.now() - Date.parse(r.startedAt) < 120_000)) {
-        // A record that has no tab id yet is a launch in flight; its tab exists before the id is known.
-        continue
-      }
+      if (!owner) continue
+      const live = await this.options.herdr.agentGet(owner.agent)
+        .then(a => a !== undefined)
+        .catch(e => !(e instanceof HerdrError && e.code === 'agent_not_found'))
+      if (live) continue
       await this.options.herdr.tabClose(tab.tabId).catch(() => {})
       closed.push(tab.tabId)
     }

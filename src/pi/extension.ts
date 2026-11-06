@@ -557,8 +557,13 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     for (const ticket of repos.tickets.open()) await recover(ticket)
     if (!herdrWorkers) return
     const adopted = new Set(executor.workers().map(w => w.sessionId))
-    for (const r of await herdrWorkers.retireOrphans(adopted)) log.line('info', 'worker.retired', { ticket: r.ticketId, agent: r.agent, tab: r.tabId })
-    for (const tab of await herdrWorkers.closeStaleTabs(cfg.herdrWorkspace ?? 'superagent')) log.line('info', 'worker.stale_tab_closed', { tab })
+    // Every tick waits on this: a herdr hiccup during the sweep must not wedge the router for its whole life.
+    try {
+      for (const r of await herdrWorkers.retireOrphans(adopted)) log.line('info', 'worker.retired', { ticket: r.ticketId, agent: r.agent, tab: r.tabId })
+      for (const tab of await herdrWorkers.closeStaleTabs(cfg.herdrWorkspace ?? 'superagent')) log.line('info', 'worker.stale_tab_closed', { tab })
+    } catch (error) {
+      log.line('error', 'recover.sweep_failed', { error: String(error).slice(0, 200) })
+    }
   })()
 
   let pollFailures = 0

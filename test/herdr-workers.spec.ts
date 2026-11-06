@@ -176,7 +176,7 @@ describe('herdr workers', () => {
     expect(m.calls.some(c => c.startsWith('tabClose'))).toBe(false)
   })
 
-  it('closes tabs no record owns, and leaves working agents and the engine alone', async () => {
+  it("closes its own dead workers' tabs, and never a tab it has no record of: another router's worker may live there", async () => {
     const dir = tmp()
     const m = memoryHerdr()
     const workers = new HerdrWorkers(options(dir, m.herdr))
@@ -197,8 +197,8 @@ describe('herdr workers', () => {
       workspace: '/w/zombie', startedAt: new Date().toISOString(),
     }))
     m.agents.set('ghost', { name: 'ghost', pane_id: 'w1:p6', agent: 'pi', agent_status: 'unknown' })
-    expect(await workers.closeStaleTabs('superagent')).toEqual(['w1:t9', 'w1:t6'])
-    expect(m.calls.some(c => c.startsWith('tabClose w1:t9'))).toBe(true)
+    expect(await workers.closeStaleTabs('superagent')).toEqual(['w1:t6'])
+    expect(m.calls.some(c => c.includes('w1:t9')), 'no record here: a test router once killed every live worker this way').toBe(false)
     expect(m.calls.some(c => c.includes('w1:t8') || c.includes('w1:t7'))).toBe(false)
   })
 

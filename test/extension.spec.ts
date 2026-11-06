@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -598,6 +599,23 @@ describe('startup and recovery', () => {
     const env = { PI_SUPERAGENT_SESSION_ID: 'abc-123' }
     expect(activationRefusal(env, ['node', 'pi', '--session-id', 'abc-123'], false)).toBeNull()
     expect(activationRefusal(env, ['node', 'pi', '-p', 'run the tests'], false)).toMatch(/not the process the start script launched/)
+  })
+
+  it('the suite cannot reach the real herdr: a router built from the environment would sweep the live workspace', () => {
+    const run = spawnSync('herdr', ['--version'], { encoding: 'utf8' })
+    expect(run.status).not.toBe(0)
+    expect(run.stderr).toContain('tests never call the real herdr')
+  })
+
+  it('a herdr failure during the startup sweep does not stop the router from working', async () => {
+    const m = memoryHerdr()
+    const broken: Herdr = { ...m.herdr, workspaces: async () => { throw new Error('herdr server unreachable') } }
+    const f = fixture(true, undefined, undefined, broken)
+    f.addComment('498', 'octocat', 'ship the panel')
+    await f.running.tick()
+    await settle()
+    expect(f.judge.prompts.join('\n'), 'the pass after the failed sweep still reached the judge').toContain('#498')
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/recover\.sweep_failed .*herdr server unreachable/)
   })
 
   it('the entry point starts one router, refuses a second, and lets a reload claim the process again', () => {
