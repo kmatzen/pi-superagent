@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import * as net from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { createRouterExtension, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { IssueComment, IssueState } from '../src/pi/source-github.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
@@ -21,12 +21,22 @@ const piStub = (): PiLike & { tools: Map<string, RegisteredTool> } => {
   }
 }
 
+// The router can fall back to an ephemeral port when the requested port is busy.
+async function listeningPort(dir: string): Promise<number> {
+  return vi.waitFor(() => {
+    const log = readFileSync(join(dir, 'engine.log'), 'utf8')
+    const bound = /panel\.bound port=(\d+)/.exec(log)
+    if (!bound) throw new Error('Waiting for the panel to listen')
+    return Number(bound[1])
+  })
+}
+
 async function boot(withTicket: boolean) {
   const dir = tmp()
-  const port = 43_000 + Math.floor((dirs.length * 37) % 400)
+  const requestedPort = 43_000 + Math.floor((dirs.length * 37) % 400)
   const issues: IssueState[] = []
   const comments: IssueComment[] = []
-  const config: RouterConfig = { dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi', bots: new Set(['fleet-*']), githubRepo: 'o/r', prepare: 'true', tickMs: 600_000, panelPort: port }
+  const config: RouterConfig = { dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi', bots: new Set(['fleet-*']), githubRepo: 'o/r', prepare: 'true', tickMs: 600_000, panelPort: requestedPort }
   let reportTool: RegisteredTool | undefined
   const sdk: SdkSurface = {
     createAgentSession: async options => {
@@ -53,6 +63,7 @@ async function boot(withTicket: boolean) {
     running.assessor.waiting().forEach(w => running.assessor.decide(w.evalId, { kind: 'accept', title: 'Cut the release', scope: 'tonight', reason: 'the operator asked', acknowledgement: 'on it' }))
     await running.tick()
   }
+  const port = await listeningPort(dir)
   const api = async (path: string, header?: string) => {
     const headers: Record<string, string> = { host: `127.0.0.1:${port}`, ...(header ? { 'x-superagent-request': header } : {}) }
     const res = await fetch(`http://127.0.0.1:${port}${path}`, { headers })
@@ -72,10 +83,10 @@ it('a ticket waiting on its pull request says so where the panel lists what each
 
 it('the panel links tickets to their GitHub issue and names the source', async () => {
   const dir = tmp()
-  const port = 43_900 + Math.floor((dirs.length * 13) % 80)
+  const requestedPort = 43_900 + Math.floor((dirs.length * 13) % 80)
   const issues: IssueState[] = []
   const config: RouterConfig = { dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi', bots: new Set(['fleet-*']),
-    tickMs: 600_000, panelPort: port, githubRepo: 'o/r', prepare: 'true' }
+    tickMs: 600_000, panelPort: requestedPort, githubRepo: 'o/r', prepare: 'true' }
   const sdk: SdkSurface = {
     createAgentSession: async () => ({ session: { sessionId: 'w', prompt: async () => {}, subscribe: () => () => {}, abort: () => {}, dispose: () => {} } }),
     SessionManager: { inMemory: () => ({}) },
@@ -92,6 +103,7 @@ it('the panel links tickets to their GitHub issue and names the source', async (
   await running.tick()
   running.assessor.waiting().forEach(w => running.assessor.decide(w.evalId, { kind: 'accept', title: 'Tidy the panel', scope: 'links', reason: 'asked', acknowledgement: 'on it' }))
   await running.tick()
+  const port = await listeningPort(dir)
   const html = await (await fetch(`http://127.0.0.1:${port}/`, { headers: { host: `127.0.0.1:${port}` } })).text()
   expect(html).toContain('GitHub issues: o/r')
   expect(html).toContain('href="https://github.com/o/r/issues/150"')
