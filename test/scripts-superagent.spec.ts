@@ -72,11 +72,17 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(routerTab()).toContain('--env PI_SUPERAGENT_HERDR_WORKSPACE=superagent')
   })
 
-  it('starts the panel, and gives the router the SDK entry file and herdr itself', () => {
+  it('starts the panel and hands the router herdr itself, but no SDK path: pi supplies its own', () => {
     expect(run(['start']).status).toBe(0)
     expect(routerTab()).toContain('--env PI_SUPERAGENT_PANEL_PORT=8799')
-    expect(routerTab()).toMatch(/--env PI_SUPERAGENT_SDK_PATH=\S*pi-coding-agent\/dist\/index\.js/)
     expect(routerTab()).toContain(`--env PI_SUPERAGENT_HERDR_BIN=${FAKE}`)
+    // A path from `npm root -g` named a second copy of pi, and a missing file for a pi installed any other way.
+    expect(routerTab()).not.toContain('PI_SUPERAGENT_SDK_PATH')
+  })
+
+  it('an SDK entry file the operator sets still reaches the router', () => {
+    expect(run(['start'], { PI_SUPERAGENT_SDK_PATH: '/opt/pi/dist/index.js' }).status).toBe(0)
+    expect(routerTab()).toContain('--env PI_SUPERAGENT_SDK_PATH=/opt/pi/dist/index.js')
   })
 
   it('starts pi in one stable session, because a router on the session picker answers nothing', () => {
