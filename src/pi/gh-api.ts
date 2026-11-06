@@ -1,11 +1,17 @@
-/** GitHub through the `gh` CLI: the credentials stay in the operator's keyring, out of this process. */
+/** GitHub through the `gh` CLI, as the account it is signed in as or as the one a token file names. */
 import { spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState, type PrReview } from './source-github.ts'
 import type { PullApi } from './pulls.ts'
 
-export interface GithubApiOptions {
-  repo: string
+export interface GhOptions {
   bin?: string
+  /** A file holding the token of the account to act as; unset, gh acts as the account it is signed in as. */
+  tokenFile?: string
+}
+
+export interface GithubApiOptions extends GhOptions {
+  repo: string
 }
 
 // A pull request's conversation comments arrive with an /issues/N url too (a pull request is issue N);
@@ -16,8 +22,19 @@ const associationOf = (row: { author_association?: string }): string => row.auth
 
 // Asynchronous on purpose: execFileSync held the router's event loop for every round trip (1.5-4 s a
 // pass), and the panel and the judge froze with it.
-const ghCall = (bin: string) => (args: string[], stdin?: string): Promise<string> => new Promise((resolve, reject) => {
-  const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+const ghCall = ({ bin = 'gh', tokenFile }: GhOptions) => (args: string[], stdin?: string): Promise<string> => new Promise((resolve, reject) => {
+  let env = process.env
+  if (tokenFile) {
+    // Read on every call, so a rotated token takes effect without a restart; only gh's environment holds it.
+    let token = ''
+    try { token = readFileSync(tokenFile, 'utf8').trim() } catch (error) {
+      reject(new Error(`cannot read the GitHub token file ${tokenFile}: ${(error as NodeJS.ErrnoException).code ?? 'unreadable'}`))
+      return
+    }
+    if (!token) { reject(new Error(`the GitHub token file ${tokenFile} is empty`)); return }
+    env = { ...process.env, GH_TOKEN: token }
+  }
+  const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], env })
   let out = ''
   let err = ''
   child.stdout.setEncoding('utf8').on('data', (chunk: string) => { out += chunk })
@@ -33,7 +50,7 @@ type ReviewRow = { id: number; user?: { login: string } | null; author_associati
 type CommentRow = { user?: { login: string }; author_association?: string; created_at: string; body: string }
 
 export function ghApi(options: GithubApiOptions): GithubApi {
-  const call = ghCall(options.bin ?? 'gh')
+  const call = ghCall(options)
   const openPulls = async (): Promise<Array<{ number: number }>> => {
     const open: Array<{ number: number }> = []
     for (let page = 1; ; page += 1) {
@@ -97,8 +114,8 @@ export function ghApi(options: GithubApiOptions): GithubApi {
 }
 
 /** Pull requests in any repository the operator's gh can read, by number: the ones tickets follow. */
-export function ghPulls(bin = 'gh'): PullApi {
-  const call = ghCall(bin)
+export function ghPulls(options: GhOptions = {}): PullApi {
+  const call = ghCall(options)
   return {
     async pull(repo, number) {
       try {
