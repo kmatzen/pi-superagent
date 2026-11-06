@@ -11,6 +11,7 @@ export interface WorkerPi {
 }
 
 export const ACTIVITY_EVERY_MS = 5000
+export const SILENT_FINISH = 'the worker finished its run without calling ticket_report'
 
 export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000): boolean {
   const dir = env.PI_SUPERAGENT_WORKER_DIR
@@ -20,7 +21,12 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
   const append = (file: string, record: object): void =>
     appendFileSync(join(dir, file), `${JSON.stringify({ ...record, at: new Date().toISOString() })}\n`)
 
-  pi.registerTool(reportTool((state, summary, question) => append('reports.jsonl', { state, summary, question: question ?? null })))
+  // Counted per settle cycle, not per run: an automatic retry starts a new run after a report already filed.
+  let reported = false
+  pi.registerTool(reportTool((state, summary, question) => {
+    reported = true
+    append('reports.jsonl', { state, summary, question: question ?? null })
+  }))
   guardExtension({
     blocked: (env.PI_SUPERAGENT_BLOCKED ?? '').split(',').map(s => s.trim()).filter(Boolean),
     workspace: env.PI_SUPERAGENT_WORKSPACE ?? process.cwd(),
@@ -28,7 +34,12 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
   })(pi as never)
 
   pi.on('agent_start', () => append('events.jsonl', { type: 'turnStarted' }))
-  pi.on('agent_settled', () => append('events.jsonl', { type: 'settled' }))
+  pi.on('agent_settled', () => {
+    // Filed here, before the settle: only this process knows the order of a run's events for certain.
+    if (!reported) append('reports.jsonl', { state: 'failed', summary: SILENT_FINISH, question: null, origin: 'silent' })
+    reported = false
+    append('events.jsonl', { type: 'settled' })
+  })
   let lastActivity = 0
   const activity = (): void => {
     const now = Date.now()

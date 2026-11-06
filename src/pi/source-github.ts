@@ -129,7 +129,8 @@ export class GithubSource {
       const key = `#${issue.issue}`
       if (!seen.has(key)) {
         seen.add(key)
-        if (!this.isHuman(issue.author) || (issue.body ?? '').includes(this.options.selfMarker ?? REPLY_MARKER)) continue
+        if (issue.author === this.options.self || !this.isHuman(issue.author)
+          || (issue.body ?? '').includes(this.options.selfMarker ?? REPLY_MARKER)) continue
         out.push({
           // updatedAt joins the hash so a reopen (a new open interval) is a new trigger id:
           // the engine dedups ids forever, and title-only ids made reopening a dead signal.

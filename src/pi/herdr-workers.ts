@@ -208,7 +208,9 @@ export class HerdrWorkers {
         if (event.type === 'turnStarted' || event.type === 'settled' || event.type === 'activity') listener?.({ type: event.type })
         else if (event.type === 'inbox_error') log.line('warn', 'worker.inbox_error', { agent: record.agent, error: String(event.error) })
       }
-      for (const r of fresh('reports.jsonl', 'reports')) report(String(r.state), String(r.summary), typeof r.question === 'string' ? r.question : null)
+      for (const r of fresh('reports.jsonl', 'reports')) {
+        report(String(r.state), String(r.summary), typeof r.question === 'string' ? r.question : null, r.origin === 'silent' ? 'silent' : 'worker')
+      }
       if (`${cursor.events}/${cursor.reports}` !== before) writeFileSync(cursorFile, JSON.stringify(cursor))
     }
     const alive = async (): Promise<void> => {

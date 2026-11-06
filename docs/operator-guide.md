@@ -26,7 +26,7 @@ open ticket. An ignore posts nothing on the issue; the reason is in the engine l
   submitted review, whether it approves or requests changes, fires a fresh judgement, and the answer
   lands in the pull request's conversation.
 - **Questions from a worker.** A worker that needs you reports *blocked* with one question. The question
-  appears on the panel under *Needs a person*; answer it with a comment on the issue.
+  is posted on the issue (and listed on the panel under *Needs a person*); answer it with a comment.
 - **Stopping.** Close the issue, or merge the pull request that closes it. Within one poll the ticket
   stops and says so on the thread. Reopen the issue to run the request again. Without GitHub, the panel
   API stops a ticket too:
@@ -71,9 +71,9 @@ Up to four workers run at once (`PI_SUPERAGENT_MAX_WORKERS`); further tickets wa
 the panel. The judge answers one request at a time. Every worker's brief says the machine is shared:
 sequential builds, bounded parallel jobs, nothing left running after the report.
 
-A worker that emits nothing for 15 minutes is flagged under *Needs a person* with a question: steer it,
-stop it, or accept its work. The flag does not stop the worker. If it is only running a long build, let
-it be; the flag clears when the worker reports.
+A worker that emits nothing for 15 minutes is flagged on the panel, and only there, under *Needs a
+person*: steer it, stop it, or accept its work. The flag does not stop the worker. If it is only running a
+long build, let it be; the flag clears when the worker reports.
 
 ## When something goes wrong
 
@@ -89,6 +89,13 @@ reach GitHub; check `gh auth status`. The error clears on the next good poll.
 
 **A worker looks stuck.** Open its tab and read it. Type into it to steer, or press Esc to interrupt.
 
-**A worker died.** The ticket keeps its mandate, but nothing runs it until the router restarts.
-`superagent restart` gives it a fresh worker; closing the issue drops it instead. The issue itself is not
-told when a worker dies, so watch the panel.
+**The issue says the worker stopped without reporting a result.** It ended a run without calling
+`ticket_report`, so whatever it concluded is still in its tab. The worker is still open: a reply on the
+issue steers it, and closing the issue drops the ticket.
+
+**The issue says the worker crashed.** The ticket keeps its mandate, but nothing runs it until the router
+restarts: `superagent restart` gives it a fresh worker, and closing the issue drops it.
+
+**The issue says a worker could not start.** The notice quotes the error, usually from the setup script
+(`PI_SUPERAGENT_PREPARE`). The router retries on every poll, without posting again, until the cause is
+fixed or the issue is closed.

@@ -63,8 +63,18 @@ cancelled. Only *ready* completes a ticket.
 
 A model that says "done" in prose while having done nothing must be unable to complete anything. In the
 lifecycle model, completing without a *ready* report is not merely untested but unreachable
-(`Ticket.tla` I2). A worker that goes silent without reporting completes nothing either: after 15 quiet
-minutes the router asks a person to steer it, stop it, or accept its work.
+(`Ticket.tla` I2). A run that ends without a report completes nothing either: the worker files it as a
+failure, and the person hears about it on the thread.
+
+## Every ending reaches the thread
+
+Whatever ends a worker's run is posted on the issue: its report, its question, a crash, a run that ended
+without a report, a launch that never got going. Each message says what happened and what the person can
+do next. The one exception is the 15-minute quiet flag, which stays on the panel: a long build is not news.
+
+The person who asked is on GitHub, not on the panel. An ending they cannot see is a request that died in
+silence, and a question they cannot see is a worker waiting forever. The same ending posts once per
+assignment, so a launch that fails on every poll says so once, not every 30 seconds.
 
 ## A worker is fenced in
 

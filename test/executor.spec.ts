@@ -7,7 +7,7 @@ class FakeSession implements WorkerSession {
   events: WorkerEvent[] = []
   aborted = 0
   disposed = 0
-  report!: (state: string, summary: string, question?: string | null) => void
+  report!: (state: string, summary: string, question?: string | null, origin?: 'worker' | 'silent') => void
   private listeners: Array<(e: WorkerEvent) => void> = []
   constructor(readonly sessionId: string) {}
   prompt(text: string, mode: 'steer' | 'followUp'): void { this.prompts.push({ text, mode }) }
@@ -22,7 +22,7 @@ class FakeSession implements WorkerSession {
 
 interface Call { fn: string; args: unknown[] }
 
-function fixture(extra: { maxConcurrent?: number; slotPollMs?: number } = {}) {
+function fixture(extra: { maxConcurrent?: number; slotPollMs?: number } = {}, fail: { launch?: string; report?: string } = {}) {
   const calls: Call[] = []
   const sessions: FakeSession[] = []
   const engine = {
@@ -30,10 +30,14 @@ function fixture(extra: { maxConcurrent?: number; slotPollMs?: number } = {}) {
     inputsDelivered: (t: string, a: string, ids: string[]) => calls.push({ fn: 'inputsDelivered', args: [t, a, ids] }),
     inputsRead: (t: string, ids: string[]) => calls.push({ fn: 'inputsRead', args: [t, ids] }),
     deliveryFailed: (t: string, a: string, e: string) => calls.push({ fn: 'deliveryFailed', args: [t, a, e] }),
-    report: (t: string, r: unknown) => calls.push({ fn: 'report', args: [t, r] }),
+    report: (t: string, r: unknown) => {
+      if (fail.report === t) throw new Error('ticketEnded')
+      calls.push({ fn: 'report', args: [t, r] })
+    },
   }
   const executor = new PiExecutor(engine as never, {
-    launch: ({ report }) => {
+    launch: ({ ticket, report }) => {
+      if (fail.launch === ticket.id) throw new Error('prepare command failed')
       const s = new FakeSession(`s${sessions.length}`)
       s.report = report as never
       sessions.push(s)
@@ -43,6 +47,7 @@ function fixture(extra: { maxConcurrent?: number; slotPollMs?: number } = {}) {
     worktreeFor: () => '/wt',
     briefFor: t => `brief for ${t.id}`,
     renderInput: i => (i.kind === 'text' ? i.text : i.kind === 'trigger' ? `trigger:${i.triggerId}` : `[${i.kind}]`),
+    reported: (t, a, origin, r) => calls.push({ fn: 'reported', args: [t.id, a, origin, r] }),
     ...extra,
   })
   const calls_of = (fn: string) => calls.filter(c => c.fn === fn)
@@ -178,17 +183,28 @@ describe('PiExecutor', () => {
     expect([s.aborted, s.disposed]).toEqual([1, 1])
   })
 
-  it('calls a silent finish a failure, because success without a receipt is the defect class', async () => {
-    const f = fixture()
+  it('tells the deployment who ended each run: the worker, a run with no report, a crash, a failed launch', async () => {
+    const f = fixture({}, { launch: 'T2' })
     f.executor.start(ticket(), assignment())
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
     await f.executor.idle()
-    f.executor.settled('T1')
-    expect(f.calls_of('report')[0]!.args[1]).toMatchObject({ state: 'failed', summary: /without calling ticket_report/ })
-    f.executor.settled('T1')
-    expect(f.calls_of('report').length).toBe(1)
-    f.sessions[0]!.report('ready', 'it woke up and reported')
-    f.executor.settled('T1')
-    expect(f.calls_of('report').length).toBe(2)
+    const s = f.sessions[0]!
+    s.report('blocked', 'needs the merge window', 'Ship tonight?')
+    s.report('failed', 'the worker finished its run without calling ticket_report', null, 'silent')
+    s.emit({ type: 'failed', error: 'its pi left' })
+    expect(f.calls_of('reported').map(c => c.args.slice(0, 3))).toEqual([
+      ['T2', 'A2', 'launch'], ['T1', 'A1', 'worker'], ['T1', 'A1', 'silent'], ['T1', 'A1', 'crash'],
+    ])
+    expect(f.calls_of('reported')[0]!.args[3]).toMatchObject({ state: 'failed', summary: /could not start a worker: prepare command failed/ })
+  })
+
+  it('a failed launch on a ticket that ended meanwhile does not stall every launch after it', async () => {
+    const f = fixture({}, { launch: 'T1', report: 'T1' })
+    f.executor.start(ticket(), assignment())
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    await f.executor.idle()
+    expect(f.sessions, 'T2 still gets its worker').toHaveLength(1)
+    expect(f.calls_of('reported'), 'a report the engine refused is not announced').toEqual([])
   })
 
   it('reports a session that died mid-run', async () => {

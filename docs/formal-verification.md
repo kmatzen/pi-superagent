@@ -98,8 +98,8 @@ says `opened`.
 
 A model proves things about the model. These cover the control flow described above, not the judge's
 decisions, GitHub's behavior (status codes, rate limits, pagination), SQLite, herdr, or the network.
-Newer behavior is tested but not modeled: reviews, the stop on a closed conversation, and the outbox's
-check before a retry.
+Newer behavior is tested but not modeled: reviews, the stop on a closed conversation, the outbox's check
+before a retry, and how each way a worker's run ends reaches the thread.
 
 What the specifications do guarantee: no implementation that follows these transitions can reach a
 forbidden state, and the liveness claims hold under the stated fairness. When the code a specification
