@@ -7,7 +7,7 @@ class FakeSession implements WorkerSession {
   events: WorkerEvent[] = []
   aborted = 0
   disposed = 0
-  report!: (state: string, summary: string, question?: string | null, origin?: 'worker' | 'silent') => void
+  report!: (state: string, summary: string, question?: string | null, origin?: 'worker' | 'silent', pullRequests?: string[]) => void
   private listeners: Array<(e: WorkerEvent) => void> = []
   constructor(readonly sessionId: string) {}
   prompt(text: string, mode: 'steer' | 'followUp'): void { this.prompts.push({ text, mode }) }
@@ -22,7 +22,8 @@ class FakeSession implements WorkerSession {
 
 interface Call { fn: string; args: unknown[] }
 
-function fixture(extra: { maxConcurrent?: number; slotPollMs?: number } = {}, fail: { launch?: string; report?: string } = {}) {
+function fixture(extra: { maxConcurrent?: number; slotPollMs?: number; follow?: (t: Ticket, urls: readonly string[]) => readonly string[] } = {},
+                 fail: { launch?: string; report?: string } = {}) {
   const calls: Call[] = []
   const sessions: FakeSession[] = []
   const engine = {
@@ -49,6 +50,7 @@ function fixture(extra: { maxConcurrent?: number; slotPollMs?: number } = {}, fa
     renderInput: i => (i.kind === 'text' ? i.text : i.kind === 'trigger' ? `trigger:${i.triggerId}` : `[${i.kind}]`),
     reported: (t, a, origin, r) => calls.push({ fn: 'reported', args: [t.id, a, origin, r] }),
     ...extra,
+    ...extra.follow ? { follow: (t: Ticket, urls: readonly string[]) => { calls.push({ fn: 'follow', args: [t.id, urls] }); return extra.follow!(t, urls) } } : {},
   })
   const calls_of = (fn: string) => calls.filter(c => c.fn === fn)
   return { executor, calls, sessions, calls_of }
@@ -170,6 +172,18 @@ describe('PiExecutor', () => {
     await f.executor.idle()
     f.sessions[0]!.report('blocked', 'needs the merge window', 'Ship tonight on the green build?')
     expect(f.calls_of('report')[0]!.args).toEqual(['T1', { state: 'blocked', summary: 'needs the merge window', question: 'Ship tonight on the green build?' }])
+  })
+
+  it('binds the pull requests a report names before the engine reads it, and tells the receipt which it follows', async () => {
+    const f = fixture({ follow: (_t, urls) => urls.filter(u => u.includes('/pull/')) })
+    f.executor.start(ticket(), assignment())
+    await f.executor.idle()
+    const before = f.calls.length
+    f.sessions[0]!.report('ready', 'opened the fix', null, 'worker', ['https://github.com/o/r/pull/9', '#9'])
+    expect(f.calls.slice(before).map(c => c.fn), 'bound first: a ready report on an unbound ticket completes it').toEqual(['follow', 'report', 'reported'])
+    expect(f.calls_of('follow')[0]!.args).toEqual(['T1', ['https://github.com/o/r/pull/9', '#9']])
+    expect(f.calls_of('report')[0]!.args[1]).toEqual({ state: 'ready', summary: 'opened the fix', question: null })
+    expect(f.calls_of('reported')[0]!.args[3]).toMatchObject({ pullRequests: ['https://github.com/o/r/pull/9'] })
   })
 
   it('drops a late report from a session that outlived its assignment', async () => {

@@ -114,6 +114,19 @@ describe('herdr workers', () => {
     stop()
   })
 
+  it("a report's pull requests reach the router with it", async () => {
+    const dir = tmp()
+    const pulls: Array<readonly string[] | undefined> = []
+    const session = await new HerdrWorkers(options(dir, memoryHerdr().herdr))
+      .launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: (_s, _m, _q, _o, p) => pulls.push(p) })
+    const stop = session.subscribe(() => {})
+    appendFileSync(join(dir, 'workers', session.sessionId, 'reports.jsonl'),
+      '{"state":"ready","summary":"opened it","pullRequests":["https://github.com/o/r/pull/9"]}\n{"state":"ready","summary":"no repo"}\n')
+    await until(() => pulls.length === 2)
+    expect(pulls).toEqual([['https://github.com/o/r/pull/9'], undefined])
+    stop()
+  })
+
   it('a worker whose pi left its tab is reported failed, once', async () => {
     const dir = tmp()
     const m = memoryHerdr()

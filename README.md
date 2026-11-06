@@ -6,7 +6,8 @@ pi-superagent watches one GitHub repository. When someone opens an issue, commen
 pull request, a judge reads it and decides whether a person has asked for something concrete. If one has,
 a ticket opens and a worker starts: a full [pi](https://github.com/earendil-works/pi) session in its own
 tab of herdr, a terminal multiplexer for coding agents, where you can watch it work, type into it, or take
-over. The worker finishes by calling a report tool, and the result arrives on the issue as a reply.
+over. The worker finishes by calling a report tool, and the result arrives on the issue as a reply. Work
+that changes a repository arrives as a pull request, and the ticket stays open until it is merged.
 
 There are no labels to learn and no board to tend. The issue is the request, a comment is a follow-up,
 and closing the issue is the stop.
@@ -31,9 +32,13 @@ byte-for-byte. This repository binds it to pi, herdr and GitHub.
    the issue. A *blocked* report asks you a question there, and your reply goes straight back to the
    worker. A run that ends without a report, a worker that crashes, and a launch that fails are posted
    too, each with what you can do next. A crashed worker is replaced once, without anyone asking.
+5. **Pull request.** Work that changes a repository, in any repository, goes out as a pull request the
+   worker opens and names in its report. The ticket then waits for review: comments and reviews on the
+   pull request go to the same worker. The merge ends the ticket, and the issue hears it is done; closing
+   the pull request unmerged ends it too. Work that changes no repository, such as an answer, an
+   investigation or a deployment, ends with its report.
 
-Closing the issue, or merging the pull request that closes it, stops the ticket and says so on the
-thread. Reopening the issue starts the request again.
+Closing the issue stops its ticket and says so on the thread. Reopening the issue starts the request again.
 
 ## Why it is built this way
 
@@ -116,6 +121,7 @@ is running, and what did the judge decide.
 | `src/core/` | the vendored engine: tickets, evaluations, assignments, the outbox queue |
 | `src/pi/extension.ts` | the router: wires the parts together and runs the loop |
 | `src/pi/source-github.ts`, `gh-api.ts` | GitHub in: issues, comments and reviews become triggers |
+| `src/pi/pulls.ts` | pull requests: bound to their ticket, followed until merged or closed |
 | `src/pi/assessor.ts`, `judge.ts` | the judge: one candidate at a time, answered through `ticket_decide` |
 | `src/pi/executor.ts`, `herdr-workers.ts` | workers: pi sessions in herdr tabs, and records that outlive the router |
 | `src/pi/worker-role.ts`, `report-tool.ts`, `workspace.ts` | inside a worker: the report tool, the guard, the workspace |

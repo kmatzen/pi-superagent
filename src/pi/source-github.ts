@@ -27,9 +27,10 @@ export interface IssueState {
 export interface GithubApi {
   comments(since?: string): Promise<IssueComment[]>
   issues(state: 'open' | 'closed'): Promise<IssueState[]>
-  postComment(issue: number, body: string): Promise<void>
+  /** `repo` names a repository other than the watched one, for a conversation on a pull request there. */
+  postComment(issue: number, body: string, repo?: string): Promise<void>
   /** Newest-first page of one issue's comments; a retried post looks here before speaking twice. */
-  commentsFor?(issue: number): Promise<IssueComment[]>
+  commentsFor?(issue: number, repo?: string): Promise<IssueComment[]>
   /** Open pull-request numbers: their conversations are threads a ticket can own, so closing them counts. */
   pullsOpen?(): Promise<number[]>
   /** Submitted reviews (approve / request changes) with ids above the cursor, oldest first. */

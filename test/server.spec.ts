@@ -27,14 +27,20 @@ async function boot(withTicket: boolean) {
   const issues: IssueState[] = []
   const comments: IssueComment[] = []
   const config: RouterConfig = { dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi', bots: new Set(['fleet-*']), githubRepo: 'o/r', tickMs: 600_000, panelPort: port }
+  let reportTool: RegisteredTool | undefined
   const sdk: SdkSurface = {
-    createAgentSession: async () => ({ session: { sessionId: 'w', prompt: async () => {}, subscribe: () => () => {}, abort: () => {}, dispose: () => {} } }),
+    createAgentSession: async options => {
+      const tool = (options.customTools as RegisteredTool[] | undefined)?.[0]
+      if (tool?.name === 'ticket_report') reportTool = tool
+      return { session: { sessionId: 'w', prompt: async () => {}, subscribe: () => () => {}, abort: () => {}, dispose: () => {} } }
+    },
     SessionManager: { inMemory: () => ({}) },
     DefaultResourceLoader: class { async reload() {} },
     getAgentDir: () => dir,
   }
   const running = createRouterExtension(piStub(), { config, sdk, now: () => new Date().toISOString(),
-    githubApi: { issues: async () => [...issues], comments: async () => [...comments], postComment: async () => {} } })
+    githubApi: { issues: async () => [...issues], comments: async () => [...comments], postComment: async () => {} },
+    pullApi: { pull: async () => ({ open: true, merged: false, createdAt: new Date().toISOString() }), comments: async () => [], reviews: async () => [] } })
   await new Promise(r => running.tick().then(() => setTimeout(r as () => void, 30)))
   const addComment = (n: number, body: string) => {
     if (!issues.some(i => i.issue === n)) issues.push({ issue: n, title: 'DO: the thing', labels: [], author: 'pi', association: 'OWNER',
@@ -53,8 +59,16 @@ async function boot(withTicket: boolean) {
     const text = await res.text()
     return { status: res.status, text, json: () => JSON.parse(text) as Record<string, any> }
   }
-  return { running, dir, addComment, api, port }
+  return { running, dir, addComment, api, port, report: () => reportTool }
 }
+
+it('a ticket waiting on its pull request says so where the panel lists what each ticket waits for', async () => {
+  const f = await boot(true)
+  f.report()!.execute('r1', { state: 'ready', summary: 'opened it', pullRequests: ['https://github.com/o/r/pull/77'] })
+  const [open] = (await f.api('/api/tickets', '1')).json() as unknown as Array<{ waitsFor: string }>
+  expect(open!.waitsFor).toBe('review of #77')
+  f.running.stop()
+})
 
 it('the panel links tickets to their GitHub issue and names the source', async () => {
   const dir = tmp()

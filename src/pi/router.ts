@@ -66,6 +66,16 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   'you started before you report.',
 ].join('\n')
 
+/** How work reaches a repository: a pull request the ticket then waits on. Work that changes no repository ends as before. */
+export const pullBrief = (closes?: string): string => [
+  'If the request changes code or files in a GitHub repository, work in a git checkout inside your workspace on a new branch,',
+  'push it, and open a pull request with `gh pr create`, ready for review rather than a draft. Its body says what changed and',
+  `why${closes ? `, and ends with \`Closes ${closes}\` when merging it completes the request` : ''}. Report ready with pullRequests`,
+  'set to its URL: the ticket then waits for the pull request, comments and reviews on it come to you, and the ticket ends when',
+  'it is merged or closed. Do not comment on the pull request yourself. A request that changes no repository, such as a',
+  'question, an investigation or an operation, reports ready without one.',
+].join('\n')
+
 export function policyOf(config: RouterConfig): Policy {
   return {
     version: 'v1',

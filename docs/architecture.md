@@ -23,11 +23,15 @@ are in [design-decisions.md](design-decisions.md); the proofs about them are in
  engine               ticket + pending assignment; acknowledgement queued
      ▼
  executor             a pi worker in its own herdr tab and workspace
-     │  ticket_report: ready · blocked · failed · cancelled
+     │  ticket_report: ready · blocked · failed · cancelled, and any pull requests
      ▼                                                  executor.ts, herdr-workers.ts
- engine               the report lands on the ticket; the receipt is queued
+ engine               pull requests bound first; the report lands on the ticket;
+     │                the receipt is queued
      ▼
  outbox               the comment, posted on the issue once  outbox.ts
+     ⋮
+ pull request         merged or closed: the ticket ends, and the issue hears it
+                      read each poll, or every 2 min elsewhere   pulls.ts
 ```
 
 A crash anywhere on this path loses nothing and doubles nothing:
@@ -70,6 +74,14 @@ repository, and the router's scope (`scopeOf` in `router.ts`) files one from any
 as filtered: it reaches neither the judge nor a worker. `gh-api.ts` talks to GitHub through the `gh` CLI, so the
 credentials stay in the operator's keyring; every call is asynchronous, issue and pull-request lists are
 paginated, and comments are read forward from the cursor.
+
+**Pull requests: `pulls.ts`.** A report may name the pull requests its work opened. The executor hands
+them to the router before the engine reads the report, and the router binds each one to the ticket with
+the engine's `bindThread`, so a *ready* report waits for it instead of completing the ticket. Each poll,
+the follower asks GitHub about every followed pull request that is no longer open in the watched
+repository and reports the merge or close through `threadClosed`, which ends the ticket. A pull request
+in another repository is read every two minutes, and its comments and reviews become triggers on its own
+thread, `owner/repo#N`, with the read position committed once the engine holds them.
 
 **The judge: `assessor.ts` and `judge.ts`.** The engine's policy gate, defined in `router.ts`, admits a
 trigger only from a person who is not on the bot list. That check is code, not a model call. An admitted
@@ -143,5 +155,6 @@ history.
 | No trigger accepted twice | content-derived ids | `Intake.tla` C4 |
 | A bot never passes for a person | bot patterns and the policy gate | `Intake.tla` C5 |
 | A stranger reaches neither the judge nor a worker | the source scope, `scopeOf` | tests only |
+| A ticket with a pull request ends with it, as merged or closed | binding before the report, `threadClosed` | tests only |
 | A live agent's tab is never swept | the liveness check in `closeStaleTabs` | `Workers.tla` W2, W4 |
 | Dead workers' tabs do not pile up | the sweep and the linger close | `Workers.tla` W5 |
