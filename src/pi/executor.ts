@@ -205,9 +205,9 @@ export class PiExecutor {
     this.live.clear()
   }
 
-  stop(ticket: Ticket, _assignment: Assignment, reason: string): void {
+  stop(ticket: Ticket, assignment: Assignment, reason: string): void {
     const live = this.live.get(ticket.id)
-    if (!live) return
+    if (!live || live.assignmentId !== assignment.id) return
     live.unsubscribe()
     this.live.delete(ticket.id)
     // The domain already ended the ticket before this call; the worker's job is to stop touching the box.

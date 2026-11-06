@@ -98,6 +98,15 @@ describe('PiExecutor', () => {
     expect(f.sessions.map(s => s.sessionId)).toEqual(['s0', 's1'])
   })
 
+  it('a delayed stop for a crashed assignment leaves its replacement running', async () => {
+    const f = fixture()
+    f.executor.start(ticket(), assignment('replacement'))
+    await f.executor.idle()
+    f.executor.stop(ticket(), assignment('crashed'), 'retried')
+    expect(f.executor.running).toBe(1)
+    expect(f.sessions[0]!.aborted).toBe(0)
+  })
+
   it('a router that goes away lets go of its workers without stopping them', async () => {
     const f = fixture()
     f.executor.start(ticket(), assignment())
