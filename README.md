@@ -56,7 +56,7 @@ answer it:
 The ticket lifecycle, the GitHub intake and the worker sweep are specified in TLA+ and checked
 exhaustively, 1.5 million distinct states in all, by one command.
 
-## Install from a checkout
+## Install
 
 Use macOS or Linux with Git, Node 22.19 or later, [pi](https://github.com/earendil-works/pi),
 [herdr](https://herdr.dev), and the [GitHub CLI](https://cli.github.com).
@@ -66,12 +66,12 @@ Use a GitHub account with write access to the repository you want to watch.
 ```sh
 gh auth login
 gh auth setup-git
-gh repo clone kmatzen/pi-superagent
-cd pi-superagent
-pi install "$(pwd)"
+pi install npm:pi-superagent
+npm install -g pi-superagent
 ```
 
-Keep the checkout at that path. The extension and the command in `scripts/` both run from it.
+Pi loads the extension in router and worker sessions. The global npm install puts the
+`superagent` command on your PATH. Use the same package version for both.
 
 ## Run your first ticket
 
@@ -79,10 +79,10 @@ Substitute the GitHub repository you want the worker to change. `init` checks th
 and your GitHub access, then saves the repository in `~/.pi/superagent/config.env`.
 
 ```sh
-./scripts/superagent init your-org/your-repo
-herdr                      # keep it open, then use another terminal in the checkout
-./scripts/superagent start
-./scripts/superagent status
+superagent init your-org/your-repo
+herdr                      # keep it open, then use another terminal
+superagent start
+superagent status
 ```
 
 Wait for the first GitHub poll in the **engine log** tab, then open a new issue asking for a small
@@ -93,7 +93,7 @@ worker. Merge when you are satisfied.
 
 To supply your own workspace setup, set `PI_SUPERAGENT_PREPARE`. A replacement worker keeps the same
 ticket directory. To narrow who can start work or give the router its own GitHub identity, see
-[`config.example.env`](config.example.env). Stop the router with `./scripts/superagent stop`.
+[`config.example.env`](config.example.env). Stop the router with `superagent stop`.
 
 ## Watching it
 
