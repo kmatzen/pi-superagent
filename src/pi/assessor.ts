@@ -1,6 +1,6 @@
 /** The Assessor port: renders each Candidate and sends it to the judge, one at a time; the judge's
  *  `ticket_decide` call brings the answer back. */
-import type { Assessor, AssessmentOutcome, Candidate, Engine } from '../core/index.ts'
+import { UserError, type Assessor, type AssessmentOutcome, type Candidate, type Engine } from '../core/index.ts'
 import { threadUrl } from './pulls.ts'
 
 export interface SessionPilot {
@@ -83,9 +83,9 @@ export class SessionAssessor implements Assessor {
   // The ticket_decide tool lands here; only the engine decides whether an answer still counts.
   decide(evalId: string, outcome: AssessmentOutcome): void {
     const candidate = this.pending.get(evalId)
-    if (!candidate) return
+    if (!candidate) throw new UserError('evalFinished', { eval: evalId })
     const trigger = candidate.triggers[0]
-    if (!trigger) return
+    if (!trigger) throw new UserError('notAdmissible', { reason: 'this eval carries no trigger' })
     this.engine().decide(trigger.id, { ...outcome, evalId })
     if (this.inFlight === evalId) { this.inFlight = null; this.drain() }
   }
