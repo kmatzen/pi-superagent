@@ -36,6 +36,13 @@ open ticket. An ignore posts nothing on the issue; the reason is in the engine l
 - **Who opens the pull request.** The worker, with the `gh` on this machine, so the pull request's author
   is whoever `gh` is signed in as. Blocking `gh` for workers (`PI_SUPERAGENT_BLOCKED`) turns pull requests
   off: workers then report without one.
+- **The agent's own account.** By default the router reads and replies as the account `gh` is signed in
+  as, so its comments look like yours apart from a hidden marker. To give it an account of its own, put a
+  token for that account in a file only you can read, set `PI_SUPERAGENT_GITHUB_TOKEN_FILE` to the file
+  and `PI_SUPERAGENT_GITHUB_SELF` to the account's login, give the account access to the watched
+  repository, and restart. The engine log's `router.start` line then says `githubAs="token file"`.
+  Workers still act as `gh`'s account, so their pull requests are yours, and the router reads those pull
+  requests as that account too.
 - **Pull requests no ticket opened.** A comment or a submitted review on one reaches the judge like any
   other request, and the answer lands in the pull request's conversation.
 - **Questions from a worker.** A worker that needs you reports *blocked* with one question. The question

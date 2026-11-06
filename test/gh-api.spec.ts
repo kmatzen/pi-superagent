@@ -107,7 +107,7 @@ esac
 
 describe('ghPulls', () => {
   it('reads a pull request as merged, closed or open, and one GitHub does not have as absent', async () => {
-    const api = ghPulls(fakePullsGh().bin)
+    const api = ghPulls({ bin: fakePullsGh().bin })
     expect(await api.pull('x/y', 9)).toEqual({ open: false, merged: true, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T10:00:00Z' })
     expect(await api.pull('x/y', 10)).toEqual({ open: false, merged: false, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T11:00:00Z' })
     expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, createdAt: '2026-11-05T09:00:00Z' })
@@ -117,7 +117,7 @@ describe('ghPulls', () => {
 
   it("reads one pull request's comments from a time, and its submitted reviews, with each author's standing", async () => {
     const gh = fakePullsGh()
-    const api = ghPulls(gh.bin)
+    const api = ghPulls({ bin: gh.bin })
     expect(await api.comments('x/y', 11, '2026-11-06T08:00:00Z')).toEqual([
       { issue: 11, author: 'rev', association: 'MEMBER', at: '2026-11-06T09:00:00Z', body: 'rename it' },
     ])
@@ -132,5 +132,39 @@ describe('ghPulls', () => {
     await ghApi({ repo: 'o/r', bin: gh.bin }).postComment(11, 'addressed', 'x/y')
     expect(gh.calls()).toEqual(['api -X POST repos/x/y/issues/11/comments --input -'])
     expect(gh.posted().body).toContain('addressed')
+  })
+})
+
+describe("the agent's own account", () => {
+  /** A fake `gh` that answers only when the token it was handed is the bot's, as GitHub would. */
+  function tokenGh() {
+    const dir = tmp()
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+[ "$GH_TOKEN" = "bot-token-7" ] || { echo 'gh: Bad credentials (HTTP 401)' >&2; exit 1; }
+case "$*" in
+  "api repos/x/y/pulls/11") echo '{"state":"open","merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z"}' ;;
+  "api -X POST repos/o/r/issues/3/comments --input -") cat - > /dev/null ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const token = join(dir, 'token')
+    writeFileSync(token, 'bot-token-7\n')
+    return { bin, token, dir }
+  }
+
+  it('with a token file, every call acts as that account: reads and replies alike', async () => {
+    const gh = tokenGh()
+    expect(await ghPulls({ bin: gh.bin, tokenFile: gh.token }).pull('x/y', 11)).toMatchObject({ open: true })
+    await expect(ghApi({ repo: 'o/r', bin: gh.bin, tokenFile: gh.token }).postComment(3, 'on it')).resolves.toBeUndefined()
+    await expect(ghPulls({ bin: gh.bin }).pull('x/y', 11), 'without it, gh acts as whoever it is signed in as').rejects.toThrow(/401/)
+  })
+
+  it('a missing or empty token file is an error that names the file, and never a quiet switch of account', async () => {
+    const gh = tokenGh()
+    await expect(ghPulls({ bin: gh.bin, tokenFile: join(gh.dir, 'nope') }).pull('x/y', 11)).rejects.toThrow(/token file .*nope: ENOENT/)
+    writeFileSync(gh.token, '\n')
+    await expect(ghPulls({ bin: gh.bin, tokenFile: gh.token }).pull('x/y', 11)).rejects.toThrow(/is empty/)
   })
 })

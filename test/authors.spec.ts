@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { isListed } from '../src/pi/authors.ts'
-import { policyOf, scopeOf } from '../src/pi/router.ts'
+import { ghAccounts, policyOf, scopeOf } from '../src/pi/router.ts'
 
 describe('bot patterns', () => {
   it('the gate rechecks the author, so a trigger stored with the old human flag cannot open a ticket', () => {
@@ -24,6 +24,15 @@ describe('bot patterns', () => {
     const bots = new Set(['pi-*', 'fleet-*'])
     expect(isListed('pi-a1b2c3d4', bots)).toBe(true)
     expect(isListed('octocat', bots)).toBe(false)
+  })
+})
+
+describe('which account each GitHub client acts as', () => {
+  it("the watched repository as the agent's own account, pull requests as gh's login, which opened them", () => {
+    const accounts = ghAccounts({ ghBin: '/bin/gh', githubTokenFile: '/s/github-token' } as never)
+    expect(accounts.watched).toEqual({ bin: '/bin/gh', tokenFile: '/s/github-token' })
+    expect(accounts.pulls).toEqual({ bin: '/bin/gh' })
+    expect(ghAccounts({} as never)).toEqual({ watched: {}, pulls: {} })
   })
 })
 

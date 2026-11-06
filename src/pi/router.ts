@@ -1,6 +1,7 @@
 /** The router's shared surface: config, the SDK seam, the worker brief, and the admissibility policy. */
 import { isListed } from './authors.ts'
 import type { Policy, SourceScope, Ticket } from '../core/index.ts'
+import type { GhOptions } from './gh-api.ts'
 
 export interface RouterConfig {
   herdrWorkspace?: string
@@ -24,6 +25,10 @@ export interface RouterConfig {
   prepare?: string
   githubRepo?: string
   githubSelf?: string
+  /** The agent's own GitHub account, by a file holding its token: the router reads and posts on the watched repository as it. */
+  githubTokenFile?: string
+  /** The gh binary; tests put a stand-in here. */
+  ghBin?: string
   blockedCommands?: readonly string[]
   /** Off by default: a worker that delegates escapes its mandate, workspace and report. */
   allowDelegation?: boolean
@@ -45,6 +50,13 @@ export interface SdkSurface {
   /** pi's documented way to add an inline extension to a session or leave discovered resources out. */
   DefaultResourceLoader: new (options: Record<string, unknown>) => { reload(): Promise<void> }
   getAgentDir(): string
+}
+
+/** Pull requests are read as gh's own login: workers open them as that account, and a reader that cannot see
+ *  one would take it for closed and end its ticket. */
+export const ghAccounts = (config: RouterConfig): { watched: GhOptions; pulls: GhOptions } => {
+  const bin = config.ghBin ? { bin: config.ghBin } : {}
+  return { watched: { ...bin, ...(config.githubTokenFile ? { tokenFile: config.githubTokenFile } : {}) }, pulls: bin }
 }
 
 export async function loadSdk(config: RouterConfig): Promise<SdkSurface> {

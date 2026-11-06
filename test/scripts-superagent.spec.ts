@@ -59,11 +59,12 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
   })
 
   it('reads deployment settings from the state dir, so the health check and a hand restart agree', () => {
-    writeFileSync(join(state, 'config.env'), '# deployment\nPI_SUPERAGENT_GITHUB_REPO=o/spike\nPI_SUPERAGENT_GITHUB_SELF=bot\n'
+    writeFileSync(join(state, 'config.env'), '# deployment\nPI_SUPERAGENT_GITHUB_REPO=o/spike\nPI_SUPERAGENT_GITHUB_SELF=bot\nPI_SUPERAGENT_GITHUB_TOKEN_FILE=/s/github-token\n'
       + 'PI_SUPERAGENT_MAX_WORKERS=2\nPI_SUPERAGENT_BLOCKED=gh,ssh\nPI_SUPERAGENT_JUDGE_THINKING=high\nPI_SUPERAGENT_ALLOWED=alice,bob\n')
     expect(run(['start']).status).toBe(0)
     expect(routerTab()).toContain('--env PI_SUPERAGENT_GITHUB_REPO=o/spike')
     expect(routerTab()).toContain('--env PI_SUPERAGENT_GITHUB_SELF=bot')
+    expect(routerTab(), 'the path travels, never the token').toContain('--env PI_SUPERAGENT_GITHUB_TOKEN_FILE=/s/github-token')
     // herdr starts the tab from its own environment: a setting the script does not name never arrives.
     expect(routerTab()).toContain('--env PI_SUPERAGENT_MAX_WORKERS=2')
     expect(routerTab()).toContain('--env PI_SUPERAGENT_BLOCKED=gh,ssh')

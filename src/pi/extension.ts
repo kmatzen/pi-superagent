@@ -22,7 +22,7 @@ import { pullEndText, receiptText, type ReportedRun } from './receipts.ts'
 import { workerRole } from './worker-role.ts'
 import { createPanelServer } from './server.ts'
 import { guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
-import { briefFor, loadSdk, policyOf, pullBrief, scopeOf, type RouterConfig, type SdkSurface } from './router.ts'
+import { briefFor, ghAccounts, loadSdk, policyOf, pullBrief, scopeOf, type RouterConfig, type SdkSurface } from './router.ts'
 
 export interface PiLike {
   registerTool(tool: RegisteredTool): void
@@ -100,6 +100,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   log.line('info', 'router.start', {
     dataDir: cfg.dataDir, panelPort: cfg.panelPort ?? 0,
     sdkPath: cfg.sdkPath ?? 'package-name', githubRepo: cfg.githubRepo ?? '',
+    githubAs: cfg.githubTokenFile ? 'token file' : 'gh login',
   })
   const issueOf = (m: OutboundMessage): string | undefined =>
     m.channel.source === 'github' ? (m.channel.address as { issue?: string } | undefined)?.issue : undefined
@@ -121,7 +122,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       }
     },
   }, repos.kv)
-  const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({ repo: cfg.githubRepo }) : undefined)
+  const accounts = ghAccounts(cfg)
+  const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({ repo: cfg.githubRepo, ...accounts.watched }) : undefined)
   const github = githubApi
     ? new GithubSource(githubApi, { repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots }, repos.kv)
     : undefined
@@ -247,7 +249,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, outcome, pulls) })
   }
   const follower = new PullFollower({
-    home, api: deps.pullApi ?? ghPulls(), openThreads: () => github?.openThreads(), positions: repos.kv,
+    home, api: deps.pullApi ?? ghPulls(accounts.pulls), openThreads: () => github?.openThreads(), positions: repos.kv,
     self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, now: () => Date.now(),
     receive: trigger => { engine.receive(trigger) },
     warn: (event, fields) => log.line('warn', event, fields),
@@ -635,6 +637,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     // identifies the agent, and naming the shared account here would drop every comment the operator writes.
     ...(env.PI_SUPERAGENT_GITHUB_REPO ? { githubRepo: env.PI_SUPERAGENT_GITHUB_REPO } : {}),
     ...(env.PI_SUPERAGENT_GITHUB_SELF ? { githubSelf: env.PI_SUPERAGENT_GITHUB_SELF } : {}),
+    ...(env.PI_SUPERAGENT_GITHUB_TOKEN_FILE ? { githubTokenFile: env.PI_SUPERAGENT_GITHUB_TOKEN_FILE } : {}),
     ...(env.PI_SUPERAGENT_ALLOWED?.trim() ? { allowed: new Set(env.PI_SUPERAGENT_ALLOWED.split(',').map(s => s.trim()).filter(Boolean)) } : {}),
   }
 }

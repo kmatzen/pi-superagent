@@ -63,13 +63,14 @@ You need macOS or Linux, Node 22.19 or later, [pi](https://github.com/earendil-w
 
 ```sh
 brew install herdr gh             # or each project's own installer
-gh auth login                     # as the account the agent should reply from
+gh auth login                     # workers act as this account, and so does the router by default
 pi install npm:pi-superagent      # the extension: router, judge and worker roles
 npm install -g pi-superagent      # the superagent command
 ```
 
 pi loads the extension in every session. It does nothing in a session the start script did not launch,
-so that is safe. Install both from the same version, and update them together.
+so that is safe. Install both from the same version, and update them together. To have the router reply
+from an account of its own, set `PI_SUPERAGENT_GITHUB_TOKEN_FILE` (see `config.example.env`).
 
 ## Run it
 

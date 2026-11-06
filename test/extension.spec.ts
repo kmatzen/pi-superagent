@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
@@ -636,8 +636,37 @@ describe('startup and recovery', () => {
     // Defaulting this to the operator's login dropped every comment the operator wrote.
     expect(github?.githubSelf).toBeUndefined()
     expect(github?.allowed, 'unset, write access decides who is heard').toBeUndefined()
+    expect(github?.githubTokenFile, "unset, the router acts as gh's own login").toBeUndefined()
+    expect(configFrom({ PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_STATE: '/s', PI_SUPERAGENT_GITHUB_TOKEN_FILE: '/s/github-token' })?.githubTokenFile)
+      .toBe('/s/github-token')
     expect(configFrom({ PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_STATE: '/s', PI_SUPERAGENT_ALLOWED: ' alice, team-* ,' })?.allowed)
       .toEqual(new Set(['alice', 'team-*']))
+  })
+})
+
+describe("the agent's own GitHub account", () => {
+  it('a token file makes every call the router makes to GitHub act as that account', async () => {
+    const dir = tmp()
+    const bin = join(dir, 'gh')
+    // Records, per call, whether gh was handed the bot's token; answers every read with nothing.
+    writeFileSync(bin, `#!/bin/bash
+[ "$GH_TOKEN" = "bot-token-7" ] && echo "as-bot $2" >> "${dir}/calls" || echo "as-other $2" >> "${dir}/calls"
+echo '[]'
+`)
+    chmodSync(bin, 0o755)
+    writeFileSync(join(dir, 'token'), 'bot-token-7\n')
+    const config: RouterConfig = {
+      dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', bots: new Set(), githubRepo: 'o/r', tickMs: 3_600_000,
+      ghBin: bin, githubTokenFile: join(dir, 'token'),
+    }
+    const sdk = { createAgentSession: async () => ({ session: { sessionId: 'j', prompt: async () => {}, subscribe: () => () => {}, abort: () => {}, dispose: () => {} } }),
+      SessionManager: { inMemory: () => ({}) }, DefaultResourceLoader: class { async reload() {} }, getAgentDir: () => dir } as unknown as SdkSurface
+    const running = createRouterExtension(fakePi(), { config, sdk })
+    live.push(running)
+    await running.tick()
+    const calls = readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n')
+    expect(calls.length, 'the poll read issues, pull requests and comments').toBeGreaterThanOrEqual(3)
+    expect(calls.filter(c => !c.startsWith('as-bot')), 'and every one as the bot').toEqual([])
   })
 })
 
