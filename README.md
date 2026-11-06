@@ -4,7 +4,7 @@
 
 pi-superagent watches one GitHub repository. When someone opens an issue, comments on one, or reviews a
 pull request, a judge reads it and decides whether a person has asked for something concrete. If one has,
-a ticket opens and a worker starts: a full [pi](https://github.com/badlogic/pi-mono) session in its own
+a ticket opens and a worker starts: a full [pi](https://github.com/earendil-works/pi) session in its own
 tab of herdr, a terminal multiplexer for coding agents, where you can watch it work, type into it, or take
 over. The worker finishes by calling a report tool, and the result arrives on the issue as a reply.
 
@@ -51,19 +51,40 @@ answer it:
 The ticket lifecycle, the GitHub intake and the worker sweep are specified in TLA+ and checked
 exhaustively, 1.5 million distinct states in all, by one command.
 
+## Install
+
+You need macOS or Linux, Node 22.19 or later, [pi](https://github.com/earendil-works/pi),
+[herdr](https://herdr.dev) and the [GitHub CLI](https://cli.github.com).
+
+```sh
+brew install herdr gh             # or each project's own installer
+gh auth login                     # as the account the agent should reply from
+pi install npm:pi-superagent      # the extension: router, judge and worker roles
+npm install -g pi-superagent      # the superagent command
+```
+
+pi loads the extension in every session. It does nothing in a session the start script did not launch,
+so that is safe. Install both from the same version, and update them together.
+
 ## Run it
 
-You need Node 22.19 or later, pi, a running herdr, and the GitHub CLI signed in to the account the agent
-should reply as. Install this repository as a pi package (`pi install ./pi-superagent`). The extension
-does nothing in any pi session the start script did not launch, so loading it everywhere is safe.
+Start herdr: `herdr` in a terminal, or `herdr server` to run it headless. Then name the repository to
+watch, and start the router:
 
 ```sh
 mkdir -p ~/.pi/superagent
-cp config.example.env ~/.pi/superagent/config.env   # then set PI_SUPERAGENT_GITHUB_REPO
-scripts/superagent start     # the router: a pi session in its own herdr tab
-scripts/superagent status    # 0 healthy · 1 down · 2 a part is failing · 3 waiting for setup
-scripts/superagent stop      # the router exits; its workers keep going
+echo 'PI_SUPERAGENT_GITHUB_REPO=your-org/your-repo' > ~/.pi/superagent/config.env
+superagent start     # the router: a pi session in its own herdr tab
+superagent status    # 0 healthy · 1 down · 2 a part is failing · 3 waiting for setup
+superagent stop      # the router exits; its workers keep going
 ```
+
+Each worker starts in an empty workspace of its own. To give it your code, set `PI_SUPERAGENT_PREPARE`
+to a command that clones the repository. That setting and every other one are explained in
+[`config.example.env`](config.example.env). Only people with write access to the repository are heard;
+`PI_SUPERAGENT_ALLOWED` narrows that to a list of logins.
+
+From a checkout, `pi install ./pi-superagent` and `scripts/superagent` do the same.
 
 ## Watching it
 

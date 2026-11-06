@@ -49,25 +49,30 @@ open ticket. An ignore posts nothing on the issue; the reason is in the engine l
 ## Running it
 
 ```sh
-scripts/superagent status    # 0 healthy · 1 down · 2 a part is failing · 3 waiting for setup
-scripts/superagent restart   # safe at any time: workers keep running and the new router adopts them
-scripts/superagent stop      # leaves a marker, so the health check will not restart it
-scripts/superagent start     # clears the marker
+superagent status    # 0 healthy · 1 down · 2 a part is failing · 3 waiting for setup
+superagent restart   # safe at any time: workers keep running and the new router adopts them
+superagent stop      # leaves a marker, so the health check will not restart it
+superagent start     # clears the marker
 ```
 
-Settings live in `~/.pi/superagent/config.env`. Start from [`config.example.env`](../config.example.env),
-which explains each setting and its default, and restart to apply a change.
+In a checkout, the same script is `scripts/superagent`.
 
-The launchd job in [`launchd/`](../launchd/com.example.superagent-health.plist) runs `status` every five
-minutes and starts a router that is down. It leaves a deliberately stopped router alone. Install it once:
+Settings live in `~/.pi/superagent/config.env`. [`config.example.env`](../config.example.env), shipped
+with the package, explains each setting and its default. Restart to apply a change.
+
+On macOS, the launchd job in [`launchd/`](../launchd/com.example.superagent-health.plist) runs `status`
+every five minutes and starts a router that is down. It leaves a deliberately stopped router alone.
+Install it once:
 
 ```sh
-sed "s|__HOME__|$HOME|g" launchd/com.example.superagent-health.plist \
-  > ~/Library/LaunchAgents/com.example.superagent-health.plist
+plist="$(npm root -g)/pi-superagent/launchd/com.example.superagent-health.plist"   # launchd/ in a checkout
+sed "s|__HOME__|$HOME|g" "$plist" > ~/Library/LaunchAgents/com.example.superagent-health.plist
 launchctl load ~/Library/LaunchAgents/com.example.superagent-health.plist
 ```
 
-The job expects the checkout at `~/git/pi-superagent`; edit its `cd` if yours lives elsewhere.
+The job finds `superagent`, `pi` and `herdr` on its own PATH: Homebrew's directories, `/usr/local/bin` and
+`~/.npm-global/bin`. If `command -v superagent` or `command -v pi` prints a directory outside those, as nvm's
+do, add it to the job's PATH. From a checkout, replace `superagent` in the job with the script's full path.
 
 ## Capacity
 
