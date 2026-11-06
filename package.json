@@ -1,0 +1,47 @@
+{
+  "name": "pi-superagent",
+  "version": "0.0.1",
+  "description": "The dsh-superagent domain engine (Source/Trigger/Thread/Eval/Mandate/Ticket/Assignment/Report) bound to pi sessions, pi model calls, SQLite, and the fleet board.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "src/core/index.ts",
+  "exports": {
+    ".": "./src/core/index.ts",
+    "./pi": "./src/pi/extension.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.0.0"
+  },
+  "bin": {
+    "superagent": "./scripts/superagent"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "docs",
+    "README.md",
+    "ADAPTATION.md",
+    "NOTICE"
+  ],
+  "keywords": [
+    "pi-package",
+    "superagent",
+    "agents",
+    "orchestration"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/pi/extension.ts"
+    ]
+  }
+}

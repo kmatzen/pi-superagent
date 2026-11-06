@@ -1,0 +1,490 @@
+import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, afterEach, describe, expect, it } from 'vitest'
+import superagent, { activationRefusal, createRouterExtension, configFrom, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
+import type { GithubApi, IssueComment, IssueState } from '../src/pi/source-github.ts'
+import { SqliteRepositories } from '../src/pi/store.ts'
+import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
+
+const dirs: string[] = []
+const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ext-')); dirs.push(d); return d }
+afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
+
+// The GitHub stand-in for the old card fixture: addComment opens the issue (authored by
+// the agent, so the open itself is silent) and posts a person's comment that fires.
+type Feed = { issues: IssueState[]; comments: IssueComment[]; posts: Array<{ issue: number; body: string }> }
+
+/** The tools under test answer synchronously; the cast keeps the test readable. */
+type SyncTool = { content: Array<{ text: string }> }
+const invoke = (f: { pi: FakePi }, name: string, args: object): SyncTool =>
+  f.pi.tools.get(name)!.execute('call-1', args as never) as SyncTool
+const invoke0 = (pi: FakePi, name: string, args: object): SyncTool =>
+  pi.tools.get(name)!.execute('call-1', args as never) as SyncTool
+
+interface FakePi extends PiLike {
+  tools: Map<string, RegisteredTool>
+  sent: string[]
+  handlers: Map<string, Array<(p?: unknown) => void>>
+}
+
+function fakePi(): FakePi {
+  const tools = new Map<string, RegisteredTool>()
+  const sent: string[] = []
+  const handlers = new Map<string, Array<(p?: unknown) => void>>()
+  return {
+    tools, sent, handlers,
+    registerTool: t => { tools.set(t.name, t) },
+    sendUserMessage: text => { sent.push(text) },
+    on: (event, handler) => { handlers.set(event, [...(handlers.get(event) ?? []), handler]); return () => { handlers.set(event, []) } },
+  }
+}
+
+interface Spy { prompts: string[]; report: ((args: Record<string, unknown>) => unknown) | undefined }
+
+const settle = () => new Promise<void>(resolve => setTimeout(resolve, 15))
+const until = async (ok: () => boolean, ms = 5000) => {
+  for (const end = Date.now() + ms; !ok() && Date.now() < end;) await new Promise(resolve => setTimeout(resolve, 25))
+}
+function memoryHerdr() {
+  const agents = new Map<string, AgentInfo>()
+  const calls: string[] = []
+  let tabs = 0
+  const herdr: Herdr = {
+    workspaces: async () => [{ workspace_id: 'w1', label: 'superagent' }],
+    workspaceCreate: async () => ({ workspaceId: 'w1', tabId: 'w1:t0', paneId: 'w1:p0' }),
+    tabCreate: async () => { tabs += 1; calls.push('tabCreate'); return { tabId: `w1:t${tabs}`, paneId: `w1:p${tabs}` } },
+    tabRename: async () => {},
+    tabClose: async () => { calls.push('tabClose') },
+    paneRun: async () => {},
+    agentStart: async o => { calls.push('agentStart'); const a = { name: o.name, pane_id: o.pane, agent: 'pi', agent_status: 'working' as const }; agents.set(o.name, a); return a },
+    agentGet: async name => agents.get(name),
+    tabList: async () => [],
+    agentSendKeys: async () => {},
+  }
+  return { herdr, calls, agents }
+}
+const live: Array<{ stop(): void }> = []
+afterEach(() => { for (const r of live.splice(0)) r.stop() })
+
+function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
+                 options: { githubApi?: GithubApi } = {}) {
+  const dir = reuse ?? tmp()
+  const feed: Feed = { issues: [], comments: [], posts: [] }
+  const api: GithubApi = options.githubApi ?? {
+    // The fakes deliver everything and let the source's own rules do the filtering, as server.spec does.
+    issues: async () => [...feed.issues],
+    comments: async () => [...feed.comments],
+    postComment: async (issue, body) => { feed.posts.push({ issue, body }) },
+  }
+  const addComment = (n: string, author: string, body: string, at = '2026-11-05T09:00:00Z') => {
+    if (!feed.issues.some(i => String(i.issue) === n)) feed.issues.push({
+      issue: Number(n), title: 'DO: the thing', labels: [], author: 'pi-superagent',
+      createdAt: '2026-11-04T09:00:00Z', updatedAt: at })
+    feed.comments.push({ issue: Number(n), author, at, body })
+  }
+  const receipts = (n: string) => feed.posts.filter(p => String(p.issue) === n).map(p => p.body).join('\n')
+  const config: RouterConfig = {
+    dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', githubRepo: 'o/r',
+    bots: new Set(['fleet-answer-loop']), tickMs: 5, ...(herdr ? { workers: 'herdr' as const } : {}),
+  }
+  const workers: Spy[] = []
+  const judge: Spy = { prompts: [], report: undefined }
+  const judgeSessions: string[] = []
+  const loaders: Array<Record<string, unknown>> = []
+  const judgeListeners: Array<(event: { type: string }) => void> = []
+  const sdk: SdkSurface = {
+    createAgentSession: async (options) => {
+      const tool = (options.customTools as RegisteredTool[])[0]!
+      // The judge session carries the decide tool; every other session is a ticket worker.
+      if (tool.name === 'ticket_decide') {
+        judgeSessions.push('opened')
+        judge.report = args => tool.execute('judge-1', args as never)
+        return { session: { sessionId: 'judge', prompt: async (t: string) => { judge.prompts.push(t) }, subscribe: (l: (event: { type: string }) => void) => { judgeListeners.push(l); return () => {} }, abort: () => {}, dispose: () => {} } }
+      }
+      const spy: Spy = { prompts: [], report: args => tool.execute('call-1', args as never) }
+      workers.push(spy)
+      return { session: { sessionId: `w${workers.length}`, prompt: async (t: string) => { spy.prompts.push(t) }, subscribe: () => () => {}, abort: () => {}, dispose: () => {} } }
+    },
+    SessionManager: { inMemory: () => ({}) },
+    DefaultResourceLoader: class { constructor(options: Record<string, unknown>) { loaders.push(options) } async reload() {} },
+    getAgentDir: () => dir,
+  }
+  const pi = fakePi()
+  before?.(dir)
+  const running = createRouterExtension(pi, { config, sdk, ...(herdr ? { herdr } : {}), githubApi: api, now: () => new Date().toISOString() })
+  live.push(running)
+  // A deterministic stand-in for the model: the tests bind the wiring, not the judgement.
+  const decide = (kind: 'accept' | 'ignore') => {
+    const evalId = /Assess eval (\S+)/.exec(judge.prompts.at(-1) ?? pi.sent.at(-1) ?? '')?.[1]
+    if (!evalId) return
+    invoke0(pi, 'ticket_decide', { evalId, kind, reason: kind === 'accept' ? 'the operator asked' : 'not a request', title: 'Ship tonight', scope: 'the named change', acknowledgement: 'on it' })
+  }
+  const settleJudge = () => { for (const l of judgeListeners) l({ type: 'agent_settled' }) }
+  return { dir, feed, addComment, receipts, config, pi, running, workers, judge, judgeSessions, loaders, settleJudge, sdk, accept, decide }
+}
+
+describe('the router extension', () => {
+  it('GitHub issues alone run the whole loop', async () => {
+    const issues: IssueState[] = []
+    const posted: Array<{ issue: number; body: string }> = []
+    const githubApi: GithubApi = {
+      comments: async () => [] as IssueComment[],
+      issues: async () => [...issues],
+      postComment: async (issue, body) => { posted.push({ issue, body }) },
+    }
+    const f = fixture(true, undefined, undefined, undefined, { githubApi })
+    await f.running.tick()
+    issues.push({ issue: 150, title: 'DO: rotate the keys', body: 'Rotate the staging keys today.', author: 'octocat',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), labels: [] })
+    await f.running.tick()
+    await settle()
+    expect(f.judge.prompts.join('\n'), 'the judge reads the issue body').toContain('Rotate the staging keys')
+    expect(f.judge.prompts.join('\n')).toContain('https://github.com/o/r/issues/150')
+    expect(f.judge.prompts.join('\n')).toContain('accept is the answer for a concrete action')
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    f.workers[0]!.report!({ state: 'ready', summary: 'keys rotated' })
+    await f.running.tick()
+    expect(posted.map(p => p.body).join('\n')).toMatch(/on it[\s\S]*keys rotated/)
+    expect(posted[0]!.issue).toBe(150)
+  })
+
+  it('registers the supervisor tool set', () => {
+    const f = fixture()
+    expect([...f.pi.tools.keys()].sort()).toEqual(['engine_pause', 'engine_tick', 'ticket_decide', 'ticket_show', 'tickets_open'])
+  })
+
+  it('issue comment -> candidate in the conversation -> decision -> worker -> receipt on the issue', async () => {
+    const f = fixture()
+    f.addComment('400', 'octocat', 'merge the green build tonight')
+    await f.running.tick()
+    await settle()
+    expect(f.judge.prompts.join('\n')).toContain('merge the green build tonight')
+    expect(f.pi.sent.join('\n'), 'the operator pane is not the judge').not.toContain('merge the green build tonight')
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    expect(f.workers[0]!.prompts.join('\n')).toMatch(/on #400: Ship tonight/)
+    f.workers[0]!.report!({ state: 'ready', summary: 'merged and deployed' })
+    await f.running.tick()
+    expect(f.receipts('400')).toContain('on it')
+    expect(f.receipts('400')).toContain('#400 ready: merged and deployed')
+  })
+
+  it('a worker session carries the guard as a pi extension, and it refuses delegation', async () => {
+    const f = fixture()
+    f.addComment('420', 'octocat', 'fix the flaky gate')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    const worker = f.loaders.find(l => Array.isArray(l.extensionFactories))
+    expect(worker, 'the worker must be built with an inline guard extension').toBeDefined()
+    let hook: ((event: { toolName: string; input?: Record<string, unknown> }) => unknown) | undefined
+    for (const factory of worker!.extensionFactories as Array<(pi: unknown) => void>) {
+      factory({ on: (event: string, handler: typeof hook) => { if (event === 'tool_call') hook = handler } })
+    }
+    expect(hook?.({ toolName: 'subagent', input: {} })).toMatchObject({ block: true })
+    expect(hook?.({ toolName: 'read', input: { path: 'README.md' } })).toBeUndefined()
+    const [ticket] = JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text) as Array<{ id: string }>
+    expect(readFileSync(join(f.dir, 'workers', `${ticket!.id}.log`), 'utf8'), 'every worker streams to a file the operator can watch')
+      .toContain('== #420')
+  })
+
+  it('the judge loads no extensions, skills or context files, so it cannot boot this package again', async () => {
+    const f = fixture()
+    f.addComment('430', 'octocat', 'rotate the keys')
+    await f.running.tick()
+    await settle()
+    expect(f.loaders.find(l => l.noExtensions === true)).toMatchObject({ noSkills: true, noContextFiles: true, noPromptTemplates: true })
+  })
+
+  it('a judge turn that ends without an answer frees the slot for the next candidate', async () => {
+    const f = fixture()
+    for (const id of ['440', '441']) f.addComment(id, 'octocat', `ship change ${id}`)
+    await f.running.tick()
+    await settle()
+    expect(f.judge.prompts, 'one candidate in flight at a time').toHaveLength(1)
+    f.settleJudge()
+    expect(f.judge.prompts).toHaveLength(2)
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/judge\.settled_without_decision eval=/)
+  })
+
+  it('a judgement in flight when the router died is asked again by the next router', async () => {
+    const a = fixture()
+    for (const id of ['450', '451']) a.addComment(id, 'octocat', `merge change ${id}`)
+    await a.running.tick()
+    await settle()
+    expect(a.judge.prompts, 'the second candidate is queued and never reaches a judge').toHaveLength(1)
+    a.running.stop()
+    const b = fixture(true, undefined, a.dir)
+    await settle()
+    expect(readFileSync(join(a.dir, 'engine.log'), 'utf8')).toMatch(/evals\.reasked count=2/)
+    expect(b.judge.prompts).toHaveLength(1)
+    b.settleJudge()
+    expect(b.judge.prompts.join('\n')).toMatch(/merge change 450/)
+    expect(b.judge.prompts.join('\n')).toMatch(/merge change 451/)
+  })
+
+  it('a worker is its own pi in a herdr tab, and its report closes the ticket with a receipt on the issue', async () => {
+    const h = memoryHerdr()
+    const f = fixture(true, undefined, undefined, h.herdr)
+    f.addComment('460', 'octocat', 'rotate the staging keys')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(h.calls.filter(c => c.startsWith('agentStart')), 'no in-process worker: herdr runs it').toHaveLength(1)
+    expect(f.workers).toHaveLength(0)
+    const bridge = join(f.dir, 'workers', readdirSync(join(f.dir, 'workers')).find(d => d.length === 36)!)
+    expect(readdirSync(join(bridge, 'inbox')), 'the brief waits in the inbox for the worker').toHaveLength(1)
+    appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"ready","summary":"keys rotated"}\n')
+    await until(() => f.receipts('460').includes('keys rotated'))
+    expect(f.receipts('460')).toContain('ready: keys rotated')
+  })
+
+  it('after a router restart the herdr worker is taken over, not started a second time', async () => {
+    const h = memoryHerdr()
+    const a = fixture(true, undefined, undefined, h.herdr)
+    a.addComment('470', 'octocat', 'bump the base image')
+    await a.running.tick()
+    await settle()
+    a.decide('accept')
+    await a.running.tick()
+    expect(h.calls.filter(c => c.startsWith('agentStart'))).toHaveLength(1)
+    a.running.stop()
+
+    const b = fixture(true, undefined, a.dir, h.herdr)
+    await b.running.tick()
+    expect(h.calls.filter(c => c.startsWith('agentStart')), 'the worker outlived the router').toHaveLength(1)
+    expect(readFileSync(join(a.dir, 'engine.log'), 'utf8')).toMatch(/worker\.adopted ticket=/)
+    const bridge = join(a.dir, 'workers', readdirSync(join(a.dir, 'workers')).find(d => d.length === 36)!)
+    appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"ready","summary":"image bumped"}\n')
+    await until(() => b.receipts('470').includes('image bumped'))
+    expect(b.receipts('470')).toContain('ready: image bumped')
+  })
+
+  it('a ticket that ends releases its worker: the slot leaked when the engine had no executor wired', async () => {
+    const f = fixture()
+    f.addComment('480', 'octocat', 'tidy the README')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    await f.workers[0]!.report!({ state: 'ready', summary: 'tidied' })
+    await until(() => JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text).length === 0)
+    await settle()
+    expect(f.running.workers().length, 'the ended ticket gave its slot back').toBe(0)
+  })
+
+  it("a follow-up on a working ticket's thread reaches its worker", async () => {
+    const f = fixture()
+    f.addComment('490', 'octocat', 'bump the base image')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    f.addComment('490', 'octocat', 'also pin the digest', '2026-11-05T09:05:00Z')
+    await f.running.tick()
+    await until(() => f.workers[0]!.prompts.join('\n').includes('also pin the digest'))
+    expect(f.workers[0]!.prompts.join('\n')).toContain('also pin the digest')
+  })
+
+  it('a second accept on a thread that already has an open ticket is recorded as ignore: the TASK-44 duplicate', async () => {
+    const f = fixture()
+    f.addComment('500', 'octocat', 'rotate the keys')
+    await f.running.tick()
+    await settle()
+    f.addComment('500', 'octocat', 'and run the dev-pod test', '2026-11-05T09:02:00Z')
+    await f.running.tick()
+    f.decide('accept')
+    await f.running.tick()
+    await settle()
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await settle()
+    const open = JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text) as unknown[]
+    expect(open, 'one open ticket per thread').toHaveLength(1)
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/eval\.accept_overruled .*thread=github:#500/)
+  })
+
+  it('a burst of evals opens one judge, not one per eval', async () => {
+    const f = fixture()
+    for (const id of ['501', '502', '503', '504']) f.addComment(id, 'octocat', `do task ${id} tonight`)
+    await f.running.tick()
+    await settle()
+    expect(f.judgeSessions, 'opening a session takes tens of seconds; a burst must not open a pile').toHaveLength(1)
+  })
+
+  it('the log makes the handoff from engine to judge readable after the fact', async () => {
+    const f = fixture()
+    f.addComment('500', 'octocat', 'ship it tonight')
+    await f.running.tick()
+    f.decide('accept')
+    await f.running.tick()
+    const log = readFileSync(join(f.dir, 'engine.log'), 'utf8')
+    expect(log).toMatch(/router\.start dataDir=/)
+    expect(log).toMatch(/eval\.deliver eval=\S+ bytes=\d+ target=judge(-starting)?/)
+    expect(log, 'the pane must not be the judge').not.toMatch(/target=pane-fallback/)
+    expect(log).toMatch(/eval\.decided eval=\S+ kind=accept/)
+    expect(log).toMatch(/tick n=\d+ inflight=/)
+  })
+
+  it('tickets_open tells a person what is running and what it waits for', async () => {
+    const f = fixture()
+    f.addComment('401', 'octocat', 'cut the release')
+    await f.running.tick()
+    f.decide('accept')
+    await f.running.tick()
+    const listed = JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]).toMatchObject({ thread: '#401', title: 'Ship tonight' })
+    f.workers[0]!.report!({ state: 'blocked', summary: 'need the window', question: 'Ship on the green build?' })
+    const after = JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text)
+    expect(after[0].waiting).toBe('Ship on the green build?')
+  })
+
+  it('pause stops new work, resume starts it again', async () => {
+    const f = fixture()
+    invoke(f, 'engine_pause', { paused: true })
+    f.addComment('402', 'octocat', 'do the thing')
+    await f.running.tick()
+    expect(f.judge.prompts).toHaveLength(0)
+    invoke(f, 'engine_pause', { paused: false })
+    await f.running.tick()
+    expect(f.judge.prompts).toHaveLength(1)
+    expect(f.pi.sent, 'the operator pane must never receive judgement prompts').toHaveLength(0)
+  })
+
+  it('stop ends the loop: a quiet timer fires nothing after it', async () => {
+    const f = fixture()
+    f.addComment('403', 'octocat', 'first')
+    await new Promise(r => setTimeout(r, 40))
+    f.running.stop()
+    const seen = f.pi.sent.length
+    f.addComment('403', 'octocat', 'second', '2026-11-05T09:05:00Z')
+    await new Promise(r => setTimeout(r, 40))
+    expect(f.pi.sent.length).toBe(seen)
+  })
+
+  it('a daemon comment never reaches the judge', async () => {
+    const f = fixture()
+    f.addComment('404', 'fleet-answer-loop', 'RE-QUEUE-PENDING TASK-404')
+    await f.running.tick()
+    expect(f.pi.sent).toHaveLength(0)
+  })
+})
+
+describe('configFrom', () => {
+  it('a label added after startup routes work: agent-ready is a person saying go', async () => {
+    const f = fixture()
+    await f.running.tick()   // the first look seeds what is open; 410 opens after it, like a real request
+    f.feed.issues.push({ issue: 410, title: 'DO: ship the panel', body: 'Ship the panel.', labels: ['agent-ready'],
+      author: 'octocat', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as IssueState)
+    await f.running.tick()
+    await settle()
+    expect(f.judge.prompts.join('\n')).toContain('#410')
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+  })
+
+  it('a ticket left running by a dead router gets a real worker, not a ghost', async () => {
+    const f = fixture(true, dir => {
+      const repos = new SqliteRepositories(`${dir}/tickets.db`)
+      const at = new Date().toISOString()
+      repos.tickets.save({
+        id: 'ghost', title: 'DO: the thing that was mid-flight', mandate: 'Finish it.', goal: null, owner: 'octocat',
+        channels: [{ source: 'board', address: { card: 'TASK-1' }, thread: 'card:TASK-1' }],
+        mandateVersion: 1, revision: 0, phase: 'executing', plan: null, planRev: 1, planDecisions: [],
+        assignments: [{ id: 'a1', ticketId: 'ghost', planRev: 1, mandate: 'Finish it.', goal: null, budget: { tokens: 1000 },
+          maxWorkers: 1, channel: { source: 'board', address: { card: 'TASK-1' }, thread: 'card:TASK-1' }, boardCard: 'TASK-1',
+          state: 'running', startedAt: at, finishedAt: null, report: null, failures: [] }],
+        children: [], graphVersion: 1, evidence: [], createdAt: at, updatedAt: at, ended: false,
+        budget: { tokens: 1000 }, spend: { tokens: 0 }, attention: null, answers: [], undelivered: [], inputs: [],
+      } as never)
+    })
+    await new Promise(r => setTimeout(r, 400))
+    expect(f.workers.length, 'the assignment stayed marked running with no session behind it').toBeGreaterThan(0)
+    f.running.stop()
+  })
+
+  it('a running assignment the engine wants to keep is closed, because its session is gone', async () => {
+    const at = new Date().toISOString()
+    const f = fixture(true, dir => {
+      const repos = new SqliteRepositories(`${dir}/tickets.db`)
+      repos.tickets.save({
+        id: 'ghost2', title: 'DO: the thing whose worker reported failure', mandate: 'Finish it.', goal: null, owner: 'octocat',
+        channels: [{ source: 'board', address: { card: 'TASK-2' }, thread: 'card:TASK-2' }],
+        mandateVersion: 1, revision: 0, phase: 'executing', plan: null, planRev: 1, planDecisions: [],
+        assignments: [{ id: 'a1', ticketId: 'ghost2', planRev: 1, mandate: 'Finish it.', goal: null, budget: { tokens: 1000 },
+          maxWorkers: 1, channel: { source: 'board', address: { card: 'TASK-2' }, thread: 'card:TASK-2' }, boardCard: 'TASK-2',
+          state: 'running', startedAt: at, finishedAt: null, deliveredAt: null,
+          report: { state: 'failed', summary: 'could not start a worker: old bug', question: null, at }, failures: [] }],
+        children: [], graphVersion: 1, evidence: [], createdAt: at, updatedAt: at, ended: false,
+        budget: { tokens: 1000 }, spend: { tokens: 0 }, attention: null, answers: [], undelivered: [], inputs: [],
+      } as never)
+    })
+    await new Promise(r => setTimeout(r, 400))
+    const saved = new SqliteRepositories(`${f.dir}/tickets.db`).tickets.open().find(t => t.id === 'ghost2')
+    expect(saved?.assignments.at(-1)?.report?.summary, 'the ticket must say nothing is running')
+      .toMatch(/did not survive the router restart/)
+    expect(f.workers.length, 'the mandate stands, so a ghost gets a fresh worker').toBeGreaterThan(0)
+    f.running.stop()
+  })
+
+  it('one router per process: the sessions it creates load this extension too, and must stay inert', () => {
+    expect(activationRefusal({}, ['node', 'pi'], false)).toBeNull()
+    expect(activationRefusal({}, ['node', 'pi'], true)).toMatch(/already running in this process/)
+  })
+
+  it('a pi started from a worker shell inherits the role but is not the appointed process', () => {
+    const env = { PI_SUPERAGENT_SESSION_ID: 'abc-123' }
+    expect(activationRefusal(env, ['node', 'pi', '--session-id', 'abc-123'], false)).toBeNull()
+    expect(activationRefusal(env, ['node', 'pi', '-p', 'run the tests'], false)).toMatch(/not the process the start script launched/)
+  })
+
+  it('the entry point starts one router, refuses a second, and lets a reload claim the process again', () => {
+    const dir = tmp()
+    mkdirSync(join(dir, 'board'), { recursive: true })
+    const saved = { ...process.env }
+    Object.assign(process.env, { PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_STATE: dir, PI_SUPERAGENT_TICK_MS: '3600000' })
+    delete process.env.PI_SUPERAGENT_PANEL_PORT
+    delete process.env.PI_SUPERAGENT_SESSION_ID
+    try {
+      const first = fakePi()
+      superagent(first)
+      const child = fakePi()
+      superagent(child)
+      expect(first.tools.size).toBeGreaterThan(0)
+      expect(child.tools.size, 'a session created inside the router must not become a router').toBe(0)
+      expect(readFileSync(join(dir, 'engine.log'), 'utf8')).toMatch(/router\.inert reason="a router is already running in this process"/)
+      for (const handler of first.handlers.get('session_shutdown') ?? []) handler()
+      const reloaded = fakePi()
+      superagent(reloaded)
+      expect(reloaded.tools.size, 'after shutdown, /reload must get its router back').toBeGreaterThan(0)
+      for (const handler of reloaded.handlers.get('session_shutdown') ?? []) handler()
+    } finally {
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]
+      Object.assign(process.env, saved)
+    }
+  })
+
+  it('is inert for every session the start script did not appoint', () => {
+    expect(configFrom({})).toBeNull()
+    expect(configFrom({ PI_SUPERAGENT_ROLE: 'worker' })).toBeNull()
+    expect(() => configFrom({ PI_SUPERAGENT_ROLE: 'router' })).toThrow(/PI_SUPERAGENT_STATE/)
+    expect(configFrom({ PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_STATE: '/s' }))
+      .toMatchObject({ dataDir: '/s', worktreeRoot: '/s/work', self: 'pi-superagent' })
+    const github = configFrom({ PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_STATE: '/s', PI_SUPERAGENT_GITHUB_REPO: 'o/r' })
+    expect(github).toMatchObject({ githubRepo: 'o/r' })
+    // Defaulting this to the operator's login dropped every comment the operator wrote.
+    expect(github?.githubSelf).toBeUndefined()
+  })
+})

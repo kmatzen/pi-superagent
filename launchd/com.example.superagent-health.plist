@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- INSTALL: replace every __HOME__ with your home directory (launchd does not expand ~):
+     sed "s|__HOME__|$HOME|g" launchd/com.example.superagent-health.plist > ~/Library/LaunchAgents/com.example.superagent-health.plist
+     The supervisor of the supervisor. `scripts/superagent` says a supervisor that dies with its
+     supervisor is decoration, so its four status codes are meant to be read by something: this job
+     reads them every five minutes and restarts a down router, and --respect-stop keeps a deliberate
+     `superagent stop` deliberate. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.superagent-health</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd "$HOME/git/pi-superagent" &amp;&amp; ./scripts/superagent --respect-stop status &gt;/dev/null 2&gt;&amp;1 || ./scripts/superagent --respect-stop start</string>
+  </array>
+  <!-- launchd hands the job an empty PATH: the first live pass logged
+       `scripts/superagent: line 55: tmux: command not found`, so status failed and start failed with it.
+       herdr and node live in /opt/homebrew/bin and pi in ~/.npm-global/bin; all must be on the job's PATH. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:__HOME__/.npm-global/bin</string>
+    <key>HOME</key><string>__HOME__</string>
+  </dict>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/tmp/superagent-health.log</string>
+  <key>StandardErrorPath</key><string>/tmp/superagent-health.log</string>
+</dict>
+</plist>

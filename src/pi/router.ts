@@ -1,0 +1,78 @@
+/** The router's shared surface: config, the SDK seam, the worker brief, and the admissibility policy. */
+import { isListed } from './authors.ts'
+import type { Policy, Ticket } from '../core/index.ts'
+
+export interface RouterConfig {
+  herdrWorkspace?: string
+  dataDir: string
+  self: string
+  bots: ReadonlySet<string>
+  worktreeRoot: string
+  sdkPath?: string
+  maxConcurrent?: number
+  workerQuietMinutes?: number
+  judgeThinking?: string
+  /** Each worker is its own pi session in a herdr tab. */
+  workers?: 'herdr'
+  herdrBin?: string
+  evalTimeoutMs?: number
+  /** How often the loop polls without being nudged; the panel's freshness is this number. */
+  tickMs?: number
+  policyVersion?: string
+  /** Serve the panel and the management API on 127.0.0.1:port; unset means no panel. */
+  panelPort?: number
+  prepare?: string
+  githubRepo?: string
+  githubSelf?: string
+  blockedCommands?: readonly string[]
+  /** Off by default: a worker that delegates escapes its mandate, workspace and report. */
+  allowDelegation?: boolean
+}
+
+export interface SdkSurface {
+  createAgentSession(options: Record<string, unknown>): Promise<{
+    session: {
+      sessionId: string
+      prompt(text: string, options?: { streamingBehavior?: string }): Promise<void>
+      subscribe(listener: (event: { type: string }) => void): () => void
+      abort(): void
+      dispose(): void
+    }
+  }>
+  SessionManager: { inMemory(cwd: string): unknown }
+  /** pi's documented way to add an inline extension to a session or leave discovered resources out. */
+  DefaultResourceLoader: new (options: Record<string, unknown>) => { reload(): Promise<void> }
+  getAgentDir(): string
+}
+
+export async function loadSdk(config: RouterConfig): Promise<SdkSurface> {
+  const spec = config.sdkPath ?? '@earendil-works/pi-coding-agent'
+  return await import(spec) as unknown as SdkSurface
+}
+
+export const briefFor = (ticket: Ticket, worktree: string): string => [
+  `You are a worker on ${ticket.channels[0]?.thread ?? ticket.id}: ${ticket.title}.`,
+  `Mandate: ${ticket.mandate ?? '(the ticket text)'}`,
+  `Worktree: ${worktree}. Work there; do not touch the primary checkout.`,
+  `Finish with the ticket_report tool: state one of ready, blocked, failed, cancelled; summary = what a`,
+  `reviewer needs; question = the single yes/no the operator must answer, and only for state=blocked.`,
+  'Do not edit the ticket and do not post reply comments: the router writes receipts, you report.',
+].join('\n')
+
+export function policyOf(config: RouterConfig): Policy {
+  return {
+    version: 'v1',
+    paused: false,
+    // Longer than the router needs to answer one eval under load: a deadline it cannot meet turns every
+    // pending judgement into a requeue, and the requeues are what pin the session at full CPU.
+    evalTimeoutMs: config.evalTimeoutMs ?? 300_000,
+    // Admissibility is policy, not a model call: a person, explicitly, on a thread we listen to.
+    // The author is checked again here: a trigger stored before bot names were matched as patterns still says
+    // human, and one such (pi-f11a9262 asking the operator to approve a pod test) became a ticket to run it.
+    gate: trigger => (trigger.human && !isListed(trigger.actor.id, config.bots)
+      ? { admissible: true, strength: 'explicit', basis: { via: 'listed' } }
+      : { admissible: false, reason: 'not human' }),
+    revalidate: () => true,
+    admitsInferred: rules => rules.length > 0,
+  }
+}
