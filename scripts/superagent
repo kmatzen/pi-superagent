@@ -42,7 +42,7 @@ SDK_PATH="${PI_SUPERAGENT_SDK_PATH:-}"
 # command line lacks it.
 SESSION_ID="${PI_SUPERAGENT_SESSION_ID:-}"
 
-usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] start|stop|restart|status"; }
+usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] start|stop|restart|status|identity"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -50,7 +50,7 @@ while [ $# -gt 0 ]; do
     --state) STATE="$2"; shift 2 ;;
     --respect-stop) RESPECT_STOP=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    start|stop|restart|status) CMD="$1"; shift ;;
+    start|stop|restart|status|identity) CMD="$1"; shift ;;
     *) usage >&2; exit 2 ;;
   esac
 done
@@ -116,7 +116,7 @@ start() {
   )
   # herdr starts the tab from its own environment, not this one: a setting reaches the router only by name.
   local key
-  for key in GITHUB_REPO GITHUB_SELF SELF BOTS MAX_WORKERS TICK_MS PREPARE BLOCKED ALLOW_DELEGATION JUDGE_THINKING; do
+  for key in GITHUB_REPO GITHUB_SELF GITHUB_TOKEN_FILE SELF BOTS MAX_WORKERS TICK_MS PREPARE BLOCKED ALLOW_DELEGATION JUDGE_THINKING; do
     key="PI_SUPERAGENT_$key"
     [ -n "${!key:-}" ] && env+=(--env "$key=${!key}")
   done
@@ -183,6 +183,42 @@ status() {
   echo "running: herdr agent $SESSION in workspace $WORKSPACE_LABEL, state $STATE"
 }
 
+# The proof of who the agent will speak as, asked of GitHub: config can name any account, and a receipt
+# posted from the operator's own login is indistinguishable from the operator writing it. Exits 1 when the
+# credential and PI_SUPERAGENT_GITHUB_SELF disagree, 2 when GitHub refused to answer (not the 0-3 status
+# contract above, which is what the scheduled health check reads).
+identity() {
+  local file="${PI_SUPERAGENT_GITHUB_TOKEN_FILE:-}"
+  [ -n "$file" ] || [ ! -f "$STATE/github.token" ] || file="$STATE/github.token"
+  local src="gh's own sign-in (the account gh is logged in as)" token=""
+  if [ -n "$file" ]; then
+    src="token file $file"
+    if [ ! -r "$file" ]; then echo "no: $file cannot be read" >&2; return 2; fi
+    [ "$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file" 2>/dev/null)" = "600" ] \
+      || echo "warning: $file is not mode 600 — it is a GitHub credential" >&2
+    token="$(tr -d '[:space:]' < "$file")"
+  fi
+  command -v gh >/dev/null || { echo "no: gh is not on PATH" >&2; return 2; }
+  local out rc
+  if [ -n "$token" ]; then out="$(GH_TOKEN="$token" gh api user --jq .login 2>&1)"; else out="$(gh api user --jq .login 2>&1)"; fi
+  rc=$?
+  if [ "$rc" -ne 0 ]; then echo "no: GitHub refused the credential ($src): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)" >&2; return 2; fi
+  local login; login="$(printf '%s' "$out" | tr -d '[:space:]')"
+  echo "speaks as: $login ($src)"
+  echo "repo:      ${PI_SUPERAGENT_GITHUB_REPO:-none: intake is off}"
+  [ -f "$STATE/identity.json" ] && echo "router:    $(tr -d '\n' < "$STATE/identity.json" | cut -c1-200)"
+  if [ -n "${PI_SUPERAGENT_GITHUB_SELF:-}" ]; then
+    if [ "$(printf '%s' "$login" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$PI_SUPERAGENT_GITHUB_SELF" | tr 'A-Z' 'a-z')" ]; then
+      echo "config:    PI_SUPERAGENT_GITHUB_SELF=$PI_SUPERAGENT_GITHUB_SELF matches"
+      return 0
+    fi
+    echo "config:    PI_SUPERAGENT_GITHUB_SELF=$PI_SUPERAGENT_GITHUB_SELF does NOT match the credential" >&2
+    return 1
+  fi
+  echo "config:    PI_SUPERAGENT_GITHUB_SELF unset — the agent and its operator share an account, so its"
+  echo "           replies are told apart by the hidden reply footer alone"
+}
+
 case "${CMD:-status}" in
   start)
     if [ -n "${RESPECT_STOP:-}" ] && [ -f "$STOP_MARKER" ]; then echo "left stopped: manual stop marker present"; exit 0; fi
@@ -192,5 +228,6 @@ case "${CMD:-status}" in
     if [ -n "${RESPECT_STOP:-}" ] && [ -f "$STOP_MARKER" ]; then echo "left stopped: manual stop marker present"; exit 0; fi
     stop; start ;;
   status) status ;;
+  identity) identity ;;
   *) usage >&2; exit 2 ;;
 esac

@@ -24,6 +24,8 @@ export interface RouterConfig {
   prepare?: string
   githubRepo?: string
   githubSelf?: string
+  /** A file holding the token the agent speaks as; a path in config, so the secret never rides a command line. */
+  githubTokenFile?: string
   blockedCommands?: readonly string[]
   /** Off by default: a worker that delegates escapes its mandate, workspace and report. */
   allowDelegation?: boolean

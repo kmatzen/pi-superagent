@@ -70,7 +70,7 @@ afterEach(() => { for (const r of live.splice(0)) r.stop() })
 
 function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
                  options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number;
-                   workerTiming?: { pollMs?: number; livenessMs?: number } } = {}) {
+                   workerTiming?: { pollMs?: number; livenessMs?: number }; config?: Partial<RouterConfig> } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [] }
   const api: GithubApi = options.githubApi ?? {
@@ -90,6 +90,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', githubRepo: 'o/r',
     bots: new Set(['fleet-answer-loop']), tickMs: options.tickMs ?? 5, ...(herdr ? { workers: 'herdr' as const } : {}),
     ...(options.prepare ? { prepare: options.prepare } : {}),
+    ...options.config,
   }
   const workers: Spy[] = []
   const judge: Spy = { prompts: [], report: undefined }
@@ -127,6 +128,72 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   const settleJudge = () => { for (const l of judgeListeners) l({ type: 'agent_settled' }) }
   return { dir, feed, addComment, receipts, config, pi, running, workers, judge, judgeSessions, loaders, settleJudge, sdk, accept, decide }
 }
+
+describe('the account the router speaks as', () => {
+  const github = (over: Partial<GithubApi> = {}): GithubApi => ({
+    issues: async () => [], comments: async () => [], postComment: async () => {}, ...over,
+  })
+  const setup = (dir: string) => JSON.parse(readFileSync(join(dir, 'setup.json'), 'utf8')) as
+    { problem: { code: string; detail: string } | null }
+  const recorded = (dir: string) => JSON.parse(readFileSync(join(dir, 'identity.json'), 'utf8')) as
+    { login: string; self: string; mode: string }
+  const settled = (dir: string, ok: (s: ReturnType<typeof setup>) => boolean) => () => {
+    try { return ok(setup(dir)) } catch { return false }
+  }
+  const now = () => new Date().toISOString()
+
+  it('writes the identity finding into setup.json, where the health check reads code 3', async () => {
+    const f = fixture(true, undefined, undefined, undefined, {
+      githubApi: github({ whoami: async () => 'matzen_adobe' }), config: { githubSelf: 'matzen-adobe-bot' },
+    })
+    await until(settled(f.dir, s => s.problem?.code === 'github-identity'))
+    expect(setup(f.dir).problem!.detail).toContain('speaks as matzen_adobe')
+    expect(setup(f.dir).problem!.detail).toContain('matzen-adobe-bot')
+    expect(recorded(f.dir).mode).toBe('mismatch')
+  })
+
+  it('clears the finding once the credential and the config agree again', async () => {
+    let login = 'matzen_adobe'
+    const f = fixture(true, undefined, undefined, undefined, {
+      githubApi: github({ whoami: async () => login }), config: { githubSelf: 'matzen-adobe-bot' },
+    })
+    await until(settled(f.dir, s => s.problem?.code === 'github-identity'))
+    login = 'matzen-adobe-bot'
+    await f.running.tick()
+    await until(settled(f.dir, s => s.problem === null))
+    expect(recorded(f.dir).mode).toBe('configured')
+  })
+
+  it('adopts a [bot] login as its own without being told, and reads its own receipts as nothing', async () => {
+    const f = fixture(true, undefined, undefined, undefined, {
+      githubApi: github({
+        comments: async () => [{ issue: 7, author: 'superagent[bot]', at: now(), body: 'the worker reported ready' }],
+        whoami: async () => 'superagent[bot]',
+      }),
+    })
+    await f.running.tick()
+    await settle()
+    expect(recorded(f.dir)).toMatchObject({ mode: 'adopted', self: 'superagent[bot]' })
+    expect(f.judge.prompts.join('\n'), 'its own writing is not a request').not.toContain('the worker reported ready')
+  })
+
+  it("leaves a shared account alone: the operator's comments stay requests", async () => {
+    const open: IssueState[] = []
+    const f = fixture(true, undefined, undefined, undefined, {
+      githubApi: github({
+        issues: async () => [...open],
+        whoami: async () => 'matzen_adobe',
+      }),
+    })
+    await f.running.tick()
+    open.push({ issue: 7, title: 'DO: the thing', body: 'fix it', labels: [], author: 'matzen_adobe',
+      createdAt: now(), updatedAt: now() })
+    await f.running.tick()
+    await until(() => f.judge.prompts.length > 0)
+    expect(recorded(f.dir).mode).toBe('shared')
+    expect(f.judge.prompts.join('\n'), 'the operator speaks from the account the agent posts from').toContain('DO: the thing')
+  })
+})
 
 describe('the router extension', () => {
   it('GitHub issues alone run the whole loop', async () => {

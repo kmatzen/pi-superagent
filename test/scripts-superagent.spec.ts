@@ -132,4 +132,62 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
   it('an unknown flag is a usage error, not a silent success', () => {
     expect(run(['--deply', 'status']).status).toBe(2)
   })
+
+  it('hands the router the token file path: the path is a setting, the token in it is not', () => {
+    writeFileSync(join(state, 'config.env'), 'PI_SUPERAGENT_GITHUB_REPO=o/spike\n'
+      + 'PI_SUPERAGENT_GITHUB_TOKEN_FILE=/etc/superagent/github.token\n')
+    expect(run(['start']).status).toBe(0)
+    expect(routerTab()).toContain('--env PI_SUPERAGENT_GITHUB_TOKEN_FILE=/etc/superagent/github.token')
+  })
+
+  // A fake `gh` on PATH answers `api user --jq .login`, the only question `identity` asks GitHub.
+  const withGh = (login: string, rc = 0) => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'pi-sa-gh-')), 'bin')
+    mkdirSync(dir, { recursive: true }); dirs.push(join(dir, '..'))
+    writeFileSync(join(dir, 'gh'), `#!/bin/bash\n[ "$2" = user ] || exit 0\n[ "${rc}" = 0 ] && echo ${login} && exit 0\necho "bad credentials" >&2\nexit ${rc}\n`)
+    chmodSync(join(dir, 'gh'), 0o755)
+    return { PATH: `${dir}:${process.env.PATH}` }
+  }
+
+  it('identity asks GitHub whose account the agent will post from', () => {
+    const token = join(state, 'github.token')
+    writeFileSync(token, 'ghp_agent\n'); chmodSync(token, 0o600)
+    const r = run(['identity'], { ...withGh('agent-bot'), PI_SUPERAGENT_GITHUB_SELF: 'agent-bot',
+      PI_SUPERAGENT_GITHUB_REPO: 'o/spike' })
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/speaks as: agent-bot \(token file .*github\.token\)/)
+    expect(r.stdout).toMatch(/repo: +o\/spike/)
+    expect(r.stdout).toMatch(/PI_SUPERAGENT_GITHUB_SELF=agent-bot matches/)
+  })
+
+  it('identity refuses a credential that is not the account the config names: that is a receipt by the wrong author', () => {
+    const token = join(state, 'github.token')
+    writeFileSync(token, 'ghp_operator\n'); chmodSync(token, 0o600)
+    const r = run(['identity'], { ...withGh('matzen_adobe'), PI_SUPERAGENT_GITHUB_SELF: 'agent-bot' })
+    expect(r.status).toBe(1)
+    expect(r.stdout).toMatch(/speaks as: matzen_adobe/)
+    expect(r.stderr).toMatch(/does NOT match/)
+  })
+
+  it('identity says when GitHub will not accept the credential, instead of claiming an identity', () => {
+    const token = join(state, 'github.token')
+    writeFileSync(token, 'ghp_revoked\n'); chmodSync(token, 0o600)
+    const r = run(['identity'], { ...withGh('agent-bot', 4) })
+    expect(r.status).toBe(2)
+    expect(r.stderr).toMatch(/GitHub refused the credential/)
+  })
+
+  it('identity names the shared-account default it is running under', () => {
+    const r = run(['identity'], withGh('matzen_adobe'))
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/speaks as: matzen_adobe \(gh's own sign-in/)
+    expect(r.stdout).toMatch(/share an account/)
+  })
+
+  it('warns when the token file is readable by anyone but you', () => {
+    const token = join(state, 'github.token')
+    writeFileSync(token, 'ghp_agent\n'); chmodSync(token, 0o644)
+    const r = run(['identity'], withGh('agent-bot'))
+    expect(r.stderr).toMatch(/not mode 600/)
+  })
 })

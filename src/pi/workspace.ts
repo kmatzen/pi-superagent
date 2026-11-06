@@ -28,6 +28,13 @@ export class WorkspaceError extends Error {
 
 const SAFE = /^[A-Za-z0-9._-]+$/
 
+/** A worker inherits the router's environment, and the router is the one process holding a GitHub
+ *  credential. The PATH shim refuses `gh` by name; this refuses the credential itself. */
+export const CREDENTIAL_ENV = [
+  'GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
+  'PI_SUPERAGENT_GITHUB_TOKEN_FILE',
+]
+
 export function prepareWorkspace(request: WorkspaceRequest): PreparedWorkspace {
   if (!SAFE.test(request.ticketId)) throw new WorkspaceError('bad-ticket-id', `refusing a workspace named ${request.ticketId}`)
   const dir = join(request.root, request.ticketId)
@@ -46,6 +53,7 @@ export function prepareWorkspace(request: WorkspaceRequest): PreparedWorkspace {
     PI_SUPERAGENT_DIR: dir,
     ...request.extra,
   }
+  for (const name of CREDENTIAL_ENV) delete env[name]
   if (request.prepare) {
     try {
       execFileSync('/bin/bash', ['-lc', request.prepare], { cwd: dir, env, encoding: 'utf8', timeout: 300_000, stdio: ['ignore', 'pipe', 'pipe'] })

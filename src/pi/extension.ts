@@ -8,6 +8,7 @@ import { SqliteRepositories } from './store.ts'
 import { SessionInbox } from './sink-session-inbox.ts'
 import { GithubSource, REPLY_MARKER, type GithubApi } from './source-github.ts'
 import { ghApi } from './gh-api.ts'
+import { checkGithubIdentity, type IdentityMode, type IdentityRecord } from './identity.ts'
 import { CommentOutbox } from './outbox.ts'
 import { PiExecutor } from './executor.ts'
 import { renderCandidateFor, SessionAssessor, type SessionPilot } from './assessor.ts'
@@ -117,11 +118,45 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       }
     },
   }, repos.kv)
-  const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({ repo: cfg.githubRepo }) : undefined)
+  const githubApi = deps.githubApi ?? (cfg.githubRepo
+    ? ghApi({ repo: cfg.githubRepo, ...(cfg.githubTokenFile ? { tokenFile: cfg.githubTokenFile } : {}) })
+    : undefined)
   const github = githubApi
     ? new GithubSource(githubApi, { repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots }, repos.kv)
     : undefined
   github?.bootstrap()
+  const nowIso = deps.now ?? (() => new Date().toISOString())
+  // `superagent status` reads setup.json as exit code 3, so a router that would post as the wrong account
+  // says so where the health check can see it instead of quietly signing receipts with the operator's login.
+  const writeSetup = (extra: Array<{ code: string; place: string; detail: string }>): void => {
+    const problems = [...setupProblems({ root: cfg.worktreeRoot, stateDir: cfg.dataDir }), ...extra]
+    writeFileSync(join(cfg.dataDir, 'setup.json'), JSON.stringify({ problem: problems[0] ?? null, problems, at: nowIso() }))
+  }
+  let identityRecord: IdentityRecord | undefined
+  const identityLogin = () => identityRecord?.login ?? ''
+  const checkIdentity = async (): Promise<void> => {
+    if (!githubApi || !github) return
+    const got = await checkGithubIdentity({
+      api: githubApi, repo: cfg.githubRepo ?? '', bots: cfg.bots,
+      ...(cfg.githubSelf ? { configuredSelf: cfg.githubSelf } : {}),
+      ...(cfg.githubTokenFile ? { tokenFile: cfg.githubTokenFile } : {}),
+      now: nowIso,
+    })
+    if (got.self) github.setSelf(got.self)
+    identityRecord = {
+      login: got.login, self: github.self(), mode: got.mode, repo: cfg.githubRepo ?? '',
+      credential: cfg.githubTokenFile ?? "gh's own sign-in", at: nowIso(),
+    }
+    writeFileSync(join(cfg.dataDir, 'identity.json'), `${JSON.stringify(identityRecord, null, 2)}\n`)
+    log.line(got.problems.length ? 'warn' : 'info', 'github.identity', {
+      login: got.login || null, self: github.self(), mode: got.mode, problems: got.problems.map(p => p.code),
+    })
+    writeSetup(got.problems)
+  }
+  // Before the first poll, and every twentieth pass: intake filters on `self`, so a poll that runs first can
+  // read the agent's own writing as a request, and a fixed config should clear its finding without a restart.
+  let identityChecked = checkIdentity()
+  let identitySweeps = 0
   let paused = false
 
   // Judgement prompts go to a headless session. Sending them into this session is what made the operator's
@@ -401,6 +436,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const started = Date.now()
     let triggers: Trigger[] = []
     if (github) {
+      if (identitySweeps % 20 === 19) identityChecked = checkIdentity()
+      await identityChecked
       // A failing poll is not a quiet tick: a router that cannot hear GitHub looks healthy forever, so three
       // failures in a row go into health.json, where `superagent status` turns them into exit code 2.
       try {
@@ -438,6 +475,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // evaluateDue runs on every pass: it is the only thing that expires a stuck eval, and gating it once left
     // 54 stale judgements in flight forever. The judge's load is bounded by the assessor, one question at a time.
     sweeps += 1
+    identitySweeps += 1
     engine.evaluateDue()
     log.line('info', 'tick', {
       n: sweeps, inflight: repos.threads.active().filter(t => t.evaluating).length,
@@ -508,6 +546,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     ? createPanelServer({
       repos, engine, assessor, config: cfg,
       load: () => panelLoad(), isPaused: () => paused, workers: () => executor.workers(),
+      identity: () => ({ login: identityLogin(), mode: identityRecord?.mode ?? 'unknown' as IdentityMode }),
       log: (level, event, fields) => log.line(level, event, fields), setPaused: (v: boolean) => { paused = v },
       now: deps.now ?? (() => new Date().toISOString()),
     })
@@ -576,6 +615,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     // identifies the agent, and naming the shared account here would drop every comment the operator writes.
     ...(env.PI_SUPERAGENT_GITHUB_REPO ? { githubRepo: env.PI_SUPERAGENT_GITHUB_REPO } : {}),
     ...(env.PI_SUPERAGENT_GITHUB_SELF ? { githubSelf: env.PI_SUPERAGENT_GITHUB_SELF } : {}),
+    // A path, never the token: the start script passes settings to the router by name on a command line.
+    ...(env.PI_SUPERAGENT_GITHUB_TOKEN_FILE ? { githubTokenFile: env.PI_SUPERAGENT_GITHUB_TOKEN_FILE } : {}),
   }
 }
 

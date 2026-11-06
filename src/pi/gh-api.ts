@@ -1,10 +1,21 @@
-/** GitHub through the `gh` CLI: the credentials stay in the operator's keyring, out of this process. */
+/** GitHub through the `gh` CLI. With no token file `gh` speaks as whoever is signed in — the operator's own
+ *  login, so every receipt reads like the operator answering himself; a token goes only to the child's env. */
 import { spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState, type PrReview } from './source-github.ts'
 
 export interface GithubApiOptions {
   repo: string
   bin?: string
+  /** The account the agent speaks as, held out of the process environment so it cannot reach a worker. */
+  tokenFile?: string
+}
+
+/** Read per call, so rotating the token is a file write and not a router restart. */
+const readToken = (file: string): string => {
+  const token = readFileSync(file, 'utf8').trim()
+  if (!token) throw new Error(`github token file ${file} is empty`)
+  return token
 }
 
 // A pull request's conversation comments arrive with an /issues/N url too (a pull request is issue N);
@@ -25,7 +36,8 @@ export function ghApi(options: GithubApiOptions): GithubApi {
   // Asynchronous on purpose: execFileSync held the router's event loop for every round trip (1.5-4 s a
   // pass), and the panel and the judge froze with it.
   const call = (args: string[], stdin?: string): Promise<string> => new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    const env = options.tokenFile ? { ...process.env, GH_TOKEN: readToken(options.tokenFile) } : process.env
+    const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], env })
     let out = ''
     let err = ''
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => { out += chunk })
@@ -38,6 +50,13 @@ export function ghApi(options: GithubApiOptions): GithubApi {
   })
 
   return {
+    /** Who the credential really belongs to, asked of GitHub rather than read from config. */
+    async whoami() {
+      const login = (await call(['api', 'user', '--jq', '.login'])).trim()
+      if (!login) throw new Error('gh api user returned no login')
+      return login
+    },
+
     async comments(since) {
       const query = `repos/${options.repo}/issues/comments?per_page=100&sort=created&direction=asc${since ? `&since=${encodeURIComponent(since)}` : ''}`
       const rows = JSON.parse((await call(['api', query])) || '[]') as Array<Record<string, never | string>>

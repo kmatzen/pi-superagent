@@ -65,6 +65,34 @@ launchctl load ~/Library/LaunchAgents/com.example.superagent-health.plist
 
 The job expects the checkout at `~/git/pi-superagent`; edit its `cd` if yours lives elsewhere.
 
+### The account the agent posts as
+
+Left alone, the agent posts from `gh`'s sign-in — yours. Then every acknowledgement and receipt on an issue
+is authored by `matzen_adobe`, and the thread cannot be read as a conversation with an agent.
+
+Give it an account of its own. Create a machine account (or a GitHub App, whose login ends in `[bot]`),
+give it write access to the watched repository, and put a fine-grained token for it — that repository only,
+Issues read and write — where only you can read it:
+
+```sh
+umask 077
+printf '%s' 'github_token_for_the_agent_account' > ~/.pi/superagent/github.token
+```
+
+The router reads that file per request, so rotating the token is a file write, not a restart, and passes it
+only to the `gh` child. Nothing else about the deployment changes; restart, then prove it:
+
+```sh
+scripts/superagent identity   # speaks as: <the bot login> (token file …) · repo · the router's last check
+gh api repos/OWNER/REPO/issues/1/comments --jq '.[-1].user.login'   # who actually wrote the last reply
+```
+
+`PI_SUPERAGENT_GITHUB_SELF` names the bot account when its login could be yours (a `[bot]` suffix, or a
+login matching `PI_SUPERAGENT_BOTS`, is adopted on its own); `status` then exits 3 with `github-identity`
+if the credential belongs to someone else, which is the failure that makes every receipt the operator's.
+With no token file at all, the agent shares your login and is told apart only by the reply footer it signs.
+Workers never get the credential: `gh` is blocked for them, and `GH_TOKEN` is stripped from their env.
+
 ## Capacity
 
 Up to four workers can be on a run at once (`PI_SUPERAGENT_MAX_WORKERS`); further tickets wait their
@@ -87,7 +115,10 @@ means the judge is wedged; `restart` fixes it.
 **`status` exits 2.** Read `~/.pi/superagent/health.json`. A failing `source` means the router cannot
 reach GitHub; check `gh auth status`. The error clears on the next good poll.
 
-**`status` exits 3.** Read `~/.pi/superagent/setup.json`: it names what is missing and where to fix it.
+**`status` exits 3.** Read `~/.pi/superagent/setup.json`: it names what is missing and where to fix it. A
+`github-identity` problem means the credential and `PI_SUPERAGENT_GITHUB_SELF` name different accounts, so
+`scripts/superagent identity` says which is which; a `github-token-readable` one means the token file needs
+`chmod 600`.
 
 **A worker looks stuck.** Open its tab and read it. Type into it to steer, or press Esc to interrupt.
 

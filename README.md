@@ -64,6 +64,25 @@ scripts/superagent status    # 0 healthy · 1 down · 2 a part is failing · 3 w
 scripts/superagent stop      # the router exits; its workers keep going
 ```
 
+### The account the agent speaks as
+
+By default `gh`'s own sign-in decides, so every acknowledgement and every receipt carries your login, and a
+reader of the thread cannot tell your note from the agent's report. Give the agent an account of its own — a
+classic account, or a GitHub App, whose login ends in `[bot]` — let it write to the watched repository, and
+put its token in a file only you can read:
+
+```sh
+umask 077; printf '%s' <token> > ~/.pi/superagent/github.token   # fine-grained, one repo, Issues read+write
+```
+
+`scripts/superagent identity` then answers, from GitHub and not from the config file, who the agent will
+speak as, and exits non-zero when the credential and `PI_SUPERAGENT_GITHUB_SELF` disagree. A login that
+cannot belong to a person (`[bot]`, or one `PI_SUPERAGENT_BOTS` names) is adopted as the agent's own without
+any setting: the agent never reads its own comments as a request. The token file is the only supported way
+to hand over a credential — the start script passes settings to the router on a command line, and every
+`ps` on the machine reads those, so a token in a setting would be public. Workers get no GitHub credential
+at all: `gh` is blocked for them, and the credential's own environment variables are removed from their env.
+
 ## Watching it
 
 Everything happens in the herdr workspace `superagent`:

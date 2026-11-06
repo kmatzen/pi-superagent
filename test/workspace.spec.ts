@@ -10,6 +10,22 @@ const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ws-')); dirs.push(d
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
 
 describe('the worker environment', () => {
+  it('leaves a ticket worker no GitHub credential: the router holds one, and it is not the worker to spend', () => {
+    const root = tmp()
+    const names = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'PI_SUPERAGENT_GITHUB_TOKEN_FILE']
+    const saved = names.map(n => [n, process.env[n]] as const)
+    for (const n of names) process.env[n] = 'ghp_secret'
+    let w, env
+    try {
+      w = prepareWorkspace({ root, ticketId: 'TK-9', stateDir: root, prepare: 'env > env.txt' })
+      env = readFileSync(join(w.dir, 'env.txt'), 'utf8')
+    } finally { for (const [n, v] of saved) { if (v === undefined) delete process.env[n]; else process.env[n] = v } }
+    for (const n of names) {
+      expect(env, `${n} reached a worker's shell`).not.toContain(`${n}=ghp_secret`)
+      expect(w!.env[n], `${n} reached the worker's env map`).toBeUndefined()
+    }
+  })
+
   it('binds relative paths to the workspace like absolute ones', () => {
     const policy = { blocked: ['gh'], workspace: '/ws/t1' }
     expect(decideToolCall({ toolName: 'write', args: { path: '../../.ssh/authorized_keys' } }, policy)).toBeDefined()

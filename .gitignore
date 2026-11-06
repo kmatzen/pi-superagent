@@ -5,3 +5,5 @@ dist/
 formal/states/
 __pycache__/
 states/
+scratch/
+.secrets/

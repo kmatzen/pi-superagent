@@ -25,6 +25,8 @@ export interface GithubApi {
   comments(since?: string): Promise<IssueComment[]>
   issues(state: 'open' | 'closed'): Promise<IssueState[]>
   postComment(issue: number, body: string): Promise<void>
+  /** The login the credential speaks as; absent on a fake that never talks to GitHub. */
+  whoami?(): Promise<string>
   /** Newest-first page of one issue's comments; a retried post looks here before speaking twice. */
   commentsFor?(issue: number): Promise<IssueComment[]>
   /** Open pull-request numbers: their conversations are threads a ticket can own, so closing them counts. */
@@ -74,12 +76,17 @@ export class GithubSource {
   private staged: Array<[string, unknown]> = []
   private lastOpen: ReadonlySet<string> | undefined
 
-  constructor(private readonly api: GithubApi, private readonly options: GithubSourceOptions,
+  constructor(private readonly api: GithubApi, private options: GithubSourceOptions,
               private readonly store: PositionStore, private readonly now: () => number = () => Date.now()) {}
 
   /** Threads open as of the last poll ('#N', issues and pull requests): absence is how GitHub says
    *  a conversation ended — merged, closed, or deleted all look the same from here, and all mean stop. */
   openThreads(): ReadonlySet<string> | undefined { return this.lastOpen }
+
+  /** A token names its own account: nothing else tells the source which author is itself. */
+  setSelf(login: string): void { this.options.self = login }
+
+  self(): string { return this.options.self }
 
   /** A cold start reads a day back: enough to catch a request made while the router was down. */
   bootstrap(): void {

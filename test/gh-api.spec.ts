@@ -74,4 +74,49 @@ describe('ghApi', () => {
     chmodSync(bin, 0o755)
     await expect(ghApi({ repo: 'o/r', bin }).comments()).rejects.toThrow()
   })
+
+  it('asks GitHub who the credential belongs to', async () => {
+    const dir = tmp()
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, '#!/bin/bash\n[ "$2" = user ] && echo agent-bot\n')
+    chmodSync(bin, 0o755)
+    expect(await ghApi({ repo: 'o/r', bin }).whoami!()).toBe('agent-bot')
+  })
+
+  it('an account of the agent\'s own authenticates the calls, and the token reaches only the child', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'token'), 'ghp_bot\n')
+    const bin = join(dir, 'gh')
+    // The child reports its own credential and command line: the two places a token must not appear.
+    writeFileSync(bin, '#!/bin/bash\nprintf \'%s\\n%s\\n\' "${GH_TOKEN:-none}" "$*" > "$(dirname "$0")/seen.log"\necho agent-bot\n')
+    chmodSync(bin, 0o755)
+    const api = ghApi({ repo: 'o/r', bin, tokenFile: join(dir, 'token') })
+    expect(await api.whoami!()).toBe('agent-bot')
+    const [seen, args] = readFileSync(join(dir, 'seen.log'), 'utf8').split('\n')
+    expect(seen, 'the token file is what authenticates the call').toBe('ghp_bot')
+    expect(args, 'the token is never part of the command line every ps can read').not.toContain('ghp_bot')
+    expect(process.env.GH_TOKEN, 'and never part of this process').not.toBe('ghp_bot')
+  })
+
+  it('an empty token file is an error, not an anonymous call', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'token'), '\n')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, '#!/bin/bash\necho should-not-run\n')
+    chmodSync(bin, 0o755)
+    await expect(ghApi({ repo: 'o/r', bin, tokenFile: join(dir, 'token') }).whoami!()).rejects.toThrow(/empty/)
+  })
+
+  it('reads the token file every call, so rotating a token needs no restart', async () => {
+    const dir = tmp()
+    const file = join(dir, 'token')
+    writeFileSync(file, 'ghp_first')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, '#!/bin/bash\necho "${GH_TOKEN:-none}"\n')
+    chmodSync(bin, 0o755)
+    const api = ghApi({ repo: 'o/r', bin, tokenFile: file })
+    expect(await api.whoami!()).toBe('ghp_first')
+    writeFileSync(file, 'ghp_second')
+    expect(await api.whoami!()).toBe('ghp_second')
+  })
 })

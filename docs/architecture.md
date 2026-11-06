@@ -65,6 +65,9 @@ comments, and submitted reviews. Its first look at a repository records what alr
 none of it. Its read positions commit one poll late, as described above. It ignores its own writing,
 recognized by the account it posts from or by the hidden marker every reply carries, and it marks
 authors matching the bot patterns as not human. `gh-api.ts` talks to GitHub through the `gh` CLI, so the
+credential stays out of this process: with `PI_SUPERAGENT_GITHUB_TOKEN_FILE` set, the token in that file is
+what the child authenticates with, and `identity.ts` asks GitHub whose login that is — config declares the
+agent's account, the credential decides it, and a disagreement is a setup problem, not a silent receipt.
 credentials stay in the operator's keyring; every call is asynchronous, issue and pull-request lists are
 paginated, and comments are read forward from the cursor.
 

@@ -8,3 +8,9 @@ export function isListed(author: string, patterns: ReadonlySet<string> | undefin
   }
   return false
 }
+
+/** A login no person writes from: a GitHub App installation is always `<app>[bot]`, a machine account is
+ *  one the operator's bot list names. Only these may be adopted as the agent's identity unasked. */
+export function isBotLogin(login: string, patterns: ReadonlySet<string> | undefined): boolean {
+  return login.endsWith('[bot]') || isListed(login, patterns)
+}

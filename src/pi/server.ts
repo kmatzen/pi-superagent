@@ -17,6 +17,8 @@ export interface PanelSource {
   log(level: 'info' | 'warn' | 'error', event: string, fields?: Record<string, unknown>): void
   isPaused(): boolean
   setPaused(v: boolean): void
+  /** The GitHub login the router's credential belongs to, and how `self` was settled. */
+  identity(): { login: string; mode: string }
   now(): string
 }
 
@@ -70,7 +72,7 @@ export function readModel(src: PanelSource) {
     waitingAssessment: src.assessor.waiting(),
     recentDecisions: decisions.slice(-25).reverse().map(d => ({ id: d.id, at: d.at, kind: d.kind, reason: d.reason.map(r => r.code).join(','), rules: (d.audit?.rules as string[] | undefined) ?? [], ticket: d.ticketId ?? '' })),
     policy: { version: src.config.policyVersion ?? 'v1', paused: src.isPaused() },
-    source: { repo: src.config.githubRepo ?? '' },
+    source: { repo: src.config.githubRepo ?? '', as: src.identity().login, identity: src.identity().mode },
   }
 }
 
@@ -100,7 +102,7 @@ export function renderPanel(m: Model): string {
   return page('superagent', `
 <section id="overview"><h2>Needs a person <span class="count">(${m.needsPerson.length})</span></h2>${asks}
 <ul class="count">${quiet(m.load.running, 'workers on a run')}${quiet(m.load.parked, 'workers parked between runs')}${quiet(m.counts.evaluating, 'evals in progress')}${quiet(m.counts.filtered24h, 'triggers filtered in 24 h')}${m.paused ? '<li><strong>processing is paused</strong></li>' : ''}</ul></section>
-<section id="source"><h2>Source <span class="count">(${m.source.repo ? `GitHub issues: ${esc(m.source.repo)}` : 'no source configured'})</span></h2>
+<section id="source"><h2>Source <span class="count">(${m.source.repo ? `GitHub issues: ${esc(m.source.repo)}${m.source.as ? ` · speaks as ${esc(m.source.as)} (${esc(m.source.identity)})` : ' · speaks as the signed-in account (shared)'}` : 'no source configured'})</span></h2>
 <p class="count">${m.counts.triggers24h} triggers in the last 24 h, ${m.counts.filtered24h} filtered, ${m.counts.threads} threads known.</p>
 </section>
 <section id="trigger"><h2>Trigger</h2>${rows(m.evaluating, ['key', 'evalId', 'since'])}
