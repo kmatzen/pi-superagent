@@ -984,8 +984,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         a.kind = 'ignore' as AssessmentOutcome['kind']
         a.reason = `${thread} already has open ticket ${owner.id}; its worker gets this thread's messages`
       }
-      log.line('info', 'eval.decided', { eval: a.evalId, kind: a.kind, reason: (a.reason ?? '').slice(0, 300) })
       assessor.decide(a.evalId, a as unknown as AssessmentOutcome)
+      log.line('info', 'eval.decided', { eval: a.evalId, kind: a.kind, reason: (a.reason ?? '').slice(0, 300) })
       return text(`decided ${a.kind}`)
     },
   }
