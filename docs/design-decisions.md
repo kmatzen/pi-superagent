@@ -81,6 +81,18 @@ bugs — the fleet runs one supervisor per repo and SSHes where it needs GPUs.
 Deleting the directory resets the system, which makes the crash model in the
 specs exactly the operational reality.
 
+## A closed conversation closes the ticket
+
+GitHub says "this is over" in three ways — a merge closes the issue it names, a close says no, and a
+delete says never mind. All three look the same from the polls: the thread leaves the open set. The
+router stops the ticket (the core's absorbing human-stop), receipts the issue once, and stays quiet
+until a reopen — which, by the trigger-id rule, fires fresh. Tickets on non-GitHub threads are the
+core's business, untouched: the watcher reads only the source it owns.
+
+The same honesty governs the polls themselves: three consecutive failures write an error into
+health.json, so a supervisor that cannot hear its front door exits 2 under the watchdog instead of
+looking green while deaf.
+
 ## A review is a request; opening a PR is not
 
 A submitted review — "changes requested", "approved" — is a person speaking about delivered work, on

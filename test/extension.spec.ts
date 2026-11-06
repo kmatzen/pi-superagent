@@ -69,9 +69,9 @@ const live: Array<{ stop(): void }> = []
 afterEach(() => { for (const r of live.splice(0)) r.stop() })
 
 function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
-                 options: { githubApi?: GithubApi } = {}) {
+                 options: { githubApi?: GithubApi; issues?: IssueState[] } = {}) {
   const dir = reuse ?? tmp()
-  const feed: Feed = { issues: [], comments: [], posts: [] }
+  const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [] }
   const api: GithubApi = options.githubApi ?? {
     // The fakes deliver everything and let the source's own rules do the filtering, as server.spec does.
     issues: async () => [...feed.issues],
@@ -258,7 +258,11 @@ describe('the router extension', () => {
     expect(h.calls.filter(c => c.startsWith('agentStart'))).toHaveLength(1)
     a.running.stop()
 
-    const b = fixture(true, undefined, a.dir, h.herdr)
+    // The restarted router must hear that #470 is still open, or the close rule stops the ticket.
+    const b = fixture(true, undefined, a.dir, h.herdr, { issues: [{
+      issue: 470, title: 'DO: bump the base image', labels: [], author: 'octocat',
+      createdAt: '2026-11-04T09:00:00Z', updatedAt: '2026-11-05T09:00:00Z',
+    }] })
     await b.running.tick()
     expect(h.calls.filter(c => c.startsWith('agentStart')), 'the worker outlived the router').toHaveLength(1)
     expect(readFileSync(join(a.dir, 'engine.log'), 'utf8')).toMatch(/worker\.adopted ticket=/)
@@ -268,6 +272,38 @@ describe('the router extension', () => {
     expect(b.receipts('470')).toContain('ready: image bumped')
   })
 
+  it('a conversation closed on GitHub stops its ticket and receipts the issue', async () => {
+    const f = fixture()
+    f.addComment('481', 'octocat', 'rotate the api tokens')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    f.feed.issues.length = 0
+    f.feed.comments.length = 0
+    await f.running.tick()
+    expect(f.receipts('481')).toContain('closed on GitHub')
+    expect(JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text)).toHaveLength(0)
+  })
+  it('three failed polls say the front door is deaf in health.json, and a good poll clears it', async () => {
+    let deaf = false
+    const githubApi: GithubApi = {
+      comments: async () => { if (deaf) throw new Error('gh: 401 Bad credentials'); return [] as IssueComment[] },
+      issues: async () => { if (deaf) throw new Error('gh: 401 Bad credentials'); return [] as IssueState[] },
+      postComment: async () => {},
+    }
+    const f = fixture(true, undefined, undefined, undefined, { githubApi })
+    deaf = true
+    await f.running.tick(); await f.running.tick()
+    expect(readFileSync(join(f.dir, 'health.json'), 'utf8'), 'one failure is a retry, not an alarm').not.toMatch(/"state": *"error"/)
+    await f.running.tick()
+    expect(readFileSync(join(f.dir, 'health.json'), 'utf8')).toMatch(/"state": *"error"/)
+    expect(readFileSync(join(f.dir, 'health.json'), 'utf8')).toContain('Bad credentials')
+    deaf = false
+    await f.running.tick()
+    expect(readFileSync(join(f.dir, 'health.json'), 'utf8')).not.toMatch(/"state": *"error"/)
+  })
   it('a ticket that ends releases its worker: the slot leaked when the engine had no executor wired', async () => {
     const f = fixture()
     f.addComment('480', 'octocat', 'tidy the README')

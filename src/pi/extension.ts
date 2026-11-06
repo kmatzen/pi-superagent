@@ -1,7 +1,7 @@
 /** The package entry point: in a router session this extension is the supervisor; elsewhere it is inert. */
 import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy } from '../core/index.ts'
+import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
 import { SessionInbox } from './sink-session-inbox.ts'
 import { GithubSource, type GithubApi } from './source-github.ts'
@@ -74,10 +74,21 @@ export interface RunningRouter {
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] })
 
+/** health.json is what `superagent status` greps for "state": "error"; the source part is live. */
+function writeHealth(dir: string, source: { state: string; detail?: string } | null): void {
+  writeFileSync(`${dir}/health.json`, JSON.stringify({
+    runtime: { state: 'ready', at: new Date().toISOString() },
+    ...(source ? { source } : {}),
+  }, null, 2))
+}
+
 export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningRouter {
   const cfg = deps.config
   const repos = new SqliteRepositories(`${cfg.dataDir}/tickets.db`)
   const log = openLog(cfg.dataDir)
+  // The router owns health.json from the moment it exists: a supervisor that has not polled yet is ready,
+  // and the watchdog must find a file, not an absence.
+  writeHealth(cfg.dataDir, null)
   log.line('info', 'router.start', {
     dataDir: cfg.dataDir, panelPort: cfg.panelPort ?? 0,
     sdkPath: cfg.sdkPath ?? 'package-name', githubRepo: cfg.githubRepo ?? '',
@@ -356,7 +367,42 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     if (paused) return
     await recovered
     const started = Date.now()
-    for (const trigger of await (github?.poll() ?? Promise.resolve([]))) engine.receive(trigger)
+    let triggers: Trigger[] = []
+    if (github) {
+      // A failing poll is not a quiet tick: an engine that cannot hear its front door looks healthy
+      // forever, so three in a row say so in health.json where the watchdog reads exit code 2.
+      try {
+        triggers = await github.poll()
+      } catch (error) {
+        pollFailures += 1
+        log.line('error', 'github.poll_failed', { error: String(error).slice(0, 200), failures: pollFailures })
+        if (pollFailures >= 3) writeHealth(cfg.dataDir, { state: 'error', detail: `github polls failing (${pollFailures}): ${String(error).slice(0, 160)}` })
+        return
+      }
+      if (pollFailures) { pollFailures = 0; writeHealth(cfg.dataDir, null) }
+    }
+    for (const trigger of triggers) engine.receive(trigger)
+    // The conversation a ticket lives in can end on GitHub: a merge closes the issue it names, and
+    // closing without merging is a person saying no. Either way the ticket stops and says so.
+    const openThreads = github?.openThreads()
+    if (openThreads) {
+      for (const ticket of repos.tickets.open()) {
+        const channel = ticket.channels[0]
+        if (!channel || channel.source !== 'github' || openThreads.has(channel.thread)) continue
+        try {
+          engine.stopTicket(ticket.id, 'the conversation closed on GitHub')
+          outbox.send({
+            id: `closed:${ticket.id}`,
+            channel,
+            kind: 'notice', ticketId: ticket.id,
+            text: 'this closed on GitHub, so the ticket is stopped — a merge closes it too. Reopen the issue to run it again.',
+          })
+          log.line('info', 'ticket.conversation_closed', { ticket: ticket.id, thread: channel.thread })
+        } catch {
+          // A stop raced with this poll; the ticket is already ended, which is the same outcome.
+        }
+      }
+    }
     // One session answers every judgement, so the number in flight is the load on it. Past the cap the
     // sweep still runs occasionally, and new evals wait their turn instead of flooding the session.
     // evaluateDue is the only thing that expires a stuck eval, so gating it is how 54 stale judgements
@@ -425,6 +471,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     for (const tab of await herdrWorkers.closeStaleTabs(cfg.herdrWorkspace ?? 'superagent')) log.line('info', 'worker.stale_tab_closed', { tab })
   })()
 
+  let pollFailures = 0
   const timer = setInterval(() => { void tick() }, cfg.tickMs ?? 30_000)
   const off = pi.on('agent_settled', () => { void tick() })
 
@@ -535,7 +582,7 @@ export default function superagent(pi: PiLike): void {
   }
   const problems = setupProblems({ root: config.worktreeRoot, stateDir: config.dataDir })
   writeFileSync(`${config.dataDir}/setup.json`, JSON.stringify({ problem: problems[0] ?? null, problems, at: new Date().toISOString() }))
-  writeFileSync(`${config.dataDir}/health.json`, JSON.stringify({ runtime: { state: 'ready', at: new Date().toISOString() } }))
+  writeHealth(config.dataDir, null)
   // `ready` is what `superagent start` waits for: a session that booted is not the same as a supervisor
   // that is listening, and the health check must not report 0 between the two.
   writeFileSync(`${config.dataDir}/ready`, JSON.stringify({ at: new Date().toISOString(), githubRepo: config.githubRepo ?? null }))
