@@ -33,16 +33,16 @@ esac
 describe('the herdr client', () => {
   it('creates a tab with the worker environment and reads the ids herdr returns', async () => {
     const h = fakeHerdr()
-    const tab = await herdrCli(h.bin).tabCreate({ workspace: 'w1', cwd: '/w', label: 'TASK-1 · do it', env: { PI_SUPERAGENT_ROLE: 'worker' } })
+    const tab = await herdrCli(h.bin).tabCreate({ workspace: 'w1', cwd: '/w', label: '#1 · do it', env: { PI_SUPERAGENT_ROLE: 'worker' } })
     expect(tab).toEqual({ tabId: 'w1:t5', paneId: 'w1:p9' })
-    expect(h.calls()[0]).toBe('tab create --workspace w1 --cwd /w --label TASK-1 · do it --env PI_SUPERAGENT_ROLE=worker --no-focus')
+    expect(h.calls()[0]).toBe('tab create --workspace w1 --cwd /w --label #1 · do it --env PI_SUPERAGENT_ROLE=worker --no-focus')
   })
 
   it('starts pi as a named agent, passing pi its own arguments after --', async () => {
     const h = fakeHerdr()
-    const agent = await herdrCli(h.bin).agentStart({ name: 'sa-task-1-ab12', kind: 'pi', pane: 'w1:p9', timeoutMs: 120000, args: ['--session-id', 'abc'] })
-    expect(agent).toMatchObject({ name: 'sa-task-1-ab12', pane_id: 'w1:p9', agent_status: 'idle' })
-    expect(h.calls()[0]).toBe('agent start sa-task-1-ab12 --kind pi --pane w1:p9 --timeout 120000 -- --session-id abc')
+    const agent = await herdrCli(h.bin).agentStart({ name: 'sa-gh1-ab12', kind: 'pi', pane: 'w1:p9', timeoutMs: 120000, args: ['--session-id', 'abc'] })
+    expect(agent).toMatchObject({ name: 'sa-gh1-ab12', pane_id: 'w1:p9', agent_status: 'idle' })
+    expect(h.calls()[0]).toBe('agent start sa-gh1-ab12 --kind pi --pane w1:p9 --timeout 120000 -- --session-id abc')
   })
 
   it('an agent herdr does not know is undefined; any other failure is an error with its code', async () => {

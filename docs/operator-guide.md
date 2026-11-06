@@ -1,66 +1,94 @@
-# Operator guide — ten minutes
+# Operator guide
 
-## The one thing
+Everything you need to ask for work, watch it happen, and set it right when it goes wrong.
 
-Open a GitHub issue on the watched repo (`PI_SUPERAGENT_GITHUB_REPO`) that says, plainly, what you want done. That is the whole interface.
+## Asking for work
+
+Open an issue on the watched repository (`PI_SUPERAGENT_GITHUB_REPO`) and say plainly what you want
+done:
 
 ```
-Title: Rename the export button to "Ship" in caramel's header
-Body:  The primary button should say Ship, not Export. Keep the keyboard shortcut.
+Title: Rename the Export button to "Ship"
+Body:  The primary button in the header should say Ship instead of Export. Keep the keyboard shortcut.
 ```
 
-Within about a minute the engine acknowledges on the issue ("On it — …") if the judge accepts, and a worker
-tab appears in the `superagent` herdr workspace doing the work. The finished result lands as a reply on the
-issue. If the judge ignores it (chatter, a question for a person, or the thread already has an open ticket),
-the reason is logged where the panel can show it.
+Within about a minute the judge's acknowledgement appears on the issue, and a tab named for the issue
+opens in the `superagent` herdr workspace with the worker inside. When the worker finishes, its report
+arrives on the issue as a reply.
+
+The judge accepts a concrete action someone asks the agent to take, even one that calls itself a test.
+It ignores chatter, notes addressed to other people, and new requests on a thread that already has an
+open ticket. An ignore posts nothing on the issue; the reason is in the engine log.
+
+- **Follow-ups.** Comment on the same issue. While its ticket is open, your comments go straight to its
+  worker.
+- **Pull requests.** A comment on a pull request's conversation reaches the agent like any other. A
+  submitted review, whether it approves or requests changes, fires a fresh judgement, and the answer
+  lands in the pull request's conversation.
+- **Questions from a worker.** A worker that needs you reports *blocked* with one question. The question
+  appears on the panel under *Needs a person*; answer it with a comment on the issue.
+- **Stopping.** Close the issue, or merge the pull request that closes it. Within one poll the ticket
+  stops and says so on the thread. Reopen the issue to run the request again. Without GitHub, the panel
+  API stops a ticket too:
+  `curl -X POST -H 'x-superagent-request: 1' http://127.0.0.1:8788/api/tickets/<id>/stop`.
 
 ## Watching
 
-- **herdr → workspace `superagent`**: one tab per active ticket, live pi sessions, labelled `#<issue> · <title>`.
-- **`engine log` tab** (first tab): every judgement and dispatch, streaming.
-- **Panel**: <http://127.0.0.1:8788/> — needs-a-person, what's running, judge decisions with reasons.
-- The `engine` tab is a control panel; it stays quiet while work runs. Judge turns happen in a separate
-  headless session, and workers are their own tabs.
+- **The herdr workspace `superagent`.** The `engine log` tab streams every poll, judgement, launch and
+  receipt. Each worker has its own tab, labelled `#<issue> · <title>`; it is an ordinary pi session, so
+  you can read along, type into it, or press Esc to interrupt it.
+- **The panel** at <http://127.0.0.1:8788/>. It shows what needs a person, what is running and queued,
+  and what the judge decided.
+- **The log itself:** `tail -F ~/.pi/superagent/engine.log`. Each line is one event with its fields, so
+  `grep eval.decided` lists every judgement with its reason.
 
-## Asking well
-
-The judge is a model reading your words with one rule: a concrete action asked of the agent is a job.
-
-- Good: "Rename X to Y in repo Z. Keep W unchanged." Bounded, actionable, yours.
-- Ignored: "what do you think about…", notes to other humans, "this issue needs no action".
-- One request per issue; follow-ups as comments on the same issue reach the same ticket's worker.
-- A comment on a pull request reaches the agent too, and a submitted review ("changes requested")
-  fires a fresh judgement; replies post into the PR's conversation.
-- Closing an issue — or merging the pull request that names it — stops its ticket and posts the
-  receipt; reopening starts a fresh judgement. If the router cannot reach GitHub, `superagent status`
-  says `running with 1 failing part(s)` (exit 2) within about a minute and a half.
-- A ticket you want killed: comment "stop" on the issue, use the panel, or
-  `curl -X POST -H 'x-superagent-request: 1' http://127.0.0.1:8788/api/tickets/<id>/stop`.
-
-## Operating
+## Running it
 
 ```sh
-~/git/pi-superagent/scripts/superagent status    # 0 ok, 1 down, 2 a part is failing, 3 waiting for setup
-~/git/pi-superagent/scripts/superagent restart   # safe: workers survive; the router adopts its tickets
-tail -F ~/.pi/superagent/engine.log              # everything the engine did
-sqlite3 ~/.pi/superagent/tickets.db 'select value from ticket' | head   # the raw ledger
+scripts/superagent status    # 0 healthy · 1 down · 2 a part is failing · 3 waiting for setup
+scripts/superagent restart   # safe at any time: workers keep running and the new router adopts them
+scripts/superagent stop      # leaves a marker, so the health check will not restart it
+scripts/superagent start     # clears the marker
 ```
 
-Settings live in `~/.pi/superagent/config.env` (copy `config.example.env` there); the repo is the one that matters. A scheduled health check
-runs `status` and restarts on exit code 1, leaving a deliberate `stop` alone (it honours the stop marker).
+Settings live in `~/.pi/superagent/config.env`. Start from [`config.example.env`](../config.example.env),
+which explains each setting and its default, and restart to apply a change.
 
-## When something is wrong
+The launchd job in [`launchd/`](../launchd/com.example.superagent-health.plist) runs `status` every five
+minutes and starts a router that is down. It leaves a deliberately stopped router alone. Install it once:
 
-- **No acknowledgement after ~5 min**: `status` first. Then `tail -20 ~/.pi/superagent/engine.log` — a
-  `judge.prompt` with no `eval.decided` means the judge is wedged: `restart` fixes it.
-- **Issue silently ignored**: the panel's Eval table shows the judge's reason. Reopening the issue, or
-  adding a clearer comment, fires a fresh judgement.
-- **Worker stuck**: open its tab in herdr and read it — it is a normal pi session; you can type into it.
-- **Worker died mid-work**: the ticket reports `failed` on the issue with one sentence saying why. Open a
-  fresh issue (or comment) to retry; the engine starts a clean worker.
+```sh
+sed "s|__HOME__|$HOME|g" launchd/com.example.superagent-health.plist \
+  > ~/Library/LaunchAgents/com.example.superagent-health.plist
+launchctl load ~/Library/LaunchAgents/com.example.superagent-health.plist
+```
 
-## Costs
+The job expects the checkout at `~/git/pi-superagent`; edit its `cd` if yours lives elsewhere.
 
-Every judgement and every ticket is a pi session (model spend). The judge is capped and queued
-(`PI_SUPERAGENT_MAX_EVALS`, default 2 in flight); workers are capped at 4 (`PI_SUPERAGENT_WORKERS`). A
-request that is not a job costs one short judge turn.
+## Capacity
+
+Up to four workers run at once (`PI_SUPERAGENT_MAX_WORKERS`); further tickets wait their turn, queued on
+the panel. The judge answers one request at a time. Every worker's brief says the machine is shared:
+sequential builds, bounded parallel jobs, nothing left running after the report.
+
+A worker that emits nothing for 15 minutes is flagged under *Needs a person* with a question: steer it,
+stop it, or accept its work. The flag does not stop the worker. If it is only running a long build, let
+it be; the flag clears when the worker reports.
+
+## When something goes wrong
+
+**No acknowledgement after a few minutes.** Run `status` first. Then
+`grep eval.decided ~/.pi/superagent/engine.log | tail`: `kind=ignore` comes with the judge's reason, and a
+clearer comment or a reopened issue asks again. A `judge.prompt` line with no `eval.decided` after it
+means the judge is wedged; `restart` fixes it.
+
+**`status` exits 2.** Read `~/.pi/superagent/health.json`. A failing `source` means the router cannot
+reach GitHub; check `gh auth status`. The error clears on the next good poll.
+
+**`status` exits 3.** Read `~/.pi/superagent/setup.json`: it names what is missing and where to fix it.
+
+**A worker looks stuck.** Open its tab and read it. Type into it to steer, or press Esc to interrupt.
+
+**A worker died.** The ticket keeps its mandate, but nothing runs it until the router restarts.
+`superagent restart` gives it a fresh worker; closing the issue drops it instead. The issue itself is not
+told when a worker dies, so watch the panel.

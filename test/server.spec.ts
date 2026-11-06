@@ -81,7 +81,6 @@ it('the panel links tickets to their GitHub issue and names the source', async (
   const html = await (await fetch(`http://127.0.0.1:${port}/`, { headers: { host: `127.0.0.1:${port}` } })).text()
   expect(html).toContain('GitHub issues: o/r')
   expect(html).toContain('href="https://github.com/o/r/issues/150"')
-  expect(html, 'no board affordances when no board is configured').not.toContain('Re-evaluate the open board')
   running.stop()
 })
 

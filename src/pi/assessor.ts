@@ -1,4 +1,5 @@
-/** Assessor bound to the router session: it reads the Candidate and answers with `ticket_decide`. */
+/** The Assessor port: renders each Candidate and sends it to the judge, one at a time; the judge's
+ *  `ticket_decide` call brings the answer back. */
 import type { Assessor, AssessmentOutcome, Candidate, Engine } from '../core/index.ts'
 
 export interface SessionPilot {
@@ -28,7 +29,7 @@ export const renderCandidateFor = (repo?: string) => (c: Candidate): string => {
   const issue = c.thread.key.slice('github:'.length).replace('#', '')
   return `${base.replace(`Thread ${c.thread.key}`, `Thread ${c.thread.key} (https://github.com/${repo}/issues/${issue})`)}
 `
-    + 'This is GitHub: a person writing to the agent that runs your fleet. accept is the answer for a concrete action '
+    + 'This is GitHub: a person writing to the agent. accept is the answer for a concrete action '
     + 'the person asks the agent to take, including a request that calls itself a test. ignore is the answer for '
     + 'chatter, for messages addressed to a person, and for a request whose ticket is already open.'
 }
@@ -36,9 +37,8 @@ export const renderCandidateFor = (repo?: string) => (c: Candidate): string => {
 export class SessionAssessor implements Assessor {
   private readonly pending = new Map<string, Candidate>()
   // One candidate in the conversation at a time. The engine hands over every due eval in one command, and
-  // a replay of the open board (41 cards, measured) delivered 41 user messages into a running turn: pi
-  // steers them all into the same turn, the model answers them out of order, and the tail expires.
-  // Queuing them costs ~15 s each and every one gets its own turn.
+  // a burst of 41 (measured) once arrived as 41 messages in a running turn: pi steered them all into it,
+  // the model answered out of order, and the tail expired. Queued, each costs ~15 s and gets its own turn.
   private readonly queue: string[] = []
   private inFlight: string | null = null
 

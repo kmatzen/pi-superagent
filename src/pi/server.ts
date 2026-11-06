@@ -11,7 +11,7 @@ export interface PanelSource {
   assessor: SessionAssessor
   config: RouterConfig
   load(): { running: number; queued: number; maxWorkers: number }
-  /** In-process workers have no pane and no transcript on disk; this is the only way to see them. */
+  /** The router's live workers: which ticket, where, and when each last spoke. */
   workers(): Array<{ ticketId: string; sessionId: string; workspace: string; lastEventAt: string; events: number; quietSeconds: number; watch?: string }>
   /** The panel shares the router's event loop, so a slow request is evidence of starvation, not noise. */
   log(level: 'info' | 'warn' | 'error', event: string, fields?: Record<string, unknown>): void
@@ -110,7 +110,7 @@ export function renderPanel(m: Model): string {
 ${rows(m.open, ['thread', 'title', 'state', 'waitsFor', 'worker'])}
 <h2>Ended</h2>${rows(m.ended, ['id', 'title', 'outcome', 'at'])}</section>
 <section id="settings"><h2>Settings</h2><p class="count">policy ${esc(m.policy.version)} · paused=${m.paused} · state ${esc(process.env.PI_SUPERAGENT_STATE ?? '')}</p>
-<p class="muted">Edit settings in the environment and restart; POST /api/executor/pause pauses processing.</p></section>`)
+<p class="muted">Settings live in config.env in the state directory; restart to apply them. POST /api/executor/pause pauses processing.</p></section>`)
 }
 
 const json = (res: import('node:http').ServerResponse, code: number, body: unknown): void => {

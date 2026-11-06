@@ -121,7 +121,7 @@ export class SqliteRepositories implements Repositories {
     byThread: (key: string): Decision[] => this.rows<Decision>('SELECT value FROM decision WHERE thread = ? ORDER BY rowid', key),
   }
 
-  /** A Source's read position: the anti-replay record, and the only durable scalar we keep. */
+  /** Small durable values: the sources' read positions and the outbox. */
   readonly kv = {
     get: <T>(key: string): T | undefined => this.row<T>('SELECT value FROM kv WHERE key = ?', key),
     set: (key: string, value: unknown): void => {

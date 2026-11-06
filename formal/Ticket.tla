@@ -1,16 +1,15 @@
 --------------------- MODULE Ticket ---------------------
 (*
-  A finite model of pi-superagent's ticket lifecycle, machine-checked by TLC.
+  The engine's ticket lifecycle (src/core, byte-identical to upstream). Every action
+  cites the code whose guards it copies. TLC visits every reachable state, so a
+  violation is an ordering this model allows; where the model is faithful, the code
+  allows it too.
 
-  Every action cites the core code whose guards it mirrors (src/core, byte-identical
-  to upstream). TLC enumerates every reachable state of this model, so a violation is
-  an ordering the real code permits — not a missed test case.
-
-  Deliberate abstractions (each removes transitions that could end or resume a ticket,
-  which weakens the model toward soundness, never toward false comfort):
-  - two threads, two ticket slots, four messages, one emission each;
-  - no context threads, follows/PR closes, eval expiry, policy revalidation, attention;
-  - assignments keep only their state; a ticket keeps only its latest report state.
+  Leaves out (a claim covers these only as far as their code passes the same guards):
+  - context threads, follows and pull-request closes, eval expiry, policy
+    revalidation, and attention;
+  - everything about an assignment but its state, and every report but the latest.
+  Bounds: two threads, two ticket slots, four messages, each delivered once.
 *)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -78,9 +77,9 @@ StartEval(th) ==
   /\ batch' = batch \cup {m \in evalQ : ThreadOf(m) = th}
   /\ UNCHANGED <<tickets, delivered, ackPend, ackSent>>
 
-(* The judge's one-ticket rule, modeled as the accept guard: a request whose thread
-   already has a live ticket is an ignore, not a second ticket (assessor prompt:
-   "requests that already own a ticket"; intake's owners rule aims the same way). *)
+(* The one-ticket rule as the accept guard: an accept on a thread that a live ticket
+   already follows becomes an ignore. The router enforces it in code (its ticket_decide
+   tool overrules the judge, extension.ts), and intake's owners rule points the same way. *)
 VerdictAccept(th, k) ==
   /\ th \in evaluating
   /\ tickets[k].state = "free"
@@ -156,8 +155,9 @@ Wake(k) ==
                              ![k].humanIn = {}]
   /\ UNCHANGED <<batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
-(* Tickets.stop (tickets.ts), from a stop Decision (engine.ts) or the panel API:
-  end(by = 'human', outcome = 'stopped'); every unfinished Assignment ends with it. *)
+(* Tickets.stop (tickets.ts), from a stop Decision (engine.ts), the panel API, or a
+  conversation closed on GitHub: end(by = 'human', outcome = 'stopped'); every
+  unfinished Assignment ends with it. *)
 StopByHuman(th, k) ==
   /\ tickets[k].state = "live"
   /\ th \in tickets[k].subs
@@ -174,8 +174,9 @@ SendAck(a) ==
   /\ ackSent' = ackSent \cup {a}
   /\ UNCHANGED <<batch, tickets, delivered, evalQ, evaluating>>
 
-(* A finished system has nothing enabled: termination is legal, not a stuck ticket.
-   Stuttering keeps the deadlock check meaningful for states with unfinished work. *)
+(* A finished system has nothing left to do; this stuttering step makes stopping legal
+   instead of a deadlock. It also means TLC's deadlock check finds nothing here:
+   progress is the liveness claim's job. *)
 Terminate == UNCHANGED vars
 
 Next ==
@@ -213,8 +214,7 @@ TypeOK ==
 I1_StopAbsorbing == [][\A k \in TicketIds : tickets[k].state = "stopped" => tickets[k].state' = "stopped"]_vars
 
 (* I2. "Done" implies the worker reported `ready`: the only producer of "done" is
-   Report(k, "ready") — a dead worker, a stop, and an ignored eval produce "dropped"
-   and "stopped", never a completed result. Silent success is unrepresentable. *)
+   Report(k, "ready"). Silent success is unrepresentable. *)
 I2_DoneFromReady == \A k \in TicketIds : tickets[k].state = "done" => tickets[k].lastReport = "ready"
 
 (* I3. At most one running Assignment per ticket — the executor contract that
@@ -238,8 +238,7 @@ I4_NoSecondTicket ==
 I5_OutboxOnce == ackPend \cap ackSent = {}
 I6_SentMonotonic == [][ackSent \subseteq ackSent']_vars
 
-(* Liveness: every emitted message is eventually delivered, and with the fairness of
-   Launch and ready-report, every accepted ticket ends. *)
+(* LT. Liveness: every incoming message eventually reaches intake. *)
 LT_Delivered == []<>(\A m \in Msgs : m \in delivered)
 
 =====================

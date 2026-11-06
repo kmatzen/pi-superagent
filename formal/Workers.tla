@@ -1,19 +1,20 @@
 --------------------- MODULE Workers ---------------------
 (*
-  The herdr worker/tab lifecycle, machine-checked: worker records, their tabs, and
-  the agent processes behind them. Mirrors src/pi/herdr-workers.ts and the engine's
-  worker bookkeeping:
+  Worker records, their herdr tabs, and the pi agents in them. Mirrors
+  src/pi/herdr-workers.ts and the executor's launch guard:
 
-    - at most one live worker per ticket (engine.launch guard);
-    - closeStaleTabs closes a tab only when the record's agent is gone (agentGet
-      answers agent_not_found); a live agent's tab is untouchable by the sweep,
-      which is what keeps a busy worker's terminal from vanishing mid-report;
-    - a finished worker lingers (record ended, tab open) for human follow-up, and
-      its tab closes once its agent is gone;
-    - a record retires only after its tab is closed, and the record itself is never
-      lost while a tab references it.
+    - a ticket has at most one live worker (PiExecutor.start launches an assignment
+      once, and the engine runs one assignment at a time);
+    - closeStaleTabs closes a tab only when herdr no longer knows the record's agent
+      (agentGet answers agent_not_found), so the sweep cannot take a live agent's tab;
+    - a finished worker's tab lingers for follow-up. This model closes it once its
+      agent is gone; the code also closes it once the agent sits idle, a stronger
+      cleanup that none of the claims below depend on;
+    - a record's slot is reused only after its tab is closed.
 
-  Two workers w1, w2, fixed tabs tabOf(w1) = ta, tabOf(w2) = tb.
+  Leaves out: herdr's own failures, the inbox and cursor files, the window in which a
+  launch has a tab but no record yet, and timers (lingering is modeled as "eventually").
+  Bounds: one ticket, two workers with fixed tabs (w1 in ta, w2 in tb), three launches.
 *)
 EXTENDS Integers, FiniteSets
 
@@ -36,11 +37,11 @@ Init ==
 
 (* ---- engine actions ---- *)
 
-(* engine.launch: a fresh worker for a ticket only when no record for that ticket is
-   live. (One ticket in the model: the guard is global.) The tab opens with the agent. *)
-(* Bounded launches (as Intake bounds crashes): the liveness claim is "after finitely
-   many launches, the sweep reaches a fixpoint" — every generation's zombies get
-   cleaned, and with launches finite, that covers the limit. *)
+(* Launch (PiExecutor.start, HerdrWorkers.launch): a fresh worker only when no record
+   is live; with one ticket in the model, the guard is global. The tab opens with the
+   agent. *)
+(* Launches are bounded, as Intake bounds crashes: W5 then reads "after the last
+   launch, the sweeps reach a fixpoint". *)
 Launch(w) ==
   /\ launches < 3
   /\ launches' = launches + 1
@@ -57,8 +58,8 @@ AgentDies(w) ==
   /\ agent' = [agent EXCEPT ![w] = FALSE]
   /\ UNCHANGED <<launches, rec, tabs>>
 
-(* ReportDone: the worker reports; its record ends, its tab LINGERS open for the
-   human, and the agent (finished, not crashed) keeps serving the pane. *)
+(* Report: the worker reports; its record ends, its tab lingers for follow-up, and its
+   agent, finished rather than crashed, stays in the pane. *)
 Report(w) ==
   /\ rec[w].state = live
   /\ rec' = [rec EXCEPT ![w].state = ended]
@@ -69,8 +70,8 @@ StopByHuman(w) ==
   /\ rec' = [rec EXCEPT ![w].state = ended]
   /\ UNCHANGED <<launches, tabs, agent>>
 
-(* closeStaleTabs: for a tab owned by a record whose agent is gone, close it. The
-   guard is exactly the shipped code's: owner lookup + agent liveness probe. *)
+(* closeStaleTabs: close the tab of a record whose agent is gone. The guard is the
+   shipped code's: find the owning record, then ask herdr whether its agent lives. *)
 Sweep(w) ==
   /\ rec[w].state = live
   /\ ~agent[w]
@@ -86,7 +87,8 @@ LingerClose(w) ==
   /\ tabs' = tabs \ {TabOf(w)}
   /\ UNCHANGED <<launches, rec, agent>>
 
-(* The engine retires a record only after its tab is closed (nothing points at it). *)
+(* A record's slot is reused only after its tab is closed, so nothing points at a
+   reused slot. *)
 Retire(w) ==
   /\ rec[w].state = ended
   /\ TabOf(w) \notin tabs
@@ -119,7 +121,7 @@ TypeOK ==
   /\ tabs \in SUBSET Tabs
   /\ agent \in [Workers -> BOOLEAN]
 
-(* W1. At most one live worker at a time — the engine.launch guard, exhaustively. *)
+(* W1. At most one live worker: the launch guard, checked exhaustively. *)
 W1_OneLive == \A j \in Workers : \A k \in Workers :
   j # k => ~((rec[j].state = live) /\ (rec[k].state = live))
 

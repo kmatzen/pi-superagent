@@ -1,10 +1,11 @@
-/** The package entry point: in a router session this extension is the supervisor; elsewhere it is inert. */
+/** The package entry point: the router in the session the start script launches, the worker role inside a
+ *  worker, and inert everywhere else. */
 import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
 import { SessionInbox } from './sink-session-inbox.ts'
-import { GithubSource, type GithubApi } from './source-github.ts'
+import { GithubSource, REPLY_MARKER, type GithubApi } from './source-github.ts'
 import { ghApi } from './gh-api.ts'
 import { CommentOutbox } from './outbox.ts'
 import { PiExecutor } from './executor.ts'
@@ -68,13 +69,14 @@ export interface RunningRouter {
   assessor: SessionAssessor
   setPaused(v: boolean): void
   isPaused(): boolean
-  /** What the panel's health line reads; the script reads the file the extension writes. */
+  /** Workers running and queued, against the cap: the panel's load line. */
   load(): { running: number; queued: number; maxWorkers: number }
 }
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] })
 
-/** health.json is what `superagent status` greps for "state": "error"; the source part is live. */
+/** `superagent status` greps health.json for "state": "error"; the router rewrites it as the GitHub source
+ *  fails and recovers. */
 function writeHealth(dir: string, source: { state: string; detail?: string } | null): void {
   writeFileSync(`${dir}/health.json`, JSON.stringify({
     runtime: { state: 'ready', at: new Date().toISOString() },
@@ -86,8 +88,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const cfg = deps.config
   const repos = new SqliteRepositories(`${cfg.dataDir}/tickets.db`)
   const log = openLog(cfg.dataDir)
-  // The router owns health.json from the moment it exists: a supervisor that has not polled yet is ready,
-  // and the watchdog must find a file, not an absence.
+  // The router owns health.json from its first moment: a router that has not polled yet is ready, and the
+  // health check must find a file, not an absence.
   writeHealth(cfg.dataDir, null)
   log.line('info', 'router.start', {
     dataDir: cfg.dataDir, panelPort: cfg.panelPort ?? 0,
@@ -97,13 +99,17 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     m.channel.source === 'github' ? (m.channel.address as { issue?: string } | undefined)?.issue : undefined
   const outbox = new CommentOutbox({
     accepts: m => m.channel.source === 'github' && Boolean(githubApi && issueOf(m)),
-    post: (m, body) => {
-      const issue = issueOf(m)
-      if (issue && githubApi) {
-        return githubApi.postComment(Number(issue), body).catch((error: unknown) => {
-          log.line('warn', 'outbox.github_failed', { issue, error: String(error).slice(0, 200) })
-          throw error
-        })
+    post: async (m, body, retry) => {
+      const issue = Number(issueOf(m))
+      if (!issue || !githubApi) return
+      try {
+        // GitHub may have taken the last attempt before the process died: on a retry, look first.
+        const seen = retry && githubApi.commentsFor ? await githubApi.commentsFor(issue) : []
+        if (seen.some(c => c.body.trimEnd() === `${body}\n\n${REPLY_MARKER}`)) return
+        await githubApi.postComment(issue, body)
+      } catch (error) {
+        log.line('warn', 'outbox.github_failed', { issue, error: String(error).slice(0, 200) })
+        throw error
       }
     },
   }, repos.kv)
@@ -169,9 +175,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   let engine!: Engine
   let executorRef: PiExecutor | undefined
   const assessor: SessionAssessor = new SessionAssessor(() => engine, pilot, { render: renderCandidateFor(cfg.githubRepo) })
-  // The core tells its executor to start, deliver to and stop workers from inside its commands. This was a
-  // placeholder, so an ended ticket kept its worker and its slot, and a follow-up never reached the worker.
-  // Each call runs once the command has finished: a worker must not act on a write that could still roll back.
+  // The engine calls its executor from inside its commands. Each call runs once the command has committed,
+  // so a worker never acts on a write that could still roll back.
   const afterCommit = (what: string, run: () => void): void => {
     setImmediate(() => {
       try { run() } catch (error) { log.line('error', 'executor.port_failed', { what, error: String(error).slice(0, 200) }) }
@@ -196,7 +201,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     now: deps.now ?? (() => new Date().toISOString()),
   })
 
-  // A worker's last word goes back to the thread it came from, wherever the worker runs.
+  // A final report (ready, failed, cancelled) goes back to the thread as a receipt; a blocked report's
+  // question waits on the panel.
   const receipts = (ticket: { id: string; channels: Array<{ thread: string }> }, send: Reporter): Reporter => (state, summary, question) => {
     send(state, summary, question)
     const channel = ticket.channels[0]
@@ -205,7 +211,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     }
   }
   const herdrWorkers = cfg.workers === 'herdr'
-    ? new HerdrWorkers({ herdr: deps.herdr ?? herdrCli(cfg.herdrBin), stateDir: cfg.dataDir, log })
+    ? new HerdrWorkers({ herdr: deps.herdr ?? herdrCli(cfg.herdrBin), stateDir: cfg.dataDir, log,
+      ...(cfg.herdrWorkspace ? { workspaceLabel: cfg.herdrWorkspace } : {}) })
     : undefined
 
   const executor = new PiExecutor(engine, {
@@ -227,6 +234,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
           },
         })
       }
+      // In-process workers: only tests come this way, since configFrom always chooses herdr.
       const sdk = deps.sdk ?? await loadSdk(cfg)
       // The guard rides in as an inline extension because pi enforces policy at its tool_call hook; the
       // `toolGuard` option this used to pass does not exist, so pi ignored it and workers had every tool.
@@ -293,8 +301,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     parameters: DECIDE_SCHEMA,
     execute: (_id, args) => {
       const a = args as unknown as { evalId: string; kind: AssessmentOutcome['kind'] } & Record<string, string>
-      // One open ticket per thread: a message on a thread with an open ticket belongs to that ticket's worker.
-      // The judge accepted a second ticket on TASK-44 with the first one in its prompt.
+      // One open ticket per thread: its messages belong to its worker. The judge once accepted a second
+      // ticket on a thread whose first ticket was right there in its prompt.
       const thread = assessor.threadOf(a.evalId)
       const owner = a.kind === 'accept' && thread
         ? repos.tickets.open().find(t => t.channels.some(c => `${c.source}:${c.thread}` === thread))
@@ -369,8 +377,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const started = Date.now()
     let triggers: Trigger[] = []
     if (github) {
-      // A failing poll is not a quiet tick: an engine that cannot hear its front door looks healthy
-      // forever, so three in a row say so in health.json where the watchdog reads exit code 2.
+      // A failing poll is not a quiet tick: a router that cannot hear GitHub looks healthy forever, so three
+      // failures in a row go into health.json, where `superagent status` turns them into exit code 2.
       try {
         triggers = await github.poll()
       } catch (error) {
@@ -395,7 +403,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
             id: `closed:${ticket.id}`,
             channel,
             kind: 'notice', ticketId: ticket.id,
-            text: 'this closed on GitHub, so the ticket is stopped — a merge closes it too. Reopen the issue to run it again.',
+            text: 'Stopped: this conversation closed on GitHub. Reopen it to run the request again.',
           })
           log.line('info', 'ticket.conversation_closed', { ticket: ticket.id, thread: channel.thread })
         } catch {
@@ -403,10 +411,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         }
       }
     }
-    // One session answers every judgement, so the number in flight is the load on it. Past the cap the
-    // sweep still runs occasionally, and new evals wait their turn instead of flooding the session.
-    // evaluateDue is the only thing that expires a stuck eval, so gating it is how 54 stale judgements
-    // sat in flight forever. Concurrency is bounded where it belongs: the assessor asks one at a time.
+    // evaluateDue runs on every pass: it is the only thing that expires a stuck eval, and gating it once left
+    // 54 stale judgements in flight forever. The judge's load is bounded by the assessor, one question at a time.
     sweeps += 1
     engine.evaluateDue()
     log.line('info', 'tick', {
@@ -417,8 +423,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const assignment = ticket.assignments.at(-1)
       if (assignment && assignment.state === 'pending') executor.start(ticket, assignment)
     }
-    // A worker that stops emitting events is not finished: without this the slot is held and the ticket
-    // reads as running until the router restarts.
+    // Silence is not completion: a worker quiet for 15 minutes puts a question to a person, instead of
+    // reading as running forever.
     for (const quiet of executor.quiet(cfg.workerQuietMinutes ?? 15)) {
       engine.report(quiet.ticketId, {
         state: 'blocked',
@@ -483,7 +489,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       now: deps.now ?? (() => new Date().toISOString()),
     })
     : undefined
-  // A panel that cannot bind must not take the supervisor down: pi treats any uncaught exception as fatal
+  // A panel that cannot bind must not take the router down: pi treats any uncaught exception as fatal
   // (`pi exiting due to uncaughtException: listen EADDRINUSE ... :8788`), so the page that shows the
   // engine's health was killing the engine. Bind the requested port, fall back to an ephemeral one, and
   // record which.
@@ -521,7 +527,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
 }
 
 
-/** A session is the supervisor only when the start script says so; everyone else loads a no-op. */
+/** A session is the router only when the start script says so; for every other session this is null. */
 export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   if (env.PI_SUPERAGENT_ROLE !== 'router') return null
   const dataDir = env.PI_SUPERAGENT_STATE
@@ -537,12 +543,13 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(env.PI_SUPERAGENT_BLOCKED ? { blockedCommands: env.PI_SUPERAGENT_BLOCKED.split(',').map(s => s.trim()).filter(Boolean) } : {}),
     ...(env.PI_SUPERAGENT_ALLOW_DELEGATION === '1' ? { allowDelegation: true } : {}),
     ...(env.PI_SUPERAGENT_SDK_PATH ? { sdkPath: env.PI_SUPERAGENT_SDK_PATH } : {}),
-    // Workers are real pi sessions in herdr tabs unless the deployment says otherwise.
+    // Workers always run in herdr tabs; the in-process path is for tests.
     workers: 'herdr',
     ...(env.PI_SUPERAGENT_HERDR_BIN ? { herdrBin: env.PI_SUPERAGENT_HERDR_BIN } : {}),
+    ...(env.PI_SUPERAGENT_HERDR_WORKSPACE ? { herdrWorkspace: env.PI_SUPERAGENT_HERDR_WORKSPACE } : {}),
     ...(env.PI_SUPERAGENT_JUDGE_THINKING ? { judgeThinking: env.PI_SUPERAGENT_JUDGE_THINKING } : {}),
-    // No default login for `self`: the operator and the agent share one, so the reply footer is the agent's
-    // identity, and naming the shared login here silently drops every comment the operator writes.
+    // githubSelf has no default: when the operator and the agent share an account, the reply marker
+    // identifies the agent, and naming the shared account here would drop every comment the operator writes.
     ...(env.PI_SUPERAGENT_GITHUB_REPO ? { githubRepo: env.PI_SUPERAGENT_GITHUB_REPO } : {}),
     ...(env.PI_SUPERAGENT_GITHUB_SELF ? { githubSelf: env.PI_SUPERAGENT_GITHUB_SELF } : {}),
   }
@@ -583,8 +590,8 @@ export default function superagent(pi: PiLike): void {
   const problems = setupProblems({ root: config.worktreeRoot, stateDir: config.dataDir })
   writeFileSync(`${config.dataDir}/setup.json`, JSON.stringify({ problem: problems[0] ?? null, problems, at: new Date().toISOString() }))
   writeHealth(config.dataDir, null)
-  // `ready` is what `superagent start` waits for: a session that booted is not the same as a supervisor
-  // that is listening, and the health check must not report 0 between the two.
+  // `ready` is what `superagent start` waits for: a session that has booted is not yet a router that
+  // listens, and the health check must not report 0 between the two.
   writeFileSync(`${config.dataDir}/ready`, JSON.stringify({ at: new Date().toISOString(), githubRepo: config.githubRepo ?? null }))
   // pi emits this before /reload loads the new copy, so the reloaded router may claim the process again.
   pi.on('session_shutdown', () => {

@@ -58,11 +58,17 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(run(['status'], { FAKE_HERDR_DOWN: '1' }).status).toBe(1)
   })
 
-  it('reads deployment settings from the state dir, so the watchdog and a hand restart agree', () => {
-    writeFileSync(join(state, 'config.env'), '# deployment\nPI_SUPERAGENT_GITHUB_REPO=o/spike\nPI_SUPERAGENT_GITHUB_SELF=bot\n')
+  it('reads deployment settings from the state dir, so the health check and a hand restart agree', () => {
+    writeFileSync(join(state, 'config.env'), '# deployment\nPI_SUPERAGENT_GITHUB_REPO=o/spike\nPI_SUPERAGENT_GITHUB_SELF=bot\n'
+      + 'PI_SUPERAGENT_MAX_WORKERS=2\nPI_SUPERAGENT_BLOCKED=gh,ssh\nPI_SUPERAGENT_JUDGE_THINKING=high\n')
     expect(run(['start']).status).toBe(0)
     expect(routerTab()).toContain('--env PI_SUPERAGENT_GITHUB_REPO=o/spike')
     expect(routerTab()).toContain('--env PI_SUPERAGENT_GITHUB_SELF=bot')
+    // herdr starts the tab from its own environment: a setting the script does not name never arrives.
+    expect(routerTab()).toContain('--env PI_SUPERAGENT_MAX_WORKERS=2')
+    expect(routerTab()).toContain('--env PI_SUPERAGENT_BLOCKED=gh,ssh')
+    expect(routerTab()).toContain('--env PI_SUPERAGENT_JUDGE_THINKING=high')
+    expect(routerTab()).toContain('--env PI_SUPERAGENT_HERDR_WORKSPACE=superagent')
   })
 
   it('starts the panel, and gives the router the SDK entry file and herdr itself', () => {
@@ -82,7 +88,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(readFileSync(join(state, 'session-id'), 'utf8').trim()).toBe(id)
   })
 
-  it('refuses to start a second supervisor over a live one', () => {
+  it('refuses to start a second router over a live one', () => {
     run(['start'])
     const r = run(['start'])
     expect(r.status).toBe(1)
@@ -93,7 +99,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     run(['start'])
     writeFileSync(join(state, 'health.json'), '{"github":{"state":"error","detail":"cli offline"}}')
     expect(run(['status']).status).toBe(2)
-    writeFileSync(join(state, 'setup.json'), '{"problem":{"code":"board-missing","place":"Sources"}}')
+    writeFileSync(join(state, 'setup.json'), '{"problem":{"code":"state-missing","place":"Deployment"}}')
     expect(run(['status']).status).toBe(3)
   })
 

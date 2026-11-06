@@ -1,4 +1,4 @@
-/** Bot lists are patterns (`pi-*`, `fleet-*`): an exact lookup let every fleet agent's comment count as a person's. */
+/** Bot lists are patterns (`pi-*`, `fleet-*`): an exact lookup let every agent the pattern names pass for a person. */
 export function isListed(author: string, patterns: ReadonlySet<string> | undefined): boolean {
   if (!patterns) return false
   for (const pattern of patterns) {

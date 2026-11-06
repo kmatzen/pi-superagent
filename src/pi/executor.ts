@@ -1,5 +1,5 @@
 /**
- * The Executor port bound to pi sessions: start = a session in the ticket worktree, deliver = a queued
+ * The Executor port bound to pi sessions: start = a session in the ticket's workspace, deliver = a queued
  * prompt into the running one, stop = abort. Reports arrive through a tool, never by parsing worker prose.
  */
 import type { Assignment, EngineForExecutor, Ticket, TicketInput } from '../core/index.ts'
@@ -38,7 +38,7 @@ export interface WorkerLauncher {
     ticket: Ticket
     assignment: Assignment
     brief: string
-      /** The worker's report tool lands here; only the engine writes a ticket. */
+    /** The worker's report tool lands here; only the engine writes a ticket. */
     report: (state: string, summary: string, question?: string | null) => void
   }): Promise<WorkerSession> | WorkerSession
 }
@@ -212,8 +212,8 @@ export class PiExecutor {
     }))
   }
 
-  /** A worker that stops producing events is not finished; without this the slot is held and the ticket
-   *  reads as running forever. Reports are the engine's, so the ticket sees it and the queue moves. */
+  /** Workers that have gone quiet. Silence is not completion: the loop reports each quiet stretch once, so
+   *  the ticket asks a person instead of reading as running forever. */
   quiet(minutes: number): WorkerView[] {
     // Once per silent stretch: the loop asks every pass, and the operator should be asked once.
     const due = this.workers().filter(w => w.quietSeconds >= minutes * 60 && !this.live.get(w.ticketId)?.quietReported)
@@ -221,7 +221,8 @@ export class PiExecutor {
     return due
   }
 
-  /** Silent success is a failure: this is the receipt, not the run. */
+  /** A run that ends without ticket_report is a failure, said once. Nothing calls this yet: the quiet watch
+   *  catches such a worker instead. */
   settled(ticketId: string): void {
     const live = this.live.get(ticketId)
     if (live && !live.reported && !live.settledSaid) {

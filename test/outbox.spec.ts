@@ -19,7 +19,7 @@ const githubSink = (posts: string[], fail = { next: false }): CommentSink => ({
 })
 
 describe('the outbox', () => {
-  it('a GitHub reply reaches a sink that can address it: asking only for a card dropped every one', async () => {
+  it('a reply reaches the sink that can address it', async () => {
     const posts: string[] = []
     const outbox = new CommentOutbox(githubSink(posts), store())
     outbox.send(github('m1'))
@@ -42,6 +42,17 @@ describe('the outbox', () => {
     await settle()
     expect(posts).toEqual(['m1'])
     expect(outbox.status('m1')).toBe('sent')
+  })
+
+  it('tells the sink when an attempt is a retry, even after a restart, so it can look before posting twice', async () => {
+    const kv = store()
+    const calls: boolean[] = []
+    const dies: CommentSink = { accepts: () => true, post: (_m, _t, retry) => { calls.push(retry); return new Promise(() => {}) } }
+    new CommentOutbox(dies, kv).send(github('m1'))
+    new CommentOutbox(dies, kv).flush()
+    // The process died mid-post; a fresh outbox over the same store is the restarted router.
+    new CommentOutbox(dies, kv).flush()
+    expect(calls).toEqual([false, true])
   })
 
   it('a message the sink cannot address is dropped, and never retried', () => {

@@ -1,7 +1,7 @@
 {
   "name": "pi-superagent",
   "version": "0.0.1",
-  "description": "The dsh-superagent domain engine (Source/Trigger/Thread/Eval/Mandate/Ticket/Assignment/Report) bound to pi sessions, pi model calls, SQLite, and the fleet board.",
+  "description": "Open a GitHub issue; a pi worker does the work and replies. The dsh-superagent ticket engine bound to pi, herdr, GitHub and SQLite.",
   "type": "module",
   "license": "MIT",
   "engines": {

@@ -1,110 +1,106 @@
 # Formal verification
 
-Three subsystems of pi-superagent are specified in TLA+ and checked to exhaustion
-by TLC, on every run of `./scripts/check-formal`:
+Three parts of pi-superagent, the places where a bad ordering would quietly lose or duplicate work, are
+specified in TLA+ and checked exhaustively by TLC, the TLA+ model checker:
 
-| Spec | Models | States checked | Claims |
+| Specification | Models | States explored (distinct) | Claims |
 | --- | --- | --- | --- |
-| `formal/Ticket.tla` | the core ticket lifecycle (`src/core`) | 12,325,891 (1,398,882 distinct) | 7 |
-| `formal/Intake.tla` | the GitHub intake source (`source-github.ts`) | 565,551 (113,281 distinct) | 6 |
-| `formal/Workers.tla` | worker records, tabs, agents (`herdr-workers.ts`) | 347 (94 distinct) | 5 |
+| [`Ticket.tla`](../formal/Ticket.tla) | the engine's ticket lifecycle (`src/core`) | 12,325,891 (1,398,882) | 7 |
+| [`Intake.tla`](../formal/Intake.tla) | the GitHub source (`source-github.ts`) | 565,551 (113,281) | 6 |
+| [`Workers.tla`](../formal/Workers.tla) | worker records, tabs and agents (`herdr-workers.ts`) | 347 (94) | 5 |
 
-Zero violations; every model action carries a comment naming the real function it
-mirrors. This is not decoration: writing the specs found **two model bugs and one
-real design bug** (a dropped eval batch, a resurrected stopped ticket, and a
-commit-then-crash window that loses a request — see C3 below).
+Every claim holds in every reachable state. The specifications have already paid for themselves: the
+intake model found a bug in shipped code, a read position saved before the engine held its triggers, so
+that a crash at the wrong moment lost a request for good. TLC printed the exact interleaving, and the fix
+shipped with that interleaving as a regression test. Along the way TLC also caught two mistakes in the
+models themselves (a dropped evaluation batch, and a stopped ticket brought back to life), which is
+exactly what a checker is for.
 
-## Running
+## Running the checks
 
+```sh
+scripts/check-formal    # all three specifications, about five minutes
 ```
-./scripts/check-formal        # all specs, ~5 min, exit 0 only on a completed proof
-```
 
-It needs a JDK (`brew install openjdk` once; `JAVA=` overrides) and fetches
-`tla2tools.jar` to `~/.cache/tla2tools/` on first use. A parse error, an
-invariant violation, a missing java, a truncated run: all exit 1 with a one-line
-reason. Silent success is treated as failure by design.
+The script needs a JDK (`brew install openjdk`, or point `JAVA` at one) and downloads `tla2tools.jar` to
+`~/.cache/tla2tools/` on first use. It exits 0 only when every specification is checked to completion. A
+missing JDK, a parse error, a violated claim or a truncated run each exits 1 with a short reason: a check
+that stays silent is treated as a failed one.
 
-## What each spec proves
+## What each specification proves
 
-### `Ticket.tla` — the lifecycle (`formal/README.md` has the details)
+### `Ticket.tla`: the ticket lifecycle
 
-- **I1 StopAbsorbing** — a ticket a person stopped is never live again.
-- **I2 DoneFromReady** — `done` implies a `ready` report; silent success is
-  unrepresentable.
-- **I3 OneRunning** — at most one running assignment per ticket.
-- **I4 NoSecondTicket** — no ticket for a thread a live ticket follows, under
-  every interleaving, including a follow-up arriving mid-Evaluation.
-- **I5 OutboxOnce / I6 SentMonotonic** — each acknowledgement queued and sent
-  exactly once.
-- **LT Delivered** — with minimal fairness, every emitted message is eventually
-  delivered.
+- **I1 StopAbsorbing.** A ticket a person stopped is never live again.
+- **I2 DoneFromReady.** A completed ticket always has a *ready* report, so completing without one is
+  unreachable, not merely untested.
+- **I3 OneRunning.** A ticket has at most one running assignment.
+- **I4 NoSecondTicket.** No ticket is created for a thread that a live ticket already follows, in any
+  interleaving, including a follow-up that arrives in the middle of an evaluation.
+- **I5 OutboxOnce and I6 SentMonotonic.** Each acknowledgement is queued at most once and sent at most
+  once, and a sent message stays sent.
+- **LT_Delivered.** Under the stated fairness, every incoming message eventually reaches intake: intake
+  never stalls.
 
-### `Intake.tla` — the source that once fired 36 mirrored issues as requests
+### `Intake.tla`: the GitHub source
 
-- **C1 SeedSilence** — an issue open at the first look is never accepted; it can
-  fire only after a real close/reopen cycle. The import-storm incident, frozen.
-- **C2 ReopenOnce** — at most one request per open interval of an issue.
-- **C3 NoGhostCommit** — the committed `since` cursor only stands over comments
-  the engine has *accepted*. This is why the cursor commit is deferred: a poll
-  stages its cursor, and the stage lands only after every trigger it emitted is
-  in the engine. Committing at emit time — the naive form — makes C3 false: a
-  crash between poll and accept loses the request permanently. TLC produced the
-  exact counter-example trace.
-- **C4 NoDoubleAccept** — a replayed trigger is deduped by content-hashed id,
-  never accepted twice.
-- **C5 BotNeverHuman** — a bot comment is never taken for a person's request.
-- **C6 NoLoss** — through a crash (bounded restarts; generalizes by induction),
-  every posted comment is eventually accepted and every issue opened after the
-  seed fires.
+- **C1 SeedSilence.** An issue that was open at the first look is never accepted unless it is closed and
+  reopened.
+- **C2 ReopenOnce.** An issue fires at most one request per open interval.
+- **C3 NoGhostCommit.** The committed read position never passes a comment the engine has not accepted.
+  This is the claim that found the bug: commit at read time, and TLC produces a crash that loses a request.
+- **C4 NoDoubleAccept.** Acceptance is by id and permanent: a replayed trigger adds nothing, and nothing
+  accepted is ever lost.
+- **C5 BotNeverHuman.** A bot's comment is never accepted as a person's.
+- **C6 NoLoss.** Through a crash, every posted comment is eventually accepted, and every issue opened
+  after the first look eventually fires.
 
-### `Workers.tla` — tabs, records, and the sweep
+### `Workers.tla`: tabs, records and the sweep
 
-- **W1 OneLive** — at most one live worker at a time.
-- **W2 SweepKeepsLiveAgents / W4 NoTabLossUnderWork** — a live agent's tab is
-  never closed: `closeStaleTabs` guards on agent liveness (`agent_not_found`),
-  making untouchability an invariant, not a race.
-- **W3 NoResurrect** — record state moves only `free→live→ended→free(retire)`;
-  a record never resurrects and never retires while its tab is open.
-- **W5 ZombieTabsGone** — after finitely many launches, every dead agent's tab
-  is eventually closed: the workspace cannot fill with zombies.
+- **W1 OneLive.** A ticket has at most one live worker.
+- **W2 SweepKeepsLiveAgents and W4 NoTabLossUnderWork.** A worker whose record is live and whose agent is
+  alive always keeps its tab. The sweep's liveness check makes this an invariant rather than a race.
+- **W3 NoResurrect.** A record only moves forward, from free to live to ended, and returns to free only
+  when it is retired. An ended record never becomes live again.
+- **W5 ZombieTabsGone.** After any finite number of launches, every dead agent's tab is eventually closed:
+  the workspace cannot fill up with abandoned tabs.
 
-## Method (what makes these proofs mean something)
+## Why the results mean something
 
-**Mirror, don't invent.** Every action cites the real function it abstracts
-(`core/evals.ts` accept, `closeStaleTabs`, poll/seed/cursor). A change to those
-transitions must be mirrored here and the check re-run.
+**Each action mirrors real code.** Every action in a specification names the function whose guards it
+copies. When that function changes, the action must change with it, and the check must run again.
 
-**Abstraction honesty rule.** Every removed feature (context threads, follows,
-eval expiry, policy revalidation, attention, network) only removes transitions
-that could end or resume a ticket — the abstraction weakens toward soundness and
-never toward false comfort. Each spec header states its removed features.
+**Each header says what the model leaves out.** Leaving behavior out narrows what a claim covers. A claim
+holds for the behaviors the model includes, and for a left-out feature only as far as that feature's code
+passes through the same guards. For example, every path that could resume a ticket checks the same
+`ended.by === 'human'` guard that I1 relies on. The headers list what is missing so that a reader can
+check this for themselves.
 
-**Bounded for exhaustiveness.** Real numbers are infinite; models bound them: 2
-threads, 2 slots, 3 assignments, crash budgets, launch budgets. The claims are
-mechanism claims ("the replay recovers from a restart"), which generalize: a
-fixed finite bound that exercises the mechanism covers the argument. The bounds
-are in the spec headers.
+**The bounds are small on purpose.** Two threads, two ticket slots and four messages; two issues, two
+comments and one crash; two workers and three launches. Small bounds let TLC visit every state in
+minutes, and ordering bugs almost always show up at small sizes. They are still bounds, not a proof for
+every size, and each header states its own.
 
-**Liveness via fairness.** "Eventually delivered / eventually cleaned" claims
-(`LT`, `C6`, `W5`) are temporal properties under stated fairness assumptions
-(minimal: enabled source/accept/sweep actions fire infinitely often; crash
-budgets bounded with `WF`). Fairness assumptions are written in the spec, so a
-reader can attack them.
+**Liveness rests on stated fairness.** The "eventually" claims (LT_Delivered, C6, W5) assume that an
+action which stays enabled eventually happens. Each specification writes its fairness assumptions down,
+next to the claims, so they can be argued with. Crashes and launches are bounded, so "eventually" always
+has an end.
 
-**TLC patterns that bit us** (save yourself the hour): action invariants must be
-`[][...]_vars` **PROPERTY**s, not `INVARIANT` lines (TLC 2.19 rejects boxed
-formulas there); `UNCHANGED` needs tuples `<<...>>`, not sets; an action that
-assigns `x'` must not list `x` in its `UNCHANGED` (self-contradiction = a silent
-dead action — find it with `-coverage 1`); `open` is a reserved word; a liveness
-run needs the terminate step as an explicit `UNCHANGED vars` action.
+**Lessons from TLC, so you can skip them.** A property with primed variables (`[][...]_vars`) goes under
+`PROPERTY`, never `INVARIANT`. `UNCHANGED` takes a tuple `<<...>>`, not a set. An action that assigns
+`x'` must not also list `x` in its `UNCHANGED`: the contradiction silently disables the action, and only
+`-coverage 1` will show it. A specification whose runs can finish needs an explicit stuttering step
+(`Terminate == UNCHANGED vars`), or TLC reports every finished run as a deadlock; stuck work is then
+caught by the liveness claims. And naming a state `open` broke the parse, which is why the intake model
+says `opened`.
 
-## Scope — what the proofs do NOT say
+## What the proofs do not say
 
-The model proves the model. Binding force ends at the abstraction: the specs
-cover the control flow named above, not the judge's text decisions, the GitHub
-API's behavior (response codes, rate limits), the database layer, or the network.
-The guarantee is: **no implementation following these transitions can reach a
-forbidden state, and liveness holds under the stated fairness.** When `src/core`
-ticket transitions change upstream, these specs must be updated and re-run —
-that is the contract of the byte-identical core rule.
+A model proves things about the model. These cover the control flow described above, not the judge's
+decisions, GitHub's behavior (status codes, rate limits, pagination), SQLite, herdr, or the network.
+Newer behavior is tested but not modeled: reviews, the stop on a closed conversation, and the outbox's
+check before a retry.
+
+What the specifications do guarantee: no implementation that follows these transitions can reach a
+forbidden state, and the liveness claims hold under the stated fairness. When the code a specification
+mirrors changes, upstream's ticket transitions included, the specification must change with it.

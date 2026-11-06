@@ -12,7 +12,7 @@ export interface RouterConfig {
   maxConcurrent?: number
   workerQuietMinutes?: number
   judgeThinking?: string
-  /** Each worker is its own pi session in a herdr tab. */
+  /** 'herdr': each worker is its own pi session in a herdr tab. Unset, workers run in-process (tests only). */
   workers?: 'herdr'
   herdrBin?: string
   evalTimeoutMs?: number
@@ -69,9 +69,9 @@ export function policyOf(config: RouterConfig): Policy {
     // Longer than the router needs to answer one eval under load: a deadline it cannot meet turns every
     // pending judgement into a requeue, and the requeues are what pin the session at full CPU.
     evalTimeoutMs: config.evalTimeoutMs ?? 300_000,
-    // Admissibility is policy, not a model call: a person, explicitly, on a thread we listen to.
-    // The author is checked again here: a trigger stored before bot names were matched as patterns still says
-    // human, and one such (pi-f11a9262 asking the operator to approve a pod test) became a ticket to run it.
+    // Admission is policy, not a model call: a person, explicitly, on a thread the router listens to. The
+    // author is checked again here because a trigger stored before bot names were matched as patterns still
+    // says human, and one such trigger (an agent asking the operator to approve a test) became a ticket to run it.
     gate: trigger => (trigger.human && !isListed(trigger.actor.id, config.bots)
       ? { admissible: true, strength: 'explicit', basis: { via: 'listed' } }
       : { admissible: false, reason: 'not human' }),
