@@ -1,4 +1,5 @@
-/** Judging used to run in the operator's own pane, so the pane looked wedged for every model turn; this is the headless judge instead. */
+/** The judge: a headless pi session that answers each candidate with `ticket_decide`. Judging once ran in
+ *  the operator's own pane, which froze for every model turn. */
 import type { SdkSurface } from './router.ts'
 import type { EngineLog } from './log.ts'
 

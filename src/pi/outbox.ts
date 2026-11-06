@@ -4,7 +4,8 @@ import type { OutboundMessage, Outbox as OutboxPort, ReplyStatus } from '../core
 export interface CommentSink {
   /** Whether this sink can address the message on its channel. */
   accepts(message: OutboundMessage): boolean
-  post(message: OutboundMessage, text: string): void | Promise<void>
+  /** `retry` means an earlier attempt may have landed before the process died: look before posting again. */
+  post(message: OutboundMessage, text: string, retry: boolean): void | Promise<void>
 }
 
 export interface OutboxStore {
@@ -13,14 +14,17 @@ export interface OutboxStore {
 }
 
 const KEY = 'outbox'
+const KEEP_SENT_MS = 30 * 86_400_000
+
+type Row = { message: OutboundMessage; status: ReplyStatus; at: string; tries?: number }
 
 export class CommentOutbox implements OutboxPort {
-  private rows: Record<string, { message: OutboundMessage; status: ReplyStatus; at: string }>
+  private rows: Record<string, Row>
   private readonly posting = new Set<string>()
 
   constructor(private readonly sink: CommentSink, private readonly store: OutboxStore,
               private readonly now: () => number = () => Date.now()) {
-    this.rows = this.store.get<Record<string, { message: OutboundMessage; status: ReplyStatus; at: string }>>(KEY) ?? {}
+    this.rows = this.store.get<Record<string, Row>>(KEY) ?? {}
   }
 
   private persist(): void { this.store.set(KEY, this.rows) }
@@ -40,20 +44,22 @@ export class CommentOutbox implements OutboxPort {
 
   flush(): number {
     let sent = 0
-    // Send-once only has to cover a restart's window; the ledger of everything ever posted is not a ledger.
+    // Send-once only has to outlive a restart; a ledger of every message ever posted is just growth.
     for (const [id, row] of Object.entries(this.rows)) {
-      if (row.status === 'sent' && Date.parse(row.at) < this.now() - 30 * 86_400_000) { delete this.rows[id]; this.persist() }
+      if (row.status === 'sent' && Date.parse(row.at) < this.now() - KEEP_SENT_MS) { delete this.rows[id]; this.persist() }
     }
     for (const [id, row] of Object.entries(this.rows)) {
       if (row.status !== 'pending' || this.posting.has(id)) continue
-      // Asking only for a card dropped every GitHub reply before it reached a sink that could post it.
       if (!this.sink.accepts(row.message)) {
         row.status = 'dropped'
         this.persist()
         continue
       }
       try {
-        const posted = this.sink.post(row.message, row.message.text)
+        // Counted before the post, so an attempt that dies with the process still counts.
+        row.tries = (row.tries ?? 0) + 1
+        this.persist()
+        const posted = this.sink.post(row.message, row.message.text, row.tries > 1)
         if (posted instanceof Promise) {
           // Sent only once the channel says so; a failed post stays pending for the next flush.
           this.posting.add(id)
@@ -74,5 +80,3 @@ export class CommentOutbox implements OutboxPort {
 
   pending(): string[] { return Object.entries(this.rows).filter(([, r]) => r.status === 'pending').map(([id]) => id) }
 }
-
-/** A message with nowhere to go is dropped, not silently queued forever. */

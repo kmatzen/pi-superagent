@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import superagent, { activationRefusal, createRouterExtension, configFrom, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
-import type { GithubApi, IssueComment, IssueState } from '../src/pi/source-github.ts'
+import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
 import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
 
@@ -12,8 +12,8 @@ const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ext-')); dirs.push(d); return d }
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
 
-// The GitHub stand-in for the old card fixture: addComment opens the issue (authored by
-// the agent, so the open itself is silent) and posts a person's comment that fires.
+// addComment opens the issue as the agent, so the opening itself is silent, then posts a person's
+// comment, which fires.
 type Feed = { issues: IssueState[]; comments: IssueComment[]; posts: Array<{ issue: number; body: string }> }
 
 /** The tools under test answer synchronously; the cast keeps the test readable. */
@@ -152,7 +152,29 @@ describe('the router extension', () => {
     expect(posted[0]!.issue).toBe(150)
   })
 
-  it('registers the supervisor tool set', () => {
+  it('a reply GitHub kept while the answer was lost on the way back is not posted twice', async () => {
+    const issues: IssueState[] = []
+    const posted: Array<{ issue: number; body: string }> = []
+    let lostAnswers = 1
+    const githubApi: GithubApi = {
+      comments: async () => [] as IssueComment[],
+      issues: async () => [...issues],
+      postComment: async (issue, body) => { posted.push({ issue, body }); if (lostAnswers-- > 0) throw new Error('timed out') },
+      commentsFor: async issue => posted.filter(p => p.issue === issue)
+        .map(p => ({ issue, author: 'octocat', at: '', body: `${p.body}\n\n${REPLY_MARKER}` })),
+    }
+    const f = fixture(true, undefined, undefined, undefined, { githubApi })
+    await f.running.tick()
+    issues.push({ issue: 151, title: 'DO: rotate the keys', body: 'Rotate them.', author: 'octocat',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), labels: [] })
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    for (let pass = 0; pass < 3; pass++) { await f.running.tick(); await settle() }
+    expect(posted.filter(p => p.body.includes('on it')), 'the acknowledgement, once').toHaveLength(1)
+  })
+
+  it("registers the router's tools", () => {
     const f = fixture()
     expect([...f.pi.tools.keys()].sort()).toEqual(['engine_pause', 'engine_tick', 'ticket_decide', 'ticket_show', 'tickets_open'])
   })
@@ -331,7 +353,7 @@ describe('the router extension', () => {
     expect(f.workers[0]!.prompts.join('\n')).toContain('also pin the digest')
   })
 
-  it('a second accept on a thread that already has an open ticket is recorded as ignore: the TASK-44 duplicate', async () => {
+  it('a second accept on a thread that already has an open ticket is recorded as ignore', async () => {
     const f = fixture()
     f.addComment('500', 'octocat', 'rotate the keys')
     await f.running.tick()
@@ -409,19 +431,19 @@ describe('the router extension', () => {
     expect(f.pi.sent.length).toBe(seen)
   })
 
-  it('a daemon comment never reaches the judge', async () => {
+  it("a bot's comment never reaches the judge", async () => {
     const f = fixture()
-    f.addComment('404', 'fleet-answer-loop', 'RE-QUEUE-PENDING TASK-404')
+    f.addComment('404', 'fleet-answer-loop', 'requeue the pending work')
     await f.running.tick()
     expect(f.pi.sent).toHaveLength(0)
   })
 })
 
-describe('configFrom', () => {
-  it('a label added after startup routes work: agent-ready is a person saying go', async () => {
+describe('startup and recovery', () => {
+  it('an issue opened after the first look reaches the judge and gets a worker', async () => {
     const f = fixture()
     await f.running.tick()   // the first look seeds what is open; 410 opens after it, like a real request
-    f.feed.issues.push({ issue: 410, title: 'DO: ship the panel', body: 'Ship the panel.', labels: ['agent-ready'],
+    f.feed.issues.push({ issue: 410, title: 'DO: ship the panel', body: 'Ship the panel.', labels: [],
       author: 'octocat', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as IssueState)
     await f.running.tick()
     await settle()
@@ -431,6 +453,8 @@ describe('configFrom', () => {
     expect(f.workers).toHaveLength(1)
   })
 
+  // These tickets live on a thread from another source, which the closed-thread rule leaves alone: they test
+  // recovery and nothing else.
   it('a ticket left running by a dead router gets a real worker, not a ghost', async () => {
     const f = fixture(true, dir => {
       const repos = new SqliteRepositories(`${dir}/tickets.db`)
@@ -488,7 +512,6 @@ describe('configFrom', () => {
 
   it('the entry point starts one router, refuses a second, and lets a reload claim the process again', () => {
     const dir = tmp()
-    mkdirSync(join(dir, 'board'), { recursive: true })
     const saved = { ...process.env }
     Object.assign(process.env, { PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_STATE: dir, PI_SUPERAGENT_TICK_MS: '3600000' })
     delete process.env.PI_SUPERAGENT_PANEL_PORT

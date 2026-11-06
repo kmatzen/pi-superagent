@@ -1,4 +1,4 @@
-/** A workspace per ticket, a prepare command that must succeed, and a PATH whose blocked names refuse. */
+/** A workspace per ticket, a prepare command that must succeed, and blocked names that refuse on its PATH. */
 import { chmodSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -72,14 +72,13 @@ export function shims(stateDir: string, blocked: readonly string[]): string {
   return bin
 }
 
-/** What `superagent status` reads as code 3: a supervisor that cannot start is not a healthy one. */
+/** What `superagent status` reads as code 3: a router that cannot start its work is not a healthy one. */
 export function setupProblems(request: { root: string; stateDir: string }): Array<{ code: string; place: string; detail: string }> {
   const problems: Array<{ code: string; place: string; detail: string }> = []
   if (!existsSync(request.stateDir)) problems.push({ code: 'state-missing', place: 'Deployment', detail: `no state directory at ${request.stateDir}` })
   if (!writable(request.root)) problems.push({ code: 'worktrees-unwritable', place: 'Execution', detail: `cannot write ${request.root}` })
   return problems
 }
-
 
 const writable = (dir: string): boolean => {
   try { mkdirSync(dir, { recursive: true, mode: 0o700 }); return existsSync(dir) } catch { return false }

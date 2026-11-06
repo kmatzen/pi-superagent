@@ -54,8 +54,8 @@ export class HerdrWorkers {
     const dir = join(this.root, sessionId)
     mkdirSync(join(dir, 'inbox'), { recursive: true })
     const workspace = await this.workspace()
-    // The record precedes the tab: a sweep landing between tabCreate and the record write found a
-    // labelled tab no record owns and closed it under the starting worker.
+    // The record comes first: a sweep landing between tabCreate and the record write would find a
+    // labelled tab that no record owns, and close it under the starting worker.
     writeFileSync(join(dir, 'worker.json'), JSON.stringify({ sessionId, ticketId: input.ticket.id, agent: '', tabId: '', paneId: '', workspace: input.workspace, startedAt: new Date().toISOString() }, null, 2))
     const tab = await herdr.tabCreate({
       workspace, cwd: input.workspace, label: `${input.thread} · ${input.ticket.title}`.slice(0, 60),
@@ -129,9 +129,9 @@ export class HerdrWorkers {
     return retired
   }
 
-  /** Tabs of superseded worker generations outlive their records and their agents: a restart adopts a
-   *  worker, a stop starts a newer one, and the older tab stays. Worker tabs carry the `thread · title`
-   *  label this router renames them to; a labelled tab no live record owns and no working agent fills is litter. */
+  /** Tabs of superseded workers outlive their purpose: a restart adopts a worker, a stop starts a newer one,
+   *  and the older tab stays. Worker tabs carry a `thread · title` label; one that no record owns, or whose
+   *  agent herdr no longer knows, is litter. */
   async closeStaleTabs(workspaceLabel: string): Promise<string[]> {
     const ws = (await this.options.herdr.workspaces()).find(w => w.label === workspaceLabel)?.workspace_id
     if (!ws) return []

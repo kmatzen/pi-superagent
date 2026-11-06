@@ -7,8 +7,8 @@ export interface GithubApiOptions {
   bin?: string
 }
 
-// The comments endpoint answers for pull requests too, and a pull URL carries no issue number:
-// taking 0 from it produced junk tickets whose replies could never post.
+// A pull request's conversation comments arrive with an /issues/N url too (a pull request is issue N);
+// a row with no number is skipped, never filed under #0.
 const issueOf = (url: string): number => Number(/\/issues\/(\d+)/.exec(url)?.[1] ?? 0)
 
 export function ghApi(options: GithubApiOptions): GithubApi {
@@ -54,7 +54,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
         rows.push(...got)
         if (got.length < 100) break
       }
-      // The issues endpoint returns pull requests too; a PR is not a request on the board.
+      // The issues endpoint lists pull requests too; opening a pull request is a delivery, not a request.
       return rows.filter(r => !r.pull_request).map(r => ({
         issue: r.number, title: r.title, body: r.body ?? '', labels: (r.labels ?? []).map(l => l.name),
         author: r.user?.login ?? 'anonymous', createdAt: r.created_at, updatedAt: r.updated_at,

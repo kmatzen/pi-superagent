@@ -1,111 +1,160 @@
 # Design decisions
 
-The decisions that shaped this system, each with the force that produced it.
-(How the parts fit: [architecture.md](architecture.md). Proofs:
-[formal-verification.md](formal-verification.md).)
+Each section states a rule the system keeps and the failure that taught it. Where each rule lives is
+mapped in [architecture.md](architecture.md); the proofs are in [formal-verification.md](formal-verification.md).
 
-## GitHub issues are the only front door
+## GitHub is the only way in
 
-Every request arrives as an issue or a human comment on the wired repo; there is
-no CLI submission path, no board, no labels. **Because** the first version
-accepted requests from several surfaces and each one grew its own trust rules
-(who is a person here? what is addressed to me?) — with two doors, the agent's
-behavior depends on which one a request slipped through, and that is how you get
-an agent doing work nobody asked for. One door makes the identity rules local to
-one file (`source-github.ts`) and one gate (`assessor.ts`).
+Every request arrives as an issue, a comment or a review on one repository. There is no command-line
+submission, no board and no label vocabulary.
 
-## A first look never fires existing issues (the seed rule)
+Each extra door grows its own answers to "is this a person?" and "is this addressed to me?", and the
+agent's behavior then depends on which door a request happened to use. With one door, the identity rules
+live in one file (`source-github.ts`) and the admission rule in one function (`policyOf` in `router.ts`).
 
-**Because** the incident: mirroring a repo with 36 existing issues fired all 36
-as requests on first start. Issues predating the source are recorded silently;
-only issues that open afterward fire; closing then reopening counts as a real
-"go again" (closed issues leave the seen set). Frozen as `Intake.tla C1/C2`.
+## The first look is silent
 
-## Read positions commit late, seeds commit early
+The first time the source sees a repository, it records every open issue and fires none of them. Only
+issues opened afterward are requests.
 
-The comment cursor and seen-set stage during a poll and land at the next poll,
-once their triggers are in the engine. **Because** commit-at-emit plus a crash
-leaves the cursor past a request the engine never accepted — silently lost
-forever; a lost stage just replays (ids are content hashes, the engine dedups).
-The seed is the mirror case: a lost seed re-runs the import storm, and seeding
-can never swallow a request, so it commits immediately. Both directions proved
-in `Intake.tla C3/C6`; the shipped form is the counter-example trace turned into
-a test.
+The first version, pointed at a repository with a backlog, fired every open issue at once. A backlog is
+history, not a queue of fresh requests. Closing and reopening an issue, though, is a person saying "go
+again": a closed issue leaves the seen set and fires when it returns, under a new trigger id, because the
+id includes the issue's last update. The review cursor seeds the same way. (`Intake.tla` C1, C2.)
 
-## The engine core is byte-identical to upstream
+## Read positions commit late; seeds commit at once
 
-`src/core/**` and its test are vendored from the upstream prototype and never
-edited — diff against upstream must stay empty. **Because** the core is the
-proven part (its lifecycle is what `Ticket.tla` models); every adaptation
-(judge prompt, GitHub shapes, herdr bindings, panel) lives in `src/pi/**`, so
-upstream fixes can be re-vendored mechanically and the proof keeps its warrant.
+A poll stages its read positions, and they commit at the start of the next poll, once the engine holds
+every trigger they produced.
 
-## Judgment is one model call behind a structural gate
+Committing at the moment of reading leaves a window: if the process dies between reading a comment and
+handing it to the engine, the saved position already points past a request the engine never saw, and
+that request is gone. A position that commits late can only cause a replay, and replays are free because
+the engine accepts each trigger id once. A seed is the mirror image: losing one would replay the backlog,
+and a seed can never swallow a request, so it commits immediately. The model checker found the early
+commit in shipped code; the fix ships with the counterexample as a regression test. (`Intake.tla` C3, C6.)
 
-The gate decides mechanically first (person? addressed? this repo? reply
-marker?), and only gated triggers get one assessor call with the thread.
-**Because** the judge model changes its mind; the mechanical layer must absorb
-bot traffic and self-echoes so a judge wobble cannot open tickets from the
-agent's own comments. Judge prompt text lives in `src/pi/judge.ts`, tuned
-against real accepted/ignored samples; thresholds are config, not code.
+## Code admits; the model judges
 
-## A finished worker lingers; the sweep only touches provably-dead agents
+A policy gate in code admits a trigger only from a person who is not on the bot list. Only then does
+the judge see it. When the judge accepts a thread that already has an open ticket, the router overrules
+it and records an ignore.
 
-`closeStaleTabs` closes a tab only when its record's agent answers
-`agent_not_found`. A reported worker's tab stays open for follow-up until its
-agent dies. **Because** an earlier sweep keyed on tab age closed tabs of
-mid-report workers — the report landed with nowhere to show. The liveness
-probe as the single guard is `Workers.tla W2/W4`; the no-zombie-pile-up is W5.
+A model's verdicts wobble; the deterministic layer keeps a wobble from turning bot traffic, the agent's
+own comments or a duplicate into work. Both checks were learned. A trigger stored before bot names were
+matched as patterns still said "human", and an agent asking the operator to approve a test became a ticket
+to run it; the gate now checks the author again. And the judge once opened a second ticket on a thread
+whose first ticket was right there in its prompt.
 
-## Workers report; they do not declare victory in prose
+## The judge works alone, one question at a time
 
-A worker ends its assignment by calling the report tool with a verdict
-(`ready | blocked | failed`) plus text; the engine ends a ticket only on
-`ready`. **Because** "silent success is the defect class": a model that says
-"done" in prose while producing nothing must be structurally unable to complete
-a ticket. `Ticket.tla I2` makes silent success unrepresentable in the model.
+Judgements go to a headless pi session that loads no extensions, skills or context files, never to the
+operator's own pane, and the assessor hands it one candidate per turn.
 
-## A human stop is absorbing
+Judging in the operator's pane made the pane look frozen for every model turn. Sending candidates in a
+burst was worse: 41 of them steered into one running turn came back out of order, and the tail expired
+unanswered. The judge is also opened once and shared: opening a session takes 20 to 45 seconds, and
+before that rule every eval arriving in the window opened its own.
 
-Once a person stops a ticket, no trigger, wake, or attach can make it live
-again; a new request needs a new ticket. **Because** a stopped ticket is a
-person's "not now", and an agent that resumes what it was told to stop learns
-fast that human words mean nothing. `Ticket.tla I1`.
+## Workers report through a tool, never in prose
 
-## One supervisor, one SQLite writer, one state dir
+A worker ends its assignment by calling `ticket_report` with a state: ready, blocked, failed or
+cancelled. Only *ready* completes a ticket.
 
-Everything (store, cursors, worker records, config, logs) lives under
-`~/.pi/superagent/`; SQLite is the single writer of record; the panel is
-read-mostly. **Because** the multi-machine ambitions died of coordination
-bugs — the fleet runs one supervisor per repo and SSHes where it needs GPUs.
-Deleting the directory resets the system, which makes the crash model in the
-specs exactly the operational reality.
+A model that says "done" in prose while having done nothing must be unable to complete anything. In the
+lifecycle model, completing without a *ready* report is not merely untested but unreachable
+(`Ticket.tla` I2). A worker that goes silent without reporting completes nothing either: after 15 quiet
+minutes the router asks a person to steer it, stop it, or accept its work.
 
-## A closed conversation closes the ticket
+## A worker is fenced in
 
-GitHub says "this is over" in three ways — a merge closes the issue it names, a close says no, and a
-delete says never mind. All three look the same from the polls: the thread leaves the open set. The
-router stops the ticket (the core's absorbing human-stop), receipts the issue once, and stays quiet
-until a reopen — which, by the trigger-id rule, fires fresh. Tickets on non-GitHub threads are the
-core's business, untouched: the watcher reads only the source it owns.
+Inside a worker, a guard refuses delegation tools, refuses blocked commands, and refuses writes outside
+the ticket's workspace. The workspace's setup script, which runs before pi does, meets the blocked
+commands as refusing shims first on its PATH. The brief also tells the worker that the machine is shared.
 
-The same honesty governs the polls themselves: three consecutive failures write an error into
-health.json, so a supervisor that cannot hear its front door exits 2 under the watchdog instead of
-looking green while deaf.
+Delegated work leaves the mandate, the workspace and the report behind. Blocked commands are the
+operator's personal tools (`gh`, for instance), and the operator's identity is not the worker's to use.
+The shared-machine brief exists because workers run side by side with each other and with people:
+sequential builds, bounded parallel jobs, and no process left running after the report.
 
-## A review is a request; opening a PR is not
+## A person's stop is final
 
-A submitted review — "changes requested", "approved" — is a person speaking about delivered work, on
-the same conversation the ticket already owns. It fires a fresh judgement and the reply posts into the
-PR's own thread (a PR is issue N on GitHub, so the reply path needs no second address). Opening a PR is
-**not** a trigger: a PR is a delivery, and making every opening one turns the agent into a mandatory
-reviewer of its own fleet's output — a self-feeding loop. Reviews ride the same deferred-cursor rule as
-comments; a first look seeds the review cursor silent, so a restart never rereads history as requests.
+Once a person stops a ticket, nothing revives it: no new message, no wake-up, no retry. A request made
+again becomes a new ticket.
 
-## Formal specs live beside the code and run in one command
+A stop is a person saying "not now". An agent that resumes what it was told to stop teaches everyone that
+their words do not count. (`Ticket.tla` I1.)
 
-`formal/*.tla` + `scripts/check-formal`, checked to exhaustion; every spec
-action names the real function it mirrors; headers state every removed feature
-and bound. **Because** a proof you cannot re-run in one command rots; and
-because the specs found three real bugs (two model, one shipped) in days — the
-doc-rotation fear was the lesser risk.
+## A closed conversation stops its ticket
+
+GitHub ends a conversation in three ways: a merge closes the issue it names, a close says no, and a
+deletion says never mind. All three look the same from a poll, because the thread leaves the set of open
+issues and pull requests. The router then stops the ticket with a person's stop, posts one notice on the
+thread, and stays quiet until the issue is reopened.
+
+Closing the issue is the one stop that needs no tool and no knowledge of the system. Tickets on threads
+from other sources are left alone: the router can only tell whether a GitHub thread is open.
+
+## A review is a request; opening a pull request is not
+
+A submitted review, whether it requests changes or approves, is a person speaking about delivered work,
+on a conversation the ticket already owns. It fires a fresh judgement, and the reply lands in the pull
+request's own conversation (on GitHub a pull request is also issue N, so no second address is needed).
+
+Opening a pull request is a delivery, not a request. Treating every opening as a trigger would make the
+agent a mandatory reviewer of its own output, a loop that feeds itself.
+
+## A tab is closed only when nobody is in it
+
+A finished worker's tab stays open for ten minutes of follow-up and then closes only if its pi sits idle.
+The startup sweep closes a worker tab only when no record owns it or herdr no longer knows its agent.
+
+Worker tabs do outlive their purpose: a restart adopts a worker, a stop starts a newer one, and the older
+tab stays behind, so a sweep has to exist. But herdr has no guarded close, and a tab is someone's
+terminal. The liveness check is the single guard that keeps the sweep away from an agent that is still
+working. (`Workers.tla` W2, W4, W5.)
+
+## One router, one store, one state directory
+
+One router runs at a time, and one process holds the engine. The store is synchronous SQLite, and
+everything the system knows lives in one directory.
+
+The engine's commands are atomic only if the store is synchronous: an asynchronous driver would turn that
+atomicity into a comment. One directory makes the crash model concrete. A restart is "start again with
+this directory", which is exactly what the specifications model. One router per process matters too: the
+judge and every worker load this same extension, and each of them used to boot a router of its own.
+
+## Health is an exit code
+
+`superagent status` answers with a number: 0 healthy, 1 down, 2 a part is failing, 3 waiting for setup.
+A router that fails three polls in a row reports its GitHub source as failing.
+
+A scheduled check should act without reading prose, and each code has one remedy: a restart may fix 1
+and fixes neither 2 nor 3. A router that cannot reach GitHub otherwise looks healthy forever, answering
+nothing.
+
+## The panel is local and cannot be steered from a web page
+
+The panel binds 127.0.0.1, refuses any Host header but 127.0.0.1 and localhost, and serves its API only
+to callers that send `x-superagent-request: 1`.
+
+A browser will not let another site forge either one. Without them, any page you visit could read the
+queue, or pause the engine, by rebinding a hostname to localhost.
+
+## The engine stays byte-identical to upstream
+
+`src/core/` and its test suite are vendored from upstream and never edited. Every adaptation, from the
+judge's prompt to the GitHub shapes, lives in `src/pi/`.
+
+The engine is the part the lifecycle specification models and upstream maintains. Untouched, an upstream
+fix can be re-vendored by copying, and the specification keeps describing the code that runs. The
+[adaptation ledger](../ADAPTATION.md) says how to prove the copy is exact.
+
+## The specifications live beside the code
+
+`formal/` holds three TLA+ specifications, and `scripts/check-formal` checks all of them exhaustively in
+about five minutes. Every action names the function it mirrors; every header states what the model
+leaves out.
+
+A proof that cannot be re-run in one command rots. These are cheap to keep honest, and they have paid:
+the intake specification found a request-losing bug in shipped code.

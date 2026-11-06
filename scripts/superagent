@@ -6,11 +6,11 @@
 #   1  not running, running twice, or not answering (a restart may fix it)
 #   2  running, but a part reports an error (a restart will not fix it)
 #   3  running and waiting for setup (a restart will not fix it)
-# Every check keeps the same meaning, so an operator's hourly prompt can act without reading prose.
+# Each code keeps one meaning, so a scheduled check can act on it without reading prose.
 set -uo pipefail
 
 STATE="${PI_SUPERAGENT_STATE:-$HOME/.pi/superagent}"
-# Deployment settings live with the state, so the watchdog's restart and a hand restart start the same
+# Deployment settings live with the state, so the health check's restart and a hand restart start the same
 # router (the GitHub source was on or off depending on whose shell started it). The caller's env still wins.
 if [ -f "$STATE/config.env" ]; then
   while IFS='=' read -r key value; do
@@ -19,7 +19,7 @@ if [ -f "$STATE/config.env" ]; then
   done < "$STATE/config.env"
 fi
 # Every pi session lives in herdr, the router included: it is the agent named $SESSION in this workspace,
-# next to the workers it starts. No herdr, no router: the watchdog retries until herdr is back.
+# next to the workers it starts. No herdr, no router: the health check retries until herdr is back.
 SESSION="${PI_SUPERAGENT_SESSION:-superagent}"
 HERDR_BIN="${PI_SUPERAGENT_HERDR:-$(command -v herdr || echo herdr)}"
 WORKSPACE_LABEL="${PI_SUPERAGENT_HERDR_WORKSPACE:-superagent}"
@@ -27,18 +27,19 @@ WORKTREES="${PI_SUPERAGENT_WORKTREES:-$STATE/work}"
 STOP_MARKER="$STATE/stopped"
 ROUTER_PLACE="$STATE/router.herdr"
 GRACE="${PI_SUPERAGENT_GRACE:-30}"
-# The panel is the operator's view of the engine (upstream doc 005: does anything need me, is it healthy,
-# what is the history of one piece of work). Loopback only; the API refuses a caller that does not say
-# what it is, and any non-local Host.
+# The panel is the operator's view of the engine (upstream's docs/005-panel.md: does anything need me, is
+# it healthy, what is the history of one piece of work). Loopback only; the API refuses a caller that does
+# not say what it is, and any non-local Host.
 PANEL_PORT="${PI_SUPERAGENT_PANEL_PORT:-8788}"
 # The router's judge runs through pi's SDK: the global install's entry file, because importing its
 # directory fails resolution and the package name is not resolvable from the state directory. Resolved
-# only on start: `npm root -g` costs a second, and the watchdog runs status every five minutes.
+# only on start: `npm root -g` costs a second, and the health check runs status every five minutes.
 SDK_PATH="${PI_SUPERAGENT_SDK_PATH:-}"
 # pi with no session argument can open the session picker and sit there ("Press any key to continue"),
 # and a router parked on the picker answers nothing: every assessment expired as `timeout` (188 of them,
 # measured on the panel) because sendUserMessage had no running session to turn. One stable id, created
-# on first start, is also the router's identity in the fleet.
+# on first start, also names the router: the extension refuses to be the router in any process whose
+# command line lacks it.
 SESSION_ID="${PI_SUPERAGENT_SESSION_ID:-}"
 
 usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] start|stop|restart|status"; }
@@ -85,8 +86,8 @@ start() {
     [ -f "$STATE/session-id" ] || uuidgen | tr 'A-Z' 'a-z' > "$STATE/session-id"
     SESSION_ID="$(cat "$STATE/session-id")"
   fi
-  # A panel port still held by a router that outlived its session makes pi crash on boot with EADDRINUSE.
-  # SIGTERM first, then SIGKILL at 5s; workers are their own processes and do not hold it.
+  # A router that outlived its session may still hold the panel's port. Free it (SIGTERM, then SIGKILL
+  # after 5 s) so the new panel binds where people look for it; workers never hold the port.
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     nc -z 127.0.0.1 "$PANEL_PORT" 2>/dev/null || break
     for pid in $(lsof -ti "tcp:${PANEL_PORT}" 2>/dev/null); do
@@ -111,10 +112,14 @@ start() {
     --env PI_SUPERAGENT_ROLE=router --env "PI_SUPERAGENT_STATE=$STATE"
     --env "PI_SUPERAGENT_WORKTREES=$WORKTREES" --env "PI_SUPERAGENT_PANEL_PORT=$PANEL_PORT"
     --env "PI_SUPERAGENT_SDK_PATH=$SDK_PATH" --env "PI_SUPERAGENT_SESSION_ID=$SESSION_ID"
-    --env "PI_SUPERAGENT_HERDR_BIN=$HERDR_BIN"
+    --env "PI_SUPERAGENT_HERDR_BIN=$HERDR_BIN" --env "PI_SUPERAGENT_HERDR_WORKSPACE=$WORKSPACE_LABEL"
   )
-  [ -n "${PI_SUPERAGENT_GITHUB_REPO:-}" ] && env+=(--env "PI_SUPERAGENT_GITHUB_REPO=$PI_SUPERAGENT_GITHUB_REPO")
-  [ -n "${PI_SUPERAGENT_GITHUB_SELF:-}" ] && env+=(--env "PI_SUPERAGENT_GITHUB_SELF=$PI_SUPERAGENT_GITHUB_SELF")
+  # herdr starts the tab from its own environment, not this one: a setting reaches the router only by name.
+  local key
+  for key in GITHUB_REPO GITHUB_SELF SELF BOTS MAX_WORKERS TICK_MS PREPARE BLOCKED ALLOW_DELEGATION JUDGE_THINKING; do
+    key="PI_SUPERAGENT_$key"
+    [ -n "${!key:-}" ] && env+=(--env "$key=${!key}")
+  done
   local tab; tab="$("$HERDR_BIN" tab create --workspace "$ws" --cwd "$STATE" --label engine "${env[@]}" --no-focus)" || return 1
   local pane_id tab_id
   pane_id="$(printf '%s' "$tab" | field result root_pane pane_id)"

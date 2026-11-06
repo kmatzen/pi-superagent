@@ -11,7 +11,7 @@ const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'sa-inbox-')); dirs.pus
 
 const input = (id: string, text: string): TicketInput =>
   ({ id, kind: 'text', text, at: '2026-11-05T00:00:00Z' } as unknown as TicketInput)
-const ticket = (over: object) => ({ id: 'T1', undelivered: ['i1'], inputs: [input('i1', 'operator: yolo it — session 01a1ac89 owns this card')], ...over } as unknown as Ticket)
+const ticket = (over: object) => ({ id: 'T1', undelivered: ['i1'], inputs: [input('i1', 'operator: go ahead — session 01a1ac89 owns this ticket')], ...over } as unknown as Ticket)
 const assignment = () => ({ id: 'A1', ticketId: 'T1' } as unknown as Assignment)
 
 function fixture(inbox?: SessionInbox) {
@@ -67,7 +67,7 @@ describe('PiExecutor delivery through the inbox', () => {
     const dir = tmp()
     const { calls, executor } = fixture(new SessionInbox(dir))
     executor.deliver(ticket({}), assignment())
-    expect(readFileSync(join(dir, '01a1ac89.md'), 'utf8')).toContain('yolo it')
+    expect(readFileSync(join(dir, '01a1ac89.md'), 'utf8')).toContain('go ahead')
     expect(calls.map(c => c.fn)).toEqual(['inputsDelivered'])
   })
 

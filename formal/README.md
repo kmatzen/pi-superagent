@@ -1,38 +1,31 @@
-# formal/ — the dangerous parts, machine-checked
+# formal/
 
-Three specs, checked to exhaustion by `./scripts/check-formal` (~5 min total,
-exit 0 only when every proof completes):
+TLA+ specifications of the three places in pi-superagent where a bad ordering would quietly lose or
+duplicate work. TLC, the TLA+ model checker, explores every reachable state of each one.
 
-| Spec | Models | States | Proves |
-| --- | --- | --- | --- |
-| `Ticket.tla` | core ticket lifecycle | 12.3M | stop-absorbing, done-from-ready, one-running, no-second-ticket, outbox-once, delivery liveness |
-| `Intake.tla` | GitHub intake source | 566K | seed silence, reopen-once, crash-safe cursor (deferred commit), no double-accept, bot gate, no-loss |
-| `Workers.tla` | worker records, tabs, agents | 347 | one live worker, sweep never closes a live agent's tab, no record resurrection, zombie tabs cleaned |
+| Specification | Models | Distinct states |
+| --- | --- | --- |
+| `Ticket.tla` | the engine's ticket lifecycle (`src/core`) | 1,398,882 |
+| `Intake.tla` | the GitHub source (`src/pi/source-github.ts`) | 113,281 |
+| `Workers.tla` | worker records, tabs and agents (`src/pi/herdr-workers.ts`) | 94 |
 
-Claims, method, and scope: [docs/formal-verification.md](../docs/formal-verification.md).
+Each `.cfg` file names its specification's constants and lists the invariants and properties TLC checks.
+What every claim means, and what none of them say, is in
+[docs/formal-verification.md](../docs/formal-verification.md).
 
-`Ticket.tla` is a TLA+ model of what `src/core` does to a ticket: intake fans a
-message to live subscribers and queues it for Eval only when no worker decides it;
-accept creates one ticket with one pending assignment; only a `ready` report ends a
-ticket completed; a person's stop absorbs; an outbox key sends once. Every action
-carries a comment naming the core function it mirrors. `scripts/check-formal` runs
-TLC to exhaustion (about 1.4M states, ~5 min on a laptop).
+## Running
 
-What is proved (all reachable states, plus the fairness-based liveness claim):
+`scripts/check-formal` checks all three in about five minutes and exits 0 only when every one completes.
+To check one by hand, from this directory:
 
-| Claim | Meaning |
-| --- | --- |
-| `I1_StopAbsorbing` | a ticket a person stopped is never live again — `wake`, `attach` and intake all guard on `ended.by === 'human'`, and no other door exists |
-| `I2_DoneFromReady` | `done` implies the worker reported `ready` — silent success is unrepresentable in the model |
-| `I3_OneRunning` | at most one running Assignment per ticket, the contract `runningAssignment` assumes |
-| `I4_NoSecondTicket` | no ticket is ever created for a thread a live ticket follows, under every interleaving — including a follow-up that arrives mid-Evaluation |
-| `I5_OutboxOnce` | an acknowledgement is queued at most once and sent at most once (keyed by trigger id) |
-| `I6_SentMonotonic` | sent messages are never re-queued or forgotten |
-| `LT_Delivered` | with minimal fairness, every emitted message is eventually delivered — the queue has no stalls |
+```sh
+java -XX:+UseParallelGC -Xmx4g -cp ~/.cache/tla2tools/tla2tools.jar tlc2.TLC -config Intake.cfg Intake.tla
+```
 
-Honesty rules for edits here: the model's guarantees bind only as far as its
-abstractions. Each removed feature (context threads, follows/PR closes, eval expiry,
-policy revalidation, attention) only removes transitions that could end or resume a
-ticket — never adds soundness. A change to `src/core` ticket transitions must be
-mirrored here, and the check re-run; TLC found two model bugs during development
-(a dropped eval batch, a resurrected stopped ticket), which is the point of running it.
+## Changing a specification
+
+- Every action names the function whose guards it mirrors. When that function changes, change the action
+  and run the check again.
+- Every header lists what its model leaves out. A claim covers a left-out feature only as far as that
+  feature's code passes through the same guards, so keep the list current.
+- Keep the bounds small. A check that takes hours stops being run, and a check nobody runs proves nothing.

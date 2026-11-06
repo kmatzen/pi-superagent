@@ -1,20 +1,19 @@
-# NOTICE — vendored code
+# NOTICE: vendored code
 
-`src/core/**` and `test/core-engine.spec.ts` are vendored from:
+`src/core/` and `test/core-engine.spec.ts` are copied, unchanged, from:
 
-- project: **dsh-superagent-prototype** (DeepSeek research prototype)
+- project: **dsh-superagent-prototype**, a DeepSeek research prototype
 - repository: https://github.com/deepseek-ai/dsh-superagent-prototype
-- license: MIT (full text in `vendor/dsh-superagent/LICENSE`)
 - commit: `8c32a9dc5d72c033816c6a8110b37f40cf94fba4` (2026-10-31, "feat: add the dsh-superagent research prototype")
+- license: MIT, full text in `vendor/dsh-superagent/LICENSE`
 
-`vendor/dsh-superagent/docs/**` carries their nine design documents, kept because they are the
-specification of the state machine in `src/core` and the reason each rule exists. When a rule in
-`src/core` looks arbitrary, the answer is usually in `001-domain.md` (concepts and rejected concepts),
-`002-authorization.md` (the gate and the admission table), or `003-execution.md` (reports and attention).
+`vendor/dsh-superagent/docs/` keeps upstream's nine design documents. They specify the state machine in
+`src/core`, and they are the place to look when one of its rules seems arbitrary: start with
+`001-domain.md` (the concepts, and the ones rejected), `002-authorization.md` (the gate and the admission
+table) or `003-execution.md` (reports and attention).
 
-Their code is research code and says so. We vendor the domain, not the deployment: their executor
-(`src/executor/dsh.ts`), their Feishu and GitHub sources, and their panel are replaced here by pi
-sessions, our own sources, and the fleet board.
+Upstream calls its code a research prototype. This repository vendors the domain, not the deployment:
+upstream's executor, its Feishu and GitHub sources and its panel are replaced here by pi sessions in
+herdr, a GitHub source of this repository's own, and a local panel.
 
-See `ADAPTATION.md` for every deviation from the vendored files, and the upstream SHA each one was
-measured against.
+[ADAPTATION.md](ADAPTATION.md) shows how to prove the copy is exact, and where each binding plugs in.

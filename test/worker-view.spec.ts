@@ -9,7 +9,7 @@ const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'wview-')); dirs.push(d); return d }
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
 
-const worker = { ticketId: 'abcd1234', thread: 'TASK-159', title: 'DO: add the mask mode', sessionId: 's-1', workspace: '/w/abcd1234' }
+const worker = { ticketId: 'abcd1234', thread: '#159', title: 'DO: add the mask mode', sessionId: 's-1', workspace: '/w/abcd1234' }
 
 describe('the in-process worker view', () => {
   it('writes what the worker does: its text, each tool call with its result, and its turns', () => {
@@ -22,7 +22,7 @@ describe('the in-process worker view', () => {
     view.event({ type: 'agent_settled' })
     view.close('stopped')
     const text = readFileSync(view.path, 'utf8')
-    expect(text).toContain('== TASK-159 · DO: add the mask mode')
+    expect(text).toContain('== #159 · DO: add the mask mode')
     expect(text).toContain('── turn 1 ──')
     expect(text).toContain('Reading the attention code.')
     expect(text).toContain('⚙ bash rg -n "regional" src')

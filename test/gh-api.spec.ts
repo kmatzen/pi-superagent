@@ -61,9 +61,9 @@ describe('ghApi', () => {
 
   it('posts a reply as an issue comment through the CLI, body intact', async () => {
     const gh = fakeGh('[]', '[]')
-    await ghApi({ repo: 'o/r', bin: gh.bin }).postComment(12, 'on it: TASK-1 accepted')
+    await ghApi({ repo: 'o/r', bin: gh.bin }).postComment(12, 'on it: #1 accepted')
     const sent = JSON.parse(gh.posts()).body
-    expect(sent).toContain('on it: TASK-1 accepted')
+    expect(sent).toContain('on it: #1 accepted')
     expect(sent).toContain(REPLY_MARKER)
   })
 

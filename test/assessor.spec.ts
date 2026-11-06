@@ -28,9 +28,9 @@ function fixture(evalTimeoutMs = 60_000) {
   })
   const ask = (text = 'merge the green build tonight'): Trigger => {
     const t: Trigger = {
-      id: 'board:TASK-1:abc', source: 'board', threads: [{ source: 'board', id: 'TASK-1' }],
-      actor: { source: 'board', id: 'octocat' }, human: true, at: '2026-11-05T09:00:00Z', text,
-      channel: { source: 'board', thread: 'TASK-1', address: { card: 'TASK-1' } }, meta: {},
+      id: 'github:#1:abc', source: 'github', threads: [{ source: 'github', id: '#1' }],
+      actor: { source: 'github', id: 'octocat' }, human: true, at: '2026-11-05T09:00:00Z', text,
+      channel: { source: 'github', thread: '#1', address: { issue: '1' } }, meta: {},
     }
     engine.receive(t)
     engine.evaluateDue()
@@ -51,7 +51,7 @@ describe('SessionAssessor', () => {
     expect(f.delivered).toHaveLength(1)
   })
 
-  it('an accept from the session becomes a ticket, and the acknowledgement reaches the card', () => {
+  it('an accept from the session becomes a ticket, and the acknowledgement reaches the thread', () => {
     const f = fixture()
     f.ask()
     const evalId = f.delivered[0]!.evalId
@@ -89,17 +89,17 @@ describe('SessionAssessor', () => {
   it('waiting() names the eval the panel should put in front of a person', () => {
     const f = fixture()
     f.ask()
-    expect(f.assessor.waiting()).toEqual([{ evalId: f.delivered[0]!.evalId, triggers: 1, thread: 'board:TASK-1' }])
+    expect(f.assessor.waiting()).toEqual([{ evalId: f.delivered[0]!.evalId, triggers: 1, thread: 'github:#1' }])
   })
 
-  it('one question at a time: a replay of 41 cards does not steer 41 messages into one turn', () => {
+  it('one question at a time: a burst of candidates does not steer every message into one turn', () => {
     const f = fixture()
     f.ask()
     for (const n of ['2', '3']) {
       f.engine.receive({
-        id: `board:TASK-${n}:abc`, source: 'board', threads: [{ source: 'board', id: `TASK-${n}` }],
-        actor: { source: 'board', id: 'octocat' }, human: true, at: '2026-11-05T09:00:00Z', text: `work ${n}`,
-        channel: { source: 'board', thread: `TASK-${n}`, address: { card: `TASK-${n}` } }, meta: {},
+        id: `github:#${n}:abc`, source: 'github', threads: [{ source: 'github', id: `#${n}` }],
+        actor: { source: 'github', id: 'octocat' }, human: true, at: '2026-11-05T09:00:00Z', text: `work ${n}`,
+        channel: { source: 'github', thread: `#${n}`, address: { issue: n } }, meta: {},
       } as never)
     }
     f.engine.evaluateDue()
@@ -113,14 +113,14 @@ describe('SessionAssessor', () => {
 
   it('the prompt shows the asker, the thread, and the tickets it must not duplicate', () => {
     const candidate = {
-      evalId: 'e1', key: 'board:TASK-2', id: 'TASK-2', strength: 'explicit', policyVersion: 'v1',
-      thread: { key: 'board:TASK-2' } as never,
-      triggers: [{ id: 't1', actor: { source: 'board', id: 'ci-bot' }, human: false, at: '2026-11-05T09:00:00Z', text: 'build red' } as never],
+      evalId: 'e1', key: 'github:#2', id: '#2', strength: 'explicit', policyVersion: 'v1',
+      thread: { key: 'github:#2' } as never,
+      triggers: [{ id: 't1', actor: { source: 'github', id: 'ci-bot' }, human: false, at: '2026-11-05T09:00:00Z', text: 'build red' } as never],
       tickets: [{ id: 'TK1', title: 'Fix the build', ended: undefined } as never],
     } as unknown as Candidate
     const text = renderCandidate(candidate)
     expect(text).toContain('ci-bot (not human)')
-    expect(text).toContain('board:TASK-2')
+    expect(text).toContain('github:#2')
     expect(text).toContain('Fix the build (open)')
   })
 })
