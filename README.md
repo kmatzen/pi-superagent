@@ -26,9 +26,10 @@ byte-for-byte. This repository binds it to pi, herdr and GitHub.
 3. **Work.** An accept opens a ticket and posts the judge's acknowledgement on the issue. A worker starts
    in a workspace of its own, briefed with the ticket's mandate. Every later comment a person writes on
    the thread goes straight to that worker.
-4. **Report.** The worker ends by calling `ticket_report`. A *ready*, *failed* or *cancelled* report is
-   posted on the issue. A *blocked* report puts its question on the panel, and you answer it with a
-   comment on the issue.
+4. **Report.** The worker ends every run by calling `ticket_report`, and the router posts the report on
+   the issue. A *blocked* report asks you a question there, and your reply goes straight back to the
+   worker. A run that ends without a report, a worker that crashes, and a launch that fails are posted
+   too, each with what you can do next.
 
 Closing the issue, or merging the pull request that closes it, stops the ticket and says so on the
 thread. Reopening the issue starts the request again.
@@ -96,7 +97,7 @@ is running, and what did the judge decide.
 | `src/pi/assessor.ts`, `judge.ts` | the judge: one candidate at a time, answered through `ticket_decide` |
 | `src/pi/executor.ts`, `herdr-workers.ts` | workers: pi sessions in herdr tabs, and records that outlive the router |
 | `src/pi/worker-role.ts`, `report-tool.ts`, `workspace.ts` | inside a worker: the report tool, the guard, the workspace |
-| `src/pi/outbox.ts` | GitHub out: each message posted once |
+| `src/pi/outbox.ts`, `receipts.ts` | GitHub out: what each ending says, each message posted once |
 | `src/pi/store.ts` | the engine's SQLite store |
 | `src/pi/server.ts` | the panel and its local API |
 | `scripts/superagent` | start, stop, restart and status, with exit codes a health check can read |

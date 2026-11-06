@@ -72,6 +72,19 @@ describe('herdr workers', () => {
     expect(JSON.parse(readFileSync(join(inbox, file!), 'utf8'))).toEqual({ text: 'the brief', mode: 'followUp' })
   })
 
+  it("a run the worker filed as a silent finish reaches the router as one, not as the worker's own report", async () => {
+    const dir = tmp()
+    const origins: string[] = []
+    const session = await new HerdrWorkers(options(dir, memoryHerdr().herdr))
+      .launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: (_s, _m, _q, origin) => origins.push(origin ?? 'none') })
+    const off = session.subscribe(() => {})
+    appendFileSync(join(dir, 'workers', session.sessionId, 'reports.jsonl'),
+      '{"state":"blocked","summary":"need a key","question":"rotate prod too?"}\n{"state":"failed","summary":"no report","origin":"silent"}\n')
+    await until(() => origins.length === 2)
+    expect(origins).toEqual(['worker', 'silent'])
+    off()
+  })
+
   it('events and reports flow back, and a report is read once even across a takeover', async () => {
     const dir = tmp()
     const m = memoryHerdr()

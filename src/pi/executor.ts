@@ -3,7 +3,7 @@
  * prompt into the running one, stop = abort. Reports arrive through a tool, never by parsing worker prose.
  */
 import type { Assignment, EngineForExecutor, Ticket, TicketInput } from '../core/index.ts'
-import type { Reporter } from './report-tool.ts'
+import type { Reporter, ReportOrigin } from './report-tool.ts'
 
 export interface WorkerSession {
   readonly sessionId: string
@@ -39,7 +39,7 @@ export interface WorkerLauncher {
     assignment: Assignment
     brief: string
     /** The worker's report tool lands here; only the engine writes a ticket. */
-    report: (state: string, summary: string, question?: string | null) => void
+    report: Reporter
   }): Promise<WorkerSession> | WorkerSession
 }
 
@@ -55,14 +55,14 @@ export interface ExecutorOptions {
   /** Delivery when this process holds no session: adopted workers, the operator's own asks. */
   inbox?: { write(prefix: string, body: string): void }
   slotPollMs?: number
+  /** Every report the engine accepted, with who ended the run: the deployment tells the person. */
+  reported?(ticket: Ticket, assignmentId: string, origin: ReportOrigin, report: Filed): void
 }
 
 interface Live {
   session: WorkerSession
   unsubscribe: () => void
   pendingRead: string[]
-  reported: boolean
-  settledSaid: boolean
   startedAt: number
   lastEventAt: number
   events: number
@@ -108,7 +108,7 @@ export class PiExecutor {
         this.engine.assignmentStarted(ticket.id, assignment.id)
         session.prompt(brief, 'followUp')
       } catch (error) {
-        this.engine.report(ticket.id, report('failed', `could not start a worker: ${text(error)}`))
+        this.file(ticket, assignment.id, 'launch', report('failed', `could not start a worker: ${text(error)}`))
       } finally {
         this.launching.delete(key)
       }
@@ -127,18 +127,22 @@ export class PiExecutor {
   // Bound to the session that owns the ticket: a report from a worker the domain has already replaced or
   // stopped is not a ticket write.
   private reporter(ticket: Ticket, own: () => WorkerSession | undefined): Reporter {
-    return (state, summary, question) => {
+    return (state, summary, question, origin = 'worker') => {
       const live = this.live.get(ticket.id)
       if (!live || live.session.sessionId !== own()?.sessionId) return
-      live.reported = true
-      this.engine.report(ticket.id, report(state, summary, question))
+      this.file(ticket, live.assignmentId, origin, report(state, summary, question))
     }
+  }
+
+  private file(ticket: Ticket, assignmentId: string, origin: ReportOrigin, filed: Filed): void {
+    this.engine.report(ticket.id, filed)
+    this.options.reported?.(ticket, assignmentId, origin, filed)
   }
 
   private bind(ticket: Ticket, assignment: Assignment, session: WorkerSession): void {
     const born = Date.now()
     const live: Live = {
-      session, unsubscribe: () => {}, pendingRead: [], reported: false, settledSaid: false,
+      session, unsubscribe: () => {}, pendingRead: [],
       startedAt: born, lastEventAt: born, events: 0, workspace: session.workspace ?? this.options.worktreeFor(ticket),
       quietReported: false, assignmentId: assignment.id,
     }
@@ -150,7 +154,7 @@ export class PiExecutor {
         const ids = live.pendingRead.splice(0)
         if (ids.length) this.engine.inputsRead(ticket.id, ids)
       } else if (event.type === 'failed') {
-        this.engine.report(ticket.id, report('failed', `worker session failed: ${event.error}`))
+        this.file(ticket, assignment.id, 'crash', report('failed', `the worker crashed: ${event.error}`))
       }
     })
     this.live.set(ticket.id, live)
@@ -221,16 +225,6 @@ export class PiExecutor {
     return due
   }
 
-  /** A run that ends without ticket_report is a failure, said once. Nothing calls this yet: the quiet watch
-   *  catches such a worker instead. */
-  settled(ticketId: string): void {
-    const live = this.live.get(ticketId)
-    if (live && !live.reported && !live.settledSaid) {
-      live.settledSaid = true
-      this.engine.report(ticketId, report('failed', 'the worker finished its run without calling ticket_report'))
-    }
-  }
-
   // Launches are serialised behind each other: the cap bounds how many workers exist at once, and
   // starting two sessions in one tick is how a router forks until the box dies.
   private enqueue(run: () => Promise<void>): void {
@@ -240,6 +234,8 @@ export class PiExecutor {
       // never yields to it: the process spun at 100% with the panel dead as soon as a fifth ticket queued.
       while (this.running >= max) await new Promise(resolve => setTimeout(resolve, this.options.slotPollMs ?? 1000))
       await run()
+    }).catch(() => {
+      // A rejected tail skips every later launch; the only throw left here (a report on an ended ticket) is moot.
     })
   }
 
@@ -252,3 +248,5 @@ const text = (e: unknown): string => e instanceof Error ? e.message : String(e)
 const report = (state: string, summary: string, question?: string | null) => ({
   state: state as never, summary: summary.trim() || '(no summary)', ...(question === undefined ? {} : { question }),
 })
+
+type Filed = ReturnType<typeof report>

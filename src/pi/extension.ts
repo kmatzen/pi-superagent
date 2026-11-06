@@ -1,8 +1,9 @@
 /** The package entry point: the router in the session the start script launches, the worker role inside a
  *  worker, and inert everywhere else. */
+import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Trigger } from '../core/index.ts'
+import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
 import { SessionInbox } from './sink-session-inbox.ts'
 import { GithubSource, REPLY_MARKER, type GithubApi } from './source-github.ts'
@@ -15,7 +16,8 @@ import { openLog } from './log.ts'
 import { openWorkerView } from './worker-view.ts'
 import { herdrCli, type Herdr } from './herdr.ts'
 import { HerdrWorkers } from './herdr-workers.ts'
-import { reportTool, type Reporter } from './report-tool.ts'
+import { reportTool, type ReportOrigin } from './report-tool.ts'
+import { receiptText, type ReportedRun } from './receipts.ts'
 import { workerRole } from './worker-role.ts'
 import { createPanelServer } from './server.ts'
 import { guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
@@ -201,14 +203,14 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     now: deps.now ?? (() => new Date().toISOString()),
   })
 
-  // A final report (ready, failed, cancelled) goes back to the thread as a receipt; a blocked report's
-  // question waits on the panel.
-  const receipts = (ticket: { id: string; channels: Array<{ thread: string }> }, send: Reporter): Reporter => (state, summary, question) => {
-    send(state, summary, question)
+  // One message per assignment, ending and text; a failed launch drops the text, since it retries every poll.
+  const announce = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun): void => {
     const channel = ticket.channels[0]
-    if (channel && ['ready', 'failed', 'cancelled'].includes(state)) {
-      engine.reply({ channel, text: `${channel.thread} ${state}: ${summary}`, ticketId: ticket.id } as never)
-    }
+    if (!channel) return
+    const said = origin === 'launch' ? ''
+      : createHash('sha1').update(JSON.stringify([run.state, run.summary, run.question ?? null])).digest('hex').slice(0, 12)
+    outbox.send({ id: `report:${assignmentId}:${origin}:${said}`, channel, kind: 'reply', ticketId: ticket.id,
+      text: receiptText(channel.thread, origin, run) })
   }
   const herdrWorkers = cfg.workers === 'herdr'
     ? new HerdrWorkers({ herdr: deps.herdr ?? herdrCli(cfg.herdrBin), stateDir: cfg.dataDir, log,
@@ -216,9 +218,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     : undefined
 
   const executor = new PiExecutor(engine, {
-    launch: async ({ ticket, report: send }) => {
+    launch: async ({ ticket, report }) => {
       const channel = ticket.channels[0]
-      const report = receipts(ticket, send)
       // A ticket with no workspace is the ticket's failure, with the command's own output as the summary.
       const workspace = prepareWorkspace({
         root: cfg.worktreeRoot, ticketId: ticket.id, stateDir: cfg.dataDir,
@@ -291,6 +292,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // string to the worker and mark the answer read.
       : input.kind === 'text' ? input.text : `[${input.kind}]`,
     inbox: new SessionInbox(`${cfg.dataDir}/inbox`),
+    reported: announce,
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
   })
   executorRef = executor
@@ -423,8 +425,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const assignment = ticket.assignments.at(-1)
       if (assignment && assignment.state === 'pending') executor.start(ticket, assignment)
     }
-    // Silence is not completion: a worker quiet for 15 minutes puts a question to a person, instead of
-    // reading as running forever.
+    // A worker quiet for 15 minutes gets a question on the panel, not the issue: a long build is not news.
     for (const quiet of executor.quiet(cfg.workerQuietMinutes ?? 15)) {
       engine.report(quiet.ticketId, {
         state: 'blocked',
@@ -448,7 +449,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // A herdr worker runs in its own process and outlives the router: take it over instead of starting another.
       const survivor = herdrWorkers ? await herdrWorkers.find(ticket.id) : undefined
       if (survivor && herdrWorkers) {
-        executor.adopt(ticket, assignment, send => herdrWorkers.attach(survivor, receipts(ticket, send)))
+        executor.adopt(ticket, assignment, send => herdrWorkers.attach(survivor, send))
         log.line('info', 'worker.adopted', { ticket: ticket.id, agent: survivor.agent, tab: survivor.tabId })
         return
       }

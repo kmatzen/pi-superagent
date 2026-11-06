@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { workerRole, type WorkerPi } from '../src/pi/worker-role.ts'
+import { SILENT_FINISH, workerRole, type WorkerPi } from '../src/pi/worker-role.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'wrole-')); dirs.push(d); return d }
@@ -57,6 +57,32 @@ describe('the worker role', () => {
     for (let i = 0; i < 50; i++) f.emit('message_update')
     f.emit('agent_settled')
     expect(lines(join(dir, 'events.jsonl')).map(e => e.type)).toEqual(['turnStarted', 'activity', 'settled'])
+  })
+
+  it('files a run that ends without ticket_report as a failure, ahead of the settle that ends it', () => {
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir })
+    f.emit('agent_start')
+    f.emit('agent_settled')
+    expect(lines(join(dir, 'reports.jsonl'))).toMatchObject([{ state: 'failed', summary: SILENT_FINISH, origin: 'silent' }])
+    const at = (file: string) => String(lines(join(dir, file)).at(-1)!.at)
+    expect(at('reports.jsonl') <= at('events.jsonl'), 'the report is written before the settle').toBe(true)
+  })
+
+  it('a run that reported is not a silent finish, even when pi retries after the report; the next run must report again', () => {
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir })
+    const report = f.tools.find(t => t.name === 'ticket_report')!
+    f.emit('agent_start')
+    report.execute('c1', { state: 'blocked', summary: 'needs a decision', question: 'Ship it?' })
+    f.emit('agent_start')
+    f.emit('agent_settled')
+    expect(lines(join(dir, 'reports.jsonl')).map(r => r.origin ?? 'worker')).toEqual(['worker'])
+    f.emit('agent_start')
+    f.emit('agent_settled')
+    expect(lines(join(dir, 'reports.jsonl')).map(r => r.origin ?? 'worker')).toEqual(['worker', 'silent'])
   })
 
   it('delivers inputs from the router once the session runs, in the order written, the way the router asked', async () => {

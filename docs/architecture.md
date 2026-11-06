@@ -81,12 +81,15 @@ through files in `workers/<session>/`: inputs land in `inbox/`, and the worker a
 to `events.jsonl` and `reports.jsonl`. The files and the tab outlive the router, which is why a restart
 adopts workers rather than replacing them. Inside the worker, `worker-role.ts` registers `ticket_report`
 and the guard from `workspace.ts`: no delegation tools, no blocked commands, no writes outside the
-workspace. A finished worker's tab lingers for ten minutes of follow-up and then closes if its pi sits
+workspace. It also files any run that ends without a report as a failure: only the worker process knows
+the order of its own events, so only it can tell for certain. A finished worker's tab lingers for ten minutes of follow-up and then closes if its pi sits
 idle. At startup the router also closes worker tabs that no record owns or whose agent herdr no longer
 knows.
 
-**GitHub out: `outbox.ts`.** Acknowledgements, receipts and notices are queued under ids, and an id is
-never queued twice. A message counts as sent only once GitHub accepts it; a failed post stays pending for
+**GitHub out: `outbox.ts` and `receipts.ts`.** Every way a run ends (a report, a question, a crash, a run
+with no report, a launch that fails) becomes a message on the thread that says what happened and what the
+person can do next; `receipts.ts` holds the wording. Acknowledgements, receipts and notices are queued
+under ids, and an id is never queued twice: a launch that fails on every poll posts once. A message counts as sent only once GitHub accepts it; a failed post stays pending for
 the next pass. Every comment ends with an invisible marker, `<!-- superagent -->`, which lets the source
 recognize the agent's writing even when the agent and the operator share one GitHub account. Sent entries
 are pruned after 30 days.

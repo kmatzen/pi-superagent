@@ -6,7 +6,10 @@ export interface ReportTool {
   execute(id: string, args: Record<string, unknown>): { content: Array<{ type: 'text'; text: string }> }
 }
 
-export type Reporter = (state: string, summary: string, question?: string | null) => void
+/** Who ended a run: the worker, a crash, a run with no report ('silent'), or a launch that failed. */
+export type ReportOrigin = 'worker' | 'crash' | 'silent' | 'launch'
+
+export type Reporter = (state: string, summary: string, question?: string | null, origin?: ReportOrigin) => void
 
 export function reportTool(report: Reporter): ReportTool {
   return {

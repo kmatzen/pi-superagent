@@ -12,8 +12,8 @@ const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ext-')); dirs.push(d); return d }
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
 
-// addComment opens the issue as the agent, so the opening itself is silent, then posts a person's
-// comment, which fires.
+// addComment opens the issue from the agent's own account, which is never a request, then posts a
+// person's comment, which is.
 type Feed = { issues: IssueState[]; comments: IssueComment[]; posts: Array<{ issue: number; body: string }> }
 
 /** The tools under test answer synchronously; the cast keeps the test readable. */
@@ -69,7 +69,7 @@ const live: Array<{ stop(): void }> = []
 afterEach(() => { for (const r of live.splice(0)) r.stop() })
 
 function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
-                 options: { githubApi?: GithubApi; issues?: IssueState[] } = {}) {
+                 options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [] }
   const api: GithubApi = options.githubApi ?? {
@@ -87,7 +87,8 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   const receipts = (n: string) => feed.posts.filter(p => String(p.issue) === n).map(p => p.body).join('\n')
   const config: RouterConfig = {
     dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', githubRepo: 'o/r',
-    bots: new Set(['fleet-answer-loop']), tickMs: 5, ...(herdr ? { workers: 'herdr' as const } : {}),
+    bots: new Set(['fleet-answer-loop']), tickMs: options.tickMs ?? 5, ...(herdr ? { workers: 'herdr' as const } : {}),
+    ...(options.prepare ? { prepare: options.prepare } : {}),
   }
   const workers: Spy[] = []
   const judge: Spy = { prompts: [], report: undefined }
@@ -150,6 +151,36 @@ describe('the router extension', () => {
     await f.running.tick()
     expect(posted.map(p => p.body).join('\n')).toMatch(/on it[\s\S]*keys rotated/)
     expect(posted[0]!.issue).toBe(150)
+  })
+
+  it("a worker's question is asked on the issue, and the answer goes back to the worker", async () => {
+    const f = fixture()
+    f.addComment('482', 'octocat', 'pick the deploy window')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    f.workers[0]!.report!({ state: 'blocked', summary: 'two windows work', question: 'Tonight or tomorrow?' })
+    await f.running.tick()
+    expect(f.receipts('482')).toContain('**Question:** Tonight or tomorrow?')
+    f.addComment('482', 'octocat', 'tonight', '2026-11-05T09:30:00Z')
+    await f.running.tick()
+    await until(() => f.workers[0]!.prompts.some(p => p.includes('octocat: tonight')))
+    expect(f.workers[0]!.prompts.join('\n')).toContain('octocat: tonight')
+  })
+
+  it('a launch that fails on every poll says so on the issue once', async () => {
+    // Polls are driven by hand: a launch retries on every poll, and a 5 ms timer would spawn shells nonstop.
+    const f = fixture(true, undefined, undefined, undefined, { prepare: 'echo "no space left on device" >&2; exit 3', tickMs: 3_600_000 })
+    f.addComment('483', 'octocat', 'build the release')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    for (let pass = 0; pass < 4; pass++) { await f.running.tick(); await settle() }
+    const notices = f.feed.posts.filter(p => p.issue === 483 && p.body.includes('could not start a worker'))
+    expect(notices, 'one notice, however many polls retry the launch').toHaveLength(1)
+    expect(notices[0]!.body).toContain('no space left on device')
+    expect(notices[0]!.body).toContain('tries again on every poll')
   })
 
   it('a reply GitHub kept while the answer was lost on the way back is not posted twice', async () => {

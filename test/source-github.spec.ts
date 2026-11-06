@@ -128,6 +128,15 @@ describe('GithubSource', () => {
     expect(await f.source.poll()).toHaveLength(0)
   })
 
+  it("an issue opened from the agent's own account is not a request, so a worker cannot feed itself", async () => {
+    const issues: IssueState[] = []
+    const f = fixture([], issues)
+    f.source.bootstrap()
+    await f.source.poll()
+    issues.push(issue({ author: 'superagent[bot]' }))
+    expect(await f.source.poll()).toHaveLength(0)
+  })
+
   it('an issue carrying the agent\'s own footer is not a request', async () => {
     const issues: IssueState[] = []
     const f = fixture([], issues)
