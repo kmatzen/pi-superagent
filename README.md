@@ -29,7 +29,7 @@ byte-for-byte. This repository binds it to pi, herdr and GitHub.
 4. **Report.** The worker ends every run by calling `ticket_report`, and the router posts the report on
    the issue. A *blocked* report asks you a question there, and your reply goes straight back to the
    worker. A run that ends without a report, a worker that crashes, and a launch that fails are posted
-   too, each with what you can do next.
+   too, each with what you can do next. A crashed worker is replaced once, without anyone asking.
 
 Closing the issue, or merging the pull request that closes it, stops the ticket and says so on the
 thread. Reopening the issue starts the request again.

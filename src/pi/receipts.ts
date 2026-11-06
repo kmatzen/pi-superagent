@@ -9,11 +9,13 @@ export interface ReportedRun {
 
 const STILL_OPEN = 'The worker is still open: reply here to steer it, or close the issue to drop the ticket.'
 
-export function receiptText(thread: string, origin: ReportOrigin, run: ReportedRun): string {
+export function receiptText(thread: string, origin: ReportOrigin, run: ReportedRun, relaunched = false): string {
   const head = `${thread} ${run.state}: ${run.summary}`
   switch (origin) {
     case 'crash':
-      return `${head}\n\nNothing is working on this ticket now: \`superagent restart\` gives it a fresh worker, and closing the issue drops it.`
+      return relaunched
+        ? `${head}\n\nThe router started a fresh worker on it. If that one crashes too, nothing runs this ticket until \`superagent restart\`, and closing the issue drops it.`
+        : `${head}\n\nNothing is working on this ticket now: \`superagent restart\` gives it a fresh worker, and closing the issue drops it.`
     case 'launch':
       return `${head}\n\nThe router tries again on every poll until the cause is fixed or the issue is closed.`
     case 'silent':

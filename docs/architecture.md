@@ -82,7 +82,8 @@ to `events.jsonl` and `reports.jsonl`. The files and the tab outlive the router,
 adopts workers rather than replacing them. Inside the worker, `worker-role.ts` registers `ticket_report`
 and the guard from `workspace.ts`: no delegation tools, no blocked commands, no writes outside the
 workspace. It also files any run that ends without a report as a failure: only the worker process knows
-the order of its own events, so only it can tell for certain. A finished worker's tab lingers for ten minutes of follow-up and then closes if its pi sits
+the order of its own events, so only it can tell for certain. A crash frees the worker's slot at once, and
+the router answers the ticket's first crash with the engine's retry: a fresh worker, told what happened. A finished worker's tab lingers for ten minutes of follow-up and then closes if its pi sits
 idle. At startup the router also closes worker tabs that no record owns or whose agent herdr no longer
 knows.
 

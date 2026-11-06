@@ -60,6 +60,8 @@ export interface ExtensionDeps {
   herdr?: Herdr
   now?: () => string
   githubApi?: GithubApi
+  /** Tests read worker files and check worker liveness in milliseconds, not seconds. */
+  workerTiming?: { pollMs?: number; livenessMs?: number }
 }
 
 export interface RunningRouter {
@@ -204,17 +206,33 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   })
 
   // One message per assignment, ending and text; a failed launch drops the text, since it retries every poll.
-  const announce = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun): void => {
+  const announce = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun, relaunched: boolean): void => {
     const channel = ticket.channels[0]
     if (!channel) return
     const said = origin === 'launch' ? ''
       : createHash('sha1').update(JSON.stringify([run.state, run.summary, run.question ?? null])).digest('hex').slice(0, 12)
     outbox.send({ id: `report:${assignmentId}:${origin}:${said}`, channel, kind: 'reply', ticketId: ticket.id,
-      text: receiptText(channel.thread, origin, run) })
+      text: receiptText(channel.thread, origin, run, relaunched) })
+  }
+  // One fresh worker per crash, per ticket per process; the engine's retry requeues comments the dead one never read.
+  const relaunched = new Set<string>()
+  const reported = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun): void => {
+    let fresh = false
+    if (origin === 'crash' && !relaunched.has(ticket.id)) {
+      relaunched.add(ticket.id)
+      try {
+        engine.retryTicket(ticket.id)
+        fresh = true
+        log.line('info', 'worker.relaunched', { ticket: ticket.id, after: assignmentId })
+      } catch (error) {
+        log.line('warn', 'worker.relaunch_failed', { ticket: ticket.id, error: String(error).slice(0, 200) })
+      }
+    }
+    announce(ticket, assignmentId, origin, run, fresh)
   }
   const herdrWorkers = cfg.workers === 'herdr'
     ? new HerdrWorkers({ herdr: deps.herdr ?? herdrCli(cfg.herdrBin), stateDir: cfg.dataDir, log,
-      ...(cfg.herdrWorkspace ? { workspaceLabel: cfg.herdrWorkspace } : {}) })
+      ...(cfg.herdrWorkspace ? { workspaceLabel: cfg.herdrWorkspace } : {}), ...deps.workerTiming })
     : undefined
 
   const executor = new PiExecutor(engine, {
@@ -278,7 +296,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }, {
     worktreeFor: ticket => `${cfg.worktreeRoot}/${ticket.id}`,
     briefFor: ticket => {
-      const brief = briefFor(ticket, `${cfg.worktreeRoot}/${ticket.id}`)
+      // A worker started after a failed attempt shares that attempt's workspace, and must look before redoing it.
+      const before = ticket.assignments.filter(a => a.report?.state === 'failed').at(-1)?.report
+      const brief = briefFor(ticket, `${cfg.worktreeRoot}/${ticket.id}`) + (before
+        ? `\nA previous worker on this ticket stopped (${before.summary}); anything it changed is still in the workspace, so check it before starting over.`
+        : '')
       const issue = ticket.channels[0]?.source === 'github' ? (ticket.channels[0].address as { issue?: string }).issue : undefined
       if (!issue || !cfg.githubRepo) return brief
       // A comment the worker posts itself carries no reply footer, so the router would read it as the
@@ -292,7 +314,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // string to the worker and mark the answer read.
       : input.kind === 'text' ? input.text : `[${input.kind}]`,
     inbox: new SessionInbox(`${cfg.dataDir}/inbox`),
-    reported: announce,
+    reported,
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
   })
   executorRef = executor
@@ -463,7 +485,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         } as never)
         // Once per process, from the record: the mandate stands, so the work gets a fresh worker. A relaunch
         // loop is bounded by this loop running only at startup.
-        executor.start(ticket, kept)
+        executor.start(repos.tickets.get(ticket.id) ?? ticket, kept)
       }
     } catch (error) {
       log.line('error', 'recover.failed', { ticket: ticket.id, error: String(error).slice(0, 200) })
