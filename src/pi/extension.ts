@@ -21,7 +21,7 @@ import { reportTool, type ReportOrigin } from './report-tool.ts'
 import { pullEndText, receiptText, type ReportedRun } from './receipts.ts'
 import { workerRole } from './worker-role.ts'
 import { createPanelServer } from './server.ts'
-import { guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
+import { checkoutRepository, guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
 import { briefFor, ghAccounts, loadSdk, policyOf, pullBrief, scopeOf, type RouterConfig, type SdkSurface } from './router.ts'
 
 export interface PiLike {
@@ -291,6 +291,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         ...(cfg.prepare ? { prepare: cfg.prepare } : {}),
         ...(cfg.blockedCommands ? { blockedCommands: cfg.blockedCommands } : {}),
       })
+      if (cfg.githubRepo && !cfg.prepare) await checkoutRepository(workspace, cfg.githubRepo, ticket.id)
       if (herdrWorkers) {
         return herdrWorkers.launch({
           ticket, thread: channel?.thread ?? ticket.id, workspace: workspace.dir, report,

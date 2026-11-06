@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { afterAll, describe, expect, it } from 'vitest'
-import { DELEGATION_TOOLS, decideToolCall, prepareWorkspace, setupProblems, WorkspaceError } from '../src/pi/workspace.ts'
+import { afterAll, describe, expect, it, vi } from 'vitest'
+import { checkoutRepository, DELEGATION_TOOLS, decideToolCall, prepareWorkspace, setupProblems, WorkspaceError } from '../src/pi/workspace.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ws-')); dirs.push(d); return d }
@@ -26,6 +26,29 @@ describe('the worker environment', () => {
     const w = prepareWorkspace({ root, ticketId: 'TK-1', stateDir: root, prepare: 'echo "$PI_SUPERAGENT_TICKET in $PI_SUPERAGENT_DIR" > prepared.txt' })
     expect(readFileSync(join(w.dir, 'prepared.txt'), 'utf8')).toContain('TK-1 in')
     expect(w.dir).toBe(join(root, 'TK-1'))
+  })
+
+  it('publishes a complete ticket clone, retries failed clones and preserves edits on resume', async () => {
+    const root = tmp()
+    const source = join(root, 'source')
+    execFileSync('git', ['init', '-q', source])
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-qm', 'seed'], { cwd: source })
+    const workspace = prepareWorkspace({ root, ticketId: 'TK-1', stateDir: root })
+    const gh = join(root, 'gh')
+    vi.stubEnv('PATH', `${root}:${process.env.PATH}`)
+    try {
+      writeFileSync(gh, '#!/bin/sh\ntouch partial; exit 1\n', { mode: 0o755 })
+      await expect(checkoutRepository(workspace, 'org/repo', 'TK-1')).rejects.toThrow(/cannot prepare/)
+      expect(existsSync(join(workspace.dir, 'partial'))).toBe(false)
+      writeFileSync(gh, `#!/bin/sh\n[ "$3" = github.com/org/repo ] && git clone -q "${source}" .\n`)
+      await checkoutRepository(workspace, 'org/repo', 'TK-1')
+      expect(execFileSync('git', ['branch', '--show-current'], { cwd: workspace.dir, encoding: 'utf8' }).trim()).toBe('superagent/TK-1')
+      writeFileSync(join(workspace.dir, 'unfinished'), 'draft')
+      await checkoutRepository(workspace, 'org/repo', 'TK-1')
+      expect(readFileSync(join(workspace.dir, 'unfinished'), 'utf8')).toBe('draft')
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   it('a failed prepare is the ticket\'s failure, with the command\'s own words', () => {

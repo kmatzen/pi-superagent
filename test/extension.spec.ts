@@ -89,9 +89,8 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   }
   const receipts = (n: string) => feed.posts.filter(p => String(p.issue) === n).map(p => p.body).join('\n')
   const config: RouterConfig = {
-    dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', githubRepo: 'o/r',
+    dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', githubRepo: 'o/r', prepare: options.prepare ?? 'true',
     bots: new Set(['fleet-answer-loop']), tickMs: options.tickMs ?? 5, ...(herdr ? { workers: 'herdr' as const } : {}),
-    ...(options.prepare ? { prepare: options.prepare } : {}),
     ...(options.blocked ? { blockedCommands: options.blocked } : {}),
   }
   const workers: Spy[] = []

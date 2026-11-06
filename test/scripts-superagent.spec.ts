@@ -30,6 +30,22 @@ afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true 
 
 // Each run starts several processes (bash, node for herdr's JSON, the fake herdr): seconds under a full suite.
 describe('scripts/superagent', { timeout: 30_000 }, () => {
+  it('init validates access and keeps existing settings on repeat or conflict', () => {
+    for (const [bin, body] of [['gh', 'echo "$PERMISSION"'], ['pi', 'exit 0']] as const) {
+      writeFileSync(join(herdrDir, bin), `#!/bin/sh\n${body}\n`, { mode: 0o755 })
+    }
+    const env = { PATH: `${herdrDir}:${process.env.PATH}`, PERMISSION: 'WRITE' }
+    const file = join(state, 'config.env')
+    expect(run(['init', 'org/repo'], { ...env, PERMISSION: 'READ' }).status).toBe(1)
+    expect(existsSync(file)).toBe(false)
+    expect(run(['init', 'org/repo'], env).status).toBe(0)
+    const saved = readFileSync(file, 'utf8') + 'PI_SUPERAGENT_MAX_WORKERS=2\n'
+    writeFileSync(file, saved)
+    expect(run(['init', 'org/repo'], env).status).toBe(0)
+    expect(run(['init', 'org/other'], env).status).toBe(1)
+    expect(readFileSync(file, 'utf8')).toBe(saved)
+  })
+
   it('says not running with code 1 on a box with nothing started', () => {
     const r = run(['status'])
     expect(r.status).toBe(1)

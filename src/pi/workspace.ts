@@ -1,7 +1,8 @@
 /** A workspace per ticket, a prepare command that must succeed, and blocked names that refuse on its PATH. */
-import { chmodSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { promisify } from 'node:util'
+import { execFile, execFileSync } from 'node:child_process'
 
 export interface WorkspaceRequest {
   root: string
@@ -29,7 +30,7 @@ export class WorkspaceError extends Error {
 const SAFE = /^[A-Za-z0-9._-]+$/
 
 export function prepareWorkspace(request: WorkspaceRequest): PreparedWorkspace {
-  if (!SAFE.test(request.ticketId)) throw new WorkspaceError('bad-ticket-id', `refusing a workspace named ${request.ticketId}`)
+  if (!SAFE.test(request.ticketId) || ['.', '..'].includes(request.ticketId)) throw new WorkspaceError('bad-ticket-id', `refusing a workspace named ${request.ticketId}`)
   const dir = join(request.root, request.ticketId)
   try {
     mkdirSync(request.root, { recursive: true, mode: 0o700 })
@@ -55,6 +56,27 @@ export function prepareWorkspace(request: WorkspaceRequest): PreparedWorkspace {
     }
   }
   return { dir, path, env }
+}
+
+const run = promisify(execFile)
+
+/** Publish only a complete checkout. Resumed workers keep their branch, edits and any legacy workspace. */
+export async function checkoutRepository(workspace: PreparedWorkspace, repo: string, ticketId: string) {
+  if (readdirSync(workspace.dir).length) return
+  if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/.test(repo) || ['.', '..'].includes(repo.split('/')[1]!)) {
+    throw new WorkspaceError('prepare-failed', `invalid GitHub repository: ${repo}`)
+  }
+  const stage = mkdtempSync(`${workspace.dir}.clone-`)
+  const options = { cwd: stage, timeout: 300_000 }
+  try {
+    await run('gh', ['repo', 'clone', `github.com/${repo}`, '.', '--', '--quiet'], options)
+    await run('git', ['switch', '-c', `superagent/${ticketId}`], options)
+    renameSync(stage, workspace.dir)
+  } catch (error) {
+    throw new WorkspaceError('prepare-failed', `cannot prepare ${repo} for ${ticketId}`, (error as Error).message)
+  } finally {
+    rmSync(stage, { recursive: true, force: true })
+  }
 }
 
 /** One directory, first on PATH, holding a refusal for every blocked name. A shim says what it refused. */

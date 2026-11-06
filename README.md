@@ -56,41 +56,44 @@ answer it:
 The ticket lifecycle, the GitHub intake and the worker sweep are specified in TLA+ and checked
 exhaustively, 1.5 million distinct states in all, by one command.
 
-## Install
+## Install from a checkout
 
-You need macOS or Linux, Node 22.19 or later, [pi](https://github.com/earendil-works/pi),
-[herdr](https://herdr.dev) and the [GitHub CLI](https://cli.github.com).
-
-```sh
-brew install herdr gh             # or each project's own installer
-gh auth login                     # workers act as this account, and so does the router by default
-pi install npm:pi-superagent      # the extension: router, judge and worker roles
-npm install -g pi-superagent      # the superagent command
-```
-
-pi loads the extension in every session. It does nothing in a session the start script did not launch,
-so that is safe. Install both from the same version, and update them together. To have the router reply
-from an account of its own, set `PI_SUPERAGENT_GITHUB_TOKEN_FILE` (see `config.example.env`).
-
-## Run it
-
-Start herdr: `herdr` in a terminal, or `herdr server` to run it headless. Then name the repository to
-watch, and start the router:
+Use macOS or Linux with Git, Node 22.19 or later, [pi](https://github.com/earendil-works/pi),
+[herdr](https://herdr.dev), and the [GitHub CLI](https://cli.github.com).
+Sign into a model provider in pi and confirm your model appears in `pi --list-models`.
+Use a GitHub account with write access to the repository you want to watch.
 
 ```sh
-mkdir -p ~/.pi/superagent
-echo 'PI_SUPERAGENT_GITHUB_REPO=your-org/your-repo' > ~/.pi/superagent/config.env
-superagent start     # the router: a pi session in its own herdr tab
-superagent status    # 0 healthy · 1 down · 2 a part is failing · 3 waiting for setup
-superagent stop      # the router exits; its workers keep going
+gh auth login
+gh auth setup-git
+gh repo clone kmatzen/pi-superagent
+cd pi-superagent
+pi install "$(pwd)"
 ```
 
-Each worker starts in an empty workspace of its own. To give it your code, set `PI_SUPERAGENT_PREPARE`
-to a command that clones the repository. That setting and every other one are explained in
-[`config.example.env`](config.example.env). Only people with write access to the repository are heard;
-`PI_SUPERAGENT_ALLOWED` narrows that to a list of logins.
+Keep the checkout at that path. The extension and the command in `scripts/` both run from it.
 
-From a checkout, `pi install ./pi-superagent` and `scripts/superagent` do the same.
+## Run your first ticket
+
+Substitute the GitHub repository you want the worker to change. `init` checks the local tools
+and your GitHub access, then saves the repository in `~/.pi/superagent/config.env`.
+
+```sh
+./scripts/superagent init your-org/your-repo
+herdr                      # keep it open, then use another terminal in the checkout
+./scripts/superagent start
+./scripts/superagent status
+```
+
+Wait for the first GitHub poll in the **engine log** tab, then open a new issue asking for a small
+change. The first poll records existing issues as the starting point. Watch for the acknowledgement
+on your issue. The worker clones the watched repository into its own directory, switches to a ticket
+branch, and posts the pull request on the issue. Request a change on the PR to send it back to the
+worker. Merge when you are satisfied.
+
+To supply your own workspace setup, set `PI_SUPERAGENT_PREPARE`. A replacement worker keeps the same
+ticket directory. To narrow who can start work or give the router its own GitHub identity, see
+[`config.example.env`](config.example.env). Stop the router with `./scripts/superagent stop`.
 
 ## Watching it
 

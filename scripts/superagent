@@ -9,7 +9,7 @@
 # Each code keeps one meaning, so a scheduled check can act on it without reading prose.
 set -uo pipefail
 
-usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] start|stop|restart|status"; }
+usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] {init OWNER/REPO|start|stop|restart|status}"; }
 
 # Flags come first because every path below derives from the state directory: parsed after them, --state
 # moved the router's tab but left its stop marker, its place file and its settings in the default one.
@@ -19,6 +19,9 @@ while [ $# -gt 0 ]; do
     --state) STATE_FLAG="$2"; shift 2 ;;
     --respect-stop) RESPECT_STOP=1; shift ;;
     -h|--help) usage; exit 0 ;;
+    init)
+      [ "$#" -eq 2 ] && [[ "$2" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$ ]] && [[ "${2#*/}" != "." && "${2#*/}" != ".." ]] || { usage >&2; exit 2; }
+      CMD=init; INIT_REPO="$2"; shift 2 ;;
     start|stop|restart|status) CMD="$1"; shift ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -56,6 +59,26 @@ PANEL_PORT="${PI_SUPERAGENT_PANEL_PORT:-8788}"
 # on first start, also names the router: the extension refuses to be the router in any process whose
 # command line lacks it.
 SESSION_ID="${PI_SUPERAGENT_SESSION_ID:-}"
+if [ "$CMD" = init ]; then
+  for bin in node git gh pi "$HERDR_BIN"; do
+    command -v "$bin" >/dev/null || { echo "Install $bin before running init." >&2; exit 1; }
+  done
+  node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)' || {
+    echo "Node 22.19 or later is required." >&2; exit 1;
+  }
+  permission="$(gh repo view "github.com/$INIT_REPO" --json viewerPermission --jq .viewerPermission)" || exit 1
+  case "$permission" in ADMIN|MAINTAIN|WRITE) ;; *) echo "The signed-in GitHub account needs write access to $INIT_REPO." >&2; exit 1 ;; esac
+  if [ -n "${PI_SUPERAGENT_GITHUB_REPO:-}" ] && [ "$PI_SUPERAGENT_GITHUB_REPO" != "$INIT_REPO" ]; then
+    echo "Already configured for $PI_SUPERAGENT_GITHUB_REPO. Choose a separate --state directory and clear any repository override." >&2; exit 1
+  fi
+  (umask 077; mkdir -p "$STATE" && set -C && printf 'PI_SUPERAGENT_GITHUB_REPO=%s\n' "$INIT_REPO" > "$STATE/config.env") 2>/dev/null || {
+    if ! grep -Fxq "PI_SUPERAGENT_GITHUB_REPO=$INIT_REPO" "$STATE/config.env" 2>/dev/null; then
+      echo "Could not create $STATE/config.env. For an existing config, set PI_SUPERAGENT_GITHUB_REPO there." >&2; exit 1
+    fi
+  }
+  echo "Configured $INIT_REPO in $STATE/config.env. Start herdr, then run this command with start."
+  exit 0
+fi
 mkdir -p "$STATE" "$WORKTREES"
 
 # herdr answers in JSON; node is already a dependency of pi, so it reads the fields.
