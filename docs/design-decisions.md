@@ -127,9 +127,20 @@ request's own conversation (on GitHub a pull request is also issue N, so no seco
 Opening a pull request is a delivery, not a request. Treating every opening as a trigger would make the
 agent a mandatory reviewer of its own output, a loop that feeds itself.
 
+## Only work holds a slot
+
+The cap counts workers on a run. A worker between runs, waiting on a person's answer or simply done, is
+parked: it keeps its session and its context, and its slot goes to the next ticket in the queue. A reply
+puts it back on a run, even past the cap for a while.
+
+A slot is the machine's capacity, and an idle session uses almost none of it. When every live worker held
+a slot, a queue of 22 tickets waited while one of the four slots belonged to a worker that had finished its
+run without saying so.
+
 ## A tab is closed only when nobody is in it
 
-A finished worker's tab stays open for ten minutes of follow-up and then closes only if its pi sits idle.
+A finished worker's tab stays open for ten minutes of follow-up and then closes only if its pi sits idle;
+while the agent is busy, the router looks again every ten minutes instead of giving up.
 The startup sweep closes a worker tab only when no record owns it or herdr no longer knows its agent.
 
 Worker tabs do outlive their purpose: a restart adopts a worker, a stop starts a newer one, and the older

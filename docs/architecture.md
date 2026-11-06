@@ -57,8 +57,8 @@ that touches a process, the network or a model arrives through a port in `ports.
 **The router: `src/pi/extension.ts`.** The composition root. It builds the store, the GitHub source, the
 outbox, the judge, the executor and the panel, then runs the loop. Every 30 seconds, and whenever its own
 pi session goes idle, the loop polls GitHub, hands new triggers to the engine, stops tickets whose thread
-has closed, lets the engine start due evaluations, launches queued work, flags workers that have gone
-quiet for 15 minutes, and flushes the outbox. Three failed polls in a row put an error in `health.json`.
+has closed, lets the engine start due evaluations, launches queued work, flags workers on a run that
+have gone quiet for 15 minutes, and flushes the outbox. Three failed polls in a row put an error in `health.json`.
 
 **GitHub in: `source-github.ts` and `gh-api.ts`.** The source reads issues, issue and pull-request
 comments, and submitted reviews. Its first look at a repository records what already exists and fires
@@ -83,8 +83,9 @@ adopts workers rather than replacing them. Inside the worker, `worker-role.ts` r
 and the guard from `workspace.ts`: no delegation tools, no blocked commands, no writes outside the
 workspace. It also files any run that ends without a report as a failure: only the worker process knows
 the order of its own events, so only it can tell for certain. A crash frees the worker's slot at once, and
-the router answers the ticket's first crash with the engine's retry: a fresh worker, told what happened. A finished worker's tab lingers for ten minutes of follow-up and then closes if its pi sits
-idle. At startup the router also closes worker tabs that no record owns or whose agent herdr no longer
+the router answers the ticket's first crash with the engine's retry: a fresh worker, told what happened. Only workers on a run count against the cap: a worker between runs is parked, keeping its
+session for follow-ups while its slot goes to the queue. A finished worker's tab lingers for ten minutes
+of follow-up and closes once its pi sits idle, checked again every ten minutes while it is busy. At startup the router also closes worker tabs that no record owns or whose agent herdr no longer
 knows.
 
 **GitHub out: `outbox.ts` and `receipts.ts`.** Every way a run ends (a report, a question, a crash, a run

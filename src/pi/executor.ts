@@ -63,6 +63,8 @@ interface Live {
   session: WorkerSession
   unsubscribe: () => void
   pendingRead: string[]
+  /** On a run. A settled worker is parked: its session stays for follow-ups, but it holds no slot. */
+  busy: boolean
   startedAt: number
   lastEventAt: number
   events: number
@@ -80,6 +82,7 @@ export interface WorkerView {
   events: number
   quietSeconds: number
   watch: string
+  busy: boolean
 }
 
 export class PiExecutor {
@@ -92,7 +95,9 @@ export class PiExecutor {
   constructor(private readonly engine: EngineForExecutor, private readonly launcher: WorkerLauncher,
               private readonly options: ExecutorOptions) {}
 
-  get running(): number { return this.live.size }
+  /** Workers on a run: the number the cap bounds. */
+  get running(): number { return [...this.live.values()].filter(live => live.busy).length }
+  get parked(): number { return this.live.size - this.running }
 
   start(ticket: Ticket, assignment: Assignment): void {
     const key = `${ticket.id}/${assignment.id}`
@@ -142,7 +147,7 @@ export class PiExecutor {
   private bind(ticket: Ticket, assignment: Assignment, session: WorkerSession): void {
     const born = Date.now()
     const live: Live = {
-      session, unsubscribe: () => {}, pendingRead: [],
+      session, unsubscribe: () => {}, pendingRead: [], busy: true,
       startedAt: born, lastEventAt: born, events: 0, workspace: session.workspace ?? this.options.worktreeFor(ticket),
       quietReported: false, assignmentId: assignment.id,
     }
@@ -151,8 +156,11 @@ export class PiExecutor {
       live.events += 1
       live.quietReported = false
       if (event.type === 'turnStarted') {
+        live.busy = true
         const ids = live.pendingRead.splice(0)
         if (ids.length) this.engine.inputsRead(ticket.id, ids)
+      } else if (event.type === 'settled') {
+        live.busy = false
       } else if (event.type === 'failed') {
         this.file(ticket, assignment.id, 'crash', report('failed', `the worker crashed: ${event.error}`))
         // A dead session does no work: free its slot now, or every crash costs a worker until the next restart.
@@ -215,19 +223,20 @@ export class PiExecutor {
       events: live.events,
       quietSeconds: Math.round((Date.now() - live.lastEventAt) / 1000),
       watch: live.session.watch ?? '',
+      busy: live.busy,
     }))
   }
 
   /** Workers that have gone quiet. Silence is not completion: the loop reports each quiet stretch once, so
    *  the ticket asks a person instead of reading as running forever. */
   quiet(minutes: number): WorkerView[] {
-    // Once per silent stretch: the loop asks every pass, and the operator should be asked once.
-    const due = this.workers().filter(w => w.quietSeconds >= minutes * 60 && !this.live.get(w.ticketId)?.quietReported)
+    // Once per silent stretch, and only on a run: a parked worker is quiet by design.
+    const due = this.workers().filter(w => w.busy && w.quietSeconds >= minutes * 60 && !this.live.get(w.ticketId)?.quietReported)
     for (const w of due) this.live.get(w.ticketId)!.quietReported = true
     return due
   }
 
-  // Launches are serialised behind each other: the cap bounds how many workers exist at once, and
+  // Launches are serialised behind each other: the cap bounds how many workers are on a run at once, and
   // starting two sessions in one tick is how a router forks until the box dies.
   private enqueue(run: () => Promise<void>): void {
     this.tail = this.tail.then(async () => {

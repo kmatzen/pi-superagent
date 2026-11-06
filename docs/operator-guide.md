@@ -67,11 +67,13 @@ The job expects the checkout at `~/git/pi-superagent`; edit its `cd` if yours li
 
 ## Capacity
 
-Up to four workers run at once (`PI_SUPERAGENT_MAX_WORKERS`); further tickets wait their turn, queued on
-the panel. The judge answers one request at a time. Every worker's brief says the machine is shared:
+Up to four workers can be on a run at once (`PI_SUPERAGENT_MAX_WORKERS`); further tickets wait their
+turn, queued on the panel. A worker between runs, waiting on your answer or simply done, is *parked*: it
+keeps its tab and everything it knows, but gives up its slot, so the queue keeps moving. A reply puts it
+back on a run. The judge answers one request at a time. Every worker's brief says the machine is shared:
 sequential builds, bounded parallel jobs, nothing left running after the report.
 
-A worker that emits nothing for 15 minutes is flagged on the panel, and only there, under *Needs a
+A worker on a run that emits nothing for 15 minutes is flagged on the panel, and only there, under *Needs a
 person*: steer it, stop it, or accept its work. The flag does not stop the worker. If it is only running a
 long build, let it be; the flag clears when the worker reports.
 

@@ -10,9 +10,9 @@ export interface PanelSource {
   engine: Engine
   assessor: SessionAssessor
   config: RouterConfig
-  load(): { running: number; queued: number; maxWorkers: number }
+  load(): { running: number; parked: number; queued: number; maxWorkers: number }
   /** The router's live workers: which ticket, where, and when each last spoke. */
-  workers(): Array<{ ticketId: string; sessionId: string; workspace: string; lastEventAt: string; events: number; quietSeconds: number; watch?: string }>
+  workers(): Array<{ ticketId: string; sessionId: string; workspace: string; lastEventAt: string; events: number; quietSeconds: number; watch?: string; busy?: boolean }>
   /** The panel shares the router's event loop, so a slow request is evidence of starvation, not noise. */
   log(level: 'info' | 'warn' | 'error', event: string, fields?: Record<string, unknown>): void
   isPaused(): boolean
@@ -56,7 +56,7 @@ export function readModel(src: PanelSource) {
     needsPerson: open.filter(t => t.attention).map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', question: (t.attention as { question?: string }).question ?? '', at: t.assignments.at(-1)?.report?.at ?? '', url: issueUrl(t, src.config.githubRepo) })),
     open: open.map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', state: t.assignments.at(-1)?.state ?? 'queued', waitsFor: waitingOn(t),
       issue: t.channels[0]?.source === 'github' ? t.channels[0].thread : '', url: issueUrl(t, src.config.githubRepo),
-      worker: (() => { const w = src.workers().find(w => w.ticketId === t.id); return w ? `watch ${w.watch || w.workspace} · ${w.events} events · quiet ${w.quietSeconds}s` : '' })() })),
+      worker: (() => { const w = src.workers().find(w => w.ticketId === t.id); return w ? `${w.busy === false ? 'parked · ' : ''}watch ${w.watch || w.workspace} · ${w.events} events · quiet ${w.quietSeconds}s` : '' })() })),
     workers: src.workers(),
     ended: tickets.filter(t => t.ended).slice(0, 50).map(t => ({ id: t.id, title: t.title, outcome: t.ended!.outcome, at: t.ended!.at })),
     counts: {
@@ -99,14 +99,14 @@ export function renderPanel(m: Model): string {
   }
   return page('superagent', `
 <section id="overview"><h2>Needs a person <span class="count">(${m.needsPerson.length})</span></h2>${asks}
-<ul class="count">${quiet(m.load.running, 'workers running')}${quiet(m.counts.evaluating, 'evals in progress')}${quiet(m.counts.filtered24h, 'triggers filtered in 24 h')}${m.paused ? '<li><strong>processing is paused</strong></li>' : ''}</ul></section>
+<ul class="count">${quiet(m.load.running, 'workers on a run')}${quiet(m.load.parked, 'workers parked between runs')}${quiet(m.counts.evaluating, 'evals in progress')}${quiet(m.counts.filtered24h, 'triggers filtered in 24 h')}${m.paused ? '<li><strong>processing is paused</strong></li>' : ''}</ul></section>
 <section id="source"><h2>Source <span class="count">(${m.source.repo ? `GitHub issues: ${esc(m.source.repo)}` : 'no source configured'})</span></h2>
 <p class="count">${m.counts.triggers24h} triggers in the last 24 h, ${m.counts.filtered24h} filtered, ${m.counts.threads} threads known.</p>
 </section>
 <section id="trigger"><h2>Trigger</h2>${rows(m.evaluating, ['key', 'evalId', 'since'])}
 <p class="count">Waiting on a judgement: ${m.waitingAssessment.length}</p></section>
 <section id="eval"><h2>Eval <span class="count">(${m.counts.decisions24h} in 24 h)</span></h2>${rows(m.recentDecisions, ['at', 'kind', 'reason', 'rules', 'ticket'])}</section>
-<section id="execution"><h2>Execution <span class="count">(${m.open.length} open, ${m.load.running}/${m.load.maxWorkers} workers, ${m.load.queued} queued)</span></h2>
+<section id="execution"><h2>Execution <span class="count">(${m.open.length} open, ${m.load.running}/${m.load.maxWorkers} working, ${m.load.parked} parked, ${m.load.queued} queued)</span></h2>
 ${rows(m.open, ['thread', 'title', 'state', 'waitsFor', 'worker'])}
 <h2>Ended</h2>${rows(m.ended, ['id', 'title', 'outcome', 'at'])}</section>
 <section id="settings"><h2>Settings</h2><p class="count">policy ${esc(m.policy.version)} · paused=${m.paused} · state ${esc(process.env.PI_SUPERAGENT_STATE ?? '')}</p>

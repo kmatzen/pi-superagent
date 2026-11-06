@@ -73,8 +73,8 @@ export interface RunningRouter {
   assessor: SessionAssessor
   setPaused(v: boolean): void
   isPaused(): boolean
-  /** Workers running and queued, against the cap: the panel's load line. */
-  load(): { running: number; queued: number; maxWorkers: number }
+  /** Workers on a run (against the cap), parked between runs, and queued: the panel's load line. */
+  load(): { running: number; parked: number; queued: number; maxWorkers: number }
 }
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] })
@@ -441,7 +441,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     engine.evaluateDue()
     log.line('info', 'tick', {
       n: sweeps, inflight: repos.threads.active().filter(t => t.evaluating).length,
-      running: executor.workers().length, open: repos.tickets.open().length, ms: Date.now() - started,
+      running: executor.running, parked: executor.parked, open: repos.tickets.open().length, ms: Date.now() - started,
     })
     for (const ticket of repos.tickets.open()) {
       const assignment = ticket.assignments.at(-1)
@@ -471,7 +471,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // A herdr worker runs in its own process and outlives the router: take it over instead of starting another.
       const survivor = herdrWorkers ? await herdrWorkers.find(ticket.id) : undefined
       if (survivor && herdrWorkers) {
-        executor.adopt(ticket, assignment, send => herdrWorkers.attach(survivor, send))
+        executor.adopt(ticket, assignment, send => herdrWorkers.attach(survivor, send, { adopted: true }))
         log.line('info', 'worker.adopted', { ticket: ticket.id, agent: survivor.agent, tab: survivor.tabId })
         return
       }
@@ -534,7 +534,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     return {
       // A session in this process is the only thing that can be running; an assignment left 'running' by a
       // dead router is not work, and counting it is how the panel hides a stall.
-      running: executor.workers().length,
+      running: executor.running,
+      parked: executor.parked,
       queued: open.filter(t => { const a = t.assignments.at(-1); return !a || a.state === 'pending' }).length,
       maxWorkers: cfg.maxConcurrent ?? 4,
     }
