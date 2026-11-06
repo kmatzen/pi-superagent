@@ -9,7 +9,23 @@
 # Each code keeps one meaning, so a scheduled check can act on it without reading prose.
 set -uo pipefail
 
-STATE="${PI_SUPERAGENT_STATE:-$HOME/.pi/superagent}"
+usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] start|stop|restart|status"; }
+
+# Flags come first because every path below derives from the state directory: parsed after them, --state
+# moved the router's tab but left its stop marker, its place file and its settings in the default one.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session) SESSION_FLAG="$2"; shift 2 ;;
+    --state) STATE_FLAG="$2"; shift 2 ;;
+    --respect-stop) RESPECT_STOP=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    start|stop|restart|status) CMD="$1"; shift ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+: "${CMD:=status}"
+
+STATE="${STATE_FLAG:-${PI_SUPERAGENT_STATE:-$HOME/.pi/superagent}}"
 # Deployment settings live with the state, so the health check's restart and a hand restart start the same
 # router (the GitHub source was on or off depending on whose shell started it). The caller's env still wins.
 if [ -f "$STATE/config.env" ]; then
@@ -20,7 +36,7 @@ if [ -f "$STATE/config.env" ]; then
 fi
 # Every pi session lives in herdr, the router included: it is the agent named $SESSION in this workspace,
 # next to the workers it starts. No herdr, no router: the health check retries until herdr is back.
-SESSION="${PI_SUPERAGENT_SESSION:-superagent}"
+SESSION="${SESSION_FLAG:-${PI_SUPERAGENT_SESSION:-superagent}}"
 HERDR_BIN="${PI_SUPERAGENT_HERDR:-$(command -v herdr || echo herdr)}"
 WORKSPACE_LABEL="${PI_SUPERAGENT_HERDR_WORKSPACE:-superagent}"
 WORKTREES="${PI_SUPERAGENT_WORKTREES:-$STATE/work}"
@@ -40,20 +56,6 @@ PANEL_PORT="${PI_SUPERAGENT_PANEL_PORT:-8788}"
 # on first start, also names the router: the extension refuses to be the router in any process whose
 # command line lacks it.
 SESSION_ID="${PI_SUPERAGENT_SESSION_ID:-}"
-
-usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] start|stop|restart|status"; }
-
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --session) SESSION="$2"; shift 2 ;;
-    --state) STATE="$2"; shift 2 ;;
-    --respect-stop) RESPECT_STOP=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    start|stop|restart|status) CMD="$1"; shift ;;
-    *) usage >&2; exit 2 ;;
-  esac
-done
-: "${CMD:=${1:-status}}"
 mkdir -p "$STATE" "$WORKTREES"
 
 # herdr answers in JSON; node is already a dependency of pi, so it reads the fields.

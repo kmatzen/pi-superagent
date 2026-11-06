@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
@@ -134,6 +134,21 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     run(['start']); run(['stop'])
     expect(run(['start']).status).toBe(0)
     expect(existsSync(join(state, 'stopped'))).toBe(false)
+  })
+
+  it('--state moves everything: the stop marker, the place file and the settings stay out of the default', () => {
+    // The harness's state dir stands in for a live router's; this run must leave it untouched.
+    const other = join(state, '..', 'other-state')
+    mkdirSync(other, { recursive: true })
+    writeFileSync(join(other, 'config.env'), 'PI_SUPERAGENT_GITHUB_REPO=o/other\n')
+    writeFileSync(join(state, 'config.env'), 'PI_SUPERAGENT_GITHUB_REPO=o/live\n')
+    const flags = ['--state', other]
+    expect(run([...flags, 'start'], { FAKE_HERDR_READY: join(other, 'ready') }).status).toBe(0)
+    expect(routerTab()).toContain('--env PI_SUPERAGENT_GITHUB_REPO=o/other')
+    expect(existsSync(join(other, 'router.herdr'))).toBe(true)
+    expect(run([...flags, 'stop']).status).toBe(0)
+    expect(existsSync(join(other, 'stopped'))).toBe(true)
+    expect(readdirSync(state).sort(), 'the default state dir gained nothing').toEqual(['config.env'])
   })
 
   it('an unknown flag is a usage error, not a silent success', () => {
