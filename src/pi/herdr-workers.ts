@@ -43,6 +43,7 @@ const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
 export class HerdrWorkers {
   private workspaceId: string | undefined
   private readonly root: string
+  private readonly born = Date.now()
 
   constructor(private readonly options: HerdrWorkersOptions) {
     this.root = join(options.stateDir, 'workers')
@@ -113,7 +114,9 @@ export class HerdrWorkers {
    *  router was listening. Interrupt each, and let its tab close. */
   async retireOrphans(adopted: ReadonlySet<string>): Promise<WorkerRecord[]> {
     const retired: WorkerRecord[] = []
-    for (const record of this.records().filter(r => !adopted.has(r.sessionId))) {
+    // A record this process wrote is no orphan: recovery relaunches workers before it sweeps, and a launch still in
+    // flight is not adopted yet, so the sweep interrupted fresh workers and marked them ended.
+    for (const record of this.records().filter(r => !adopted.has(r.sessionId) && Date.parse(r.startedAt) < this.born)) {
       if (!(await this.inTab(record))) continue
       const session = this.attach(record, () => {})
       session.abort()

@@ -213,15 +213,26 @@ describe('herdr workers', () => {
   it('a worker whose ticket ended while no router listened is interrupted and its tab closes', async () => {
     const dir = tmp()
     const m = memoryHerdr()
+    const before = new HerdrWorkers(options(dir, m.herdr))
+    const kept = await before.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    const adopted = await before.launch({ ticket, thread: '#8', workspace: '/w/8', env: {}, report: () => {} })
+    await new Promise(resolve => setTimeout(resolve, 5))
     const workers = new HerdrWorkers(options(dir, m.herdr))
-    const kept = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
-    const retired = await workers.retireOrphans(new Set())
-    expect(retired.map(r => r.sessionId)).toEqual([kept.sessionId])
+    const retired = await workers.retireOrphans(new Set([adopted.sessionId]))
+    expect(retired.map(r => r.sessionId), 'a worker the router took over keeps running').toEqual([kept.sessionId])
     expect(m.calls).toContain(`sendKeys ${agentName('#7', kept.sessionId)} esc`)
     await until(() => m.calls.some(c => c.startsWith('tabClose')))
-    expect(await workers.retireOrphans(new Set()), 'retired once').toEqual([])
-    const adopted = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
-    expect(await workers.retireOrphans(new Set([adopted.sessionId])), 'a worker the router took over keeps running').toEqual([])
+    expect(await workers.retireOrphans(new Set([adopted.sessionId])), 'retired once').toEqual([])
+  })
+
+  it('a worker this router launched is never its orphan, however early the sweep runs', async () => {
+    const dir = tmp()
+    const m = memoryHerdr()
+    const workers = new HerdrWorkers(options(dir, m.herdr))
+    // Recovery relaunches a lost worker, then sweeps before that launch is adopted: the sweep used to interrupt it.
+    const fresh = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    expect(await workers.retireOrphans(new Set())).toEqual([])
+    expect(m.calls).not.toContain(`sendKeys ${agentName('#7', fresh.sessionId)} esc`)
   })
 
   it('a close the previous router scheduled is not lost to a restart', async () => {
