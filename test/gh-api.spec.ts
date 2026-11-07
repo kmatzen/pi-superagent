@@ -10,11 +10,12 @@ const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'ghapi-')); dirs.push(d
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
 
 /** A fake `gh`: answers the two reads from files and records every write, so no network is involved. */
-function fakeGh(comments: string, issues: string, reviews: Record<string, unknown[]> = {}) {
+function fakeGh(comments: string, issues: string, reviews: Record<string, unknown[]> = {}, fails: Record<string, string> = {}) {
   const dir = tmp()
   writeFileSync(join(dir, 'comments.json'), comments)
   writeFileSync(join(dir, 'issues.json'), issues)
   for (const [n, rows] of Object.entries(reviews)) writeFileSync(join(dir, `reviews.${n}.json`), JSON.stringify(rows))
+  for (const [n, message] of Object.entries(fails)) writeFileSync(join(dir, `fail.${n}`), message)
   const bin = join(dir, 'gh')
   writeFileSync(bin, `#!/bin/bash
 case "$1 $2" in
@@ -23,6 +24,7 @@ case "$1 $2" in
   "api -X") cat - >> "$(dirname "$0")/posts.log" ;;
   "api repos/"*"/pulls/"*"/reviews"*)
     n="\${2##*pulls/}"; n="\${n%%/*}"
+    [ -f "$(dirname "$0")/fail.$n" ] && { cat "$(dirname "$0")/fail.$n" >&2; exit 1; }
     f="$(dirname "$0")/reviews.$n.json"
     if [ -f "$f" ]; then cat "$f"; else echo 'gh: Not Found (HTTP 404)' >&2; exit 1; fi ;;
   *) echo "unexpected: $*" >&2; exit 1 ;;
@@ -46,10 +48,18 @@ describe('ghApi', () => {
     expect(rows.map(r => r.pr), 'the unreadable pull is skipped, the others are read').toEqual([7, 9])
   })
 
-  it('fails the poll when no followed pull request can be read, because that is the account, not a dead pull', async () => {
+  it('reads nothing from a batch of only dead pull requests, which is not an outage', async () => {
+    // The live shape on 2026-11-07: one ticket followed one pull request, that pull answers 404, and every poll
+    // reported the GitHub source down — the health check would have been restarting the router over one ghost.
     const gh = fakeGh('[]', '[]')
+    const api = ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [{ repo: 'o/r', number: 8 }] })
+    expect(await api.reviews!(500)).toEqual([])
+  })
+
+  it('fails the poll when a pull request breaks for a reason that is not that it is gone', async () => {
+    const gh = fakeGh('[]', '[]', {}, { 7: 'gh: Server Error (HTTP 500)\n' })
     const api = ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [{ repo: 'o/r', number: 7 }] })
-    await expect(api.reviews!(500)).rejects.toThrow(/Not Found/)
+    await expect(api.reviews!(500)).rejects.toThrow(/HTTP 500/)
   })
 
 
