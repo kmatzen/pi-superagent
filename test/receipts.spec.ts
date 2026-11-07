@@ -32,7 +32,13 @@ describe('what the thread reads when a run ends', () => {
   })
 
   it('the end of a pull request is said on the issue: done when merged, how to start again when closed', () => {
-    expect(pullEndText('#400', 'merged', ['https://github.com/o/r/pull/9'])).toBe('#400 merged: https://github.com/o/r/pull/9. This ticket is done.')
-    expect(pullEndText('#400', 'closed', ['https://github.com/o/r/pull/9'])).toMatch(/closed without merging[\s\S]*A comment here starts the work again/)
+    const pr = (n: number, outcome: 'merged' | 'closed') => ({ url: `https://github.com/o/r/pull/${n}`, outcome })
+    expect(pullEndText('#400', [pr(9, 'merged')])).toBe('#400 merged: https://github.com/o/r/pull/9. This ticket is done.')
+    expect(pullEndText('#400', [pr(9, 'closed')])).toMatch(/closed without merging[\s\S]*A comment here starts the work again/)
+    // A ticket opens as many pull requests as the work needs; the engine ends it on the last close, and that
+    // one outcome must not be said about the pull request that merged.
+    const mixed = pullEndText('#400', [pr(9, 'merged'), pr(12, 'closed')])
+    expect(mixed).toMatch(/pull\/9 merged and https:\/\/github.com\/o\/r\/pull\/12 closed without merging/)
+    expect(mixed).toMatch(/ends with the work that landed/)
   })
 })

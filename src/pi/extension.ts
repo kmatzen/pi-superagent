@@ -259,8 +259,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const channel = ticket?.channels[0]
     if (!ticket || !channel || ticket.ended?.by !== 'executor' || (outcome !== 'merged' && outcome !== 'closed')) return
     const pulls = (ticket.follows ?? []).filter(f => f.own && f.closed)
-      .flatMap(f => { const pull = parseThread(f.thread.replace(/^github:/, ''), home); return pull ? [pullUrl(pull)] : [] })
-    outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, outcome, pulls) })
+      .flatMap(f => { const pull = parseThread(f.thread.replace(/^github:/, ''), home)
+        return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome }] : [] })
+    outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, pulls) })
   }
   const follower = new PullFollower({
     home, api: deps.pullApi ?? ghPulls(accounts.pulls), openThreads: () => github?.openThreads(), positions: repos.kv,
