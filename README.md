@@ -93,6 +93,8 @@ npm install
 npm run check            # Type-check and run the test suite
 npm run check:packed     # Install the tarball and exercise both the CLI and the pi extension
 scripts/check-formal     # Check all three models (about five minutes with a JDK)
+.ci/ci.yml               # The GitHub Actions job: copy to .github/workflows/ (a token needs the `workflow`
+                         # scope to push that path, which this repository's token does not have)
 ```
 
 The test suite clears `PI_SUPERAGENT_*` settings to isolate its router from yours.
