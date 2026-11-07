@@ -1,5 +1,5 @@
 /** The superagent inside a worker's own pi: report tool, guard, and a file bridge to the router in another process. */
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { reportTool } from './report-tool.ts'
 import { guardExtension } from './workspace.ts'
@@ -33,11 +33,23 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
     allowDelegation: env.PI_SUPERAGENT_ALLOW_DELEGATION === '1',
   })(pi as never)
 
+  // Inputs are kept in the inbox until a run takes them. pi queues a message sent into a running turn and hands
+  // the queue back to the human's input box when that turn is aborted, so a file deleted at send time is a message
+  // the model never read: the router marked it delivered, the ticket waited on its worker, and nothing retried it.
+  const inflight = new Map<string, string>()
   pi.on('agent_start', () => append('events.jsonl', { type: 'turnStarted' }))
-  pi.on('agent_settled', () => {
+  pi.on('agent_settled', (event) => {
     // Filed here, before the settle: only this process knows the order of a run's events for certain.
     if (!reported) append('reports.jsonl', { state: 'failed', summary: SILENT_FINISH, question: null, origin: 'silent' })
     reported = false
+    const aborted = Boolean((event as { aborted?: boolean } | undefined)?.aborted)
+    for (const [name, file] of inflight) {
+      // Aborted: the run gave the message back, so the next drain sends it to the idle session as its own turn.
+      if (aborted) continue
+      rmSync(file, { force: true })
+      append('events.jsonl', { type: 'input_read', name })
+    }
+    inflight.clear()
     append('events.jsonl', { type: 'settled' })
   })
   let lastActivity = 0
@@ -57,12 +69,19 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
       let input: { text: string; mode?: 'steer' | 'followUp' }
       try {
         input = JSON.parse(readFileSync(file, 'utf8')) as typeof input
-      } catch {
+      } catch (error) {
+        // Unreadable by this worker and by every later one: park it out of the scan and say so once.
+        renameSync(file, `${file}.corrupt`)
+        append('events.jsonl', { type: 'inbox_error', name, error: String(error).slice(0, 200) })
         continue
       }
-      rmSync(file, { force: true })
+      if (inflight.has(name)) continue // sent, waiting for the run that reads it
+      inflight.set(name, file)
       Promise.resolve(pi.sendUserMessage(input.text, { deliverAs: input.mode ?? 'followUp' }))
-        .catch((error: unknown) => append('events.jsonl', { type: 'inbox_error', error: String(error).slice(0, 200) }))
+        .catch((error: unknown) => {
+          inflight.delete(name)
+          append('events.jsonl', { type: 'inbox_error', error: String(error).slice(0, 200) })
+        })
     }
   }
   let timer: NodeJS.Timeout | undefined

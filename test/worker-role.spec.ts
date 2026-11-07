@@ -111,7 +111,63 @@ describe('the worker role', () => {
     f.emit('session_start')
     await until(() => f.sent.length === 2)
     expect(f.sent).toEqual([{ text: 'the brief', deliverAs: 'followUp' }, { text: 'also check CI', deliverAs: 'steer' }])
+    expect(readdirSync(join(dir, 'inbox')), 'not read yet: the run has not taken them').toEqual(['1-0000.json', '2-0001.json'])
+    f.emit('agent_settled', { aborted: false })
     expect(readdirSync(join(dir, 'inbox'))).toEqual([])
+    f.emit('session_shutdown')
+  })
+
+  it('parks an inbox file it cannot read instead of reading it every second', async () => {
+    // Measured 2026-11-07 audit: a half-written file was caught, skipped, and caught again at 1 Hz for the
+    // whole life of the worker, with nothing to tell anyone. One rename, one event, and it stops happening.
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir }, 10)
+    mkdirSync(join(dir, 'inbox'), { recursive: true })
+    writeFileSync(join(dir, 'inbox', '1-0000.json'), '{ "text": "the brief is trunca')
+    f.emit('session_start')
+    await until(() => existsSync(join(dir, 'inbox', '1-0000.json.corrupt')))
+    expect(readdirSync(join(dir, 'inbox'))).toEqual(['1-0000.json.corrupt'])
+    expect(lines(join(dir, 'events.jsonl')).some(e => e.type === 'inbox_error'), 'the router can see it happened').toBe(true)
+    f.emit('session_shutdown')
+  })
+
+  it('keeps an input the run was aborted before reading, and sends it again', async () => {
+    // pi hands messages still queued when a run is aborted back to the human's input box: a router review
+    // delivered into a long run died there, marked read, while the ticket waited for a worker that had it never.
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir }, 10)
+    mkdirSync(join(dir, 'inbox'), { recursive: true })
+    writeFileSync(join(dir, 'inbox', '1-0000.json'), JSON.stringify({ text: 'changes requested', mode: 'followUp' }))
+    f.emit('session_start')
+    await until(() => f.sent.length === 1)
+    f.emit('agent_settled', { aborted: true })
+    expect(readdirSync(join(dir, 'inbox')), 'the abort gave it back: keep the copy').toEqual(['1-0000.json'])
+    await until(() => f.sent.length === 2)
+    expect(f.sent[1]).toEqual({ text: 'changes requested', deliverAs: 'followUp' })
+    f.emit('agent_settled', { aborted: false })
+    expect(readdirSync(join(dir, 'inbox')), 'the second run read it').toEqual([])
+    f.emit('session_shutdown')
+  })
+
+  it('keeps an input the session refused to take, and sends it again once it can', async () => {
+    const dir = tmp()
+    const f = fakePi()
+    let deaf = true
+    f.pi.sendUserMessage = (text, options) => {
+      if (deaf) return Promise.reject(new Error('no active run'))
+      f.sent.push({ text, deliverAs: options?.deliverAs })
+    }
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir }, 10)
+    mkdirSync(join(dir, 'inbox'), { recursive: true })
+    writeFileSync(join(dir, 'inbox', '1-0000.json'), JSON.stringify({ text: 'the brief', mode: 'followUp' }))
+    f.emit('session_start')
+    await until(() => lines(join(dir, 'events.jsonl')).some(r => r.type === 'inbox_error'))
+    expect(readdirSync(join(dir, 'inbox')), 'a refusal is not a delivery').toEqual(['1-0000.json'])
+    deaf = false
+    await until(() => f.sent.length === 1)
+    expect(f.sent).toEqual([{ text: 'the brief', deliverAs: 'followUp' }])
     f.emit('session_shutdown')
   })
 })

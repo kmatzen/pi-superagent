@@ -230,6 +230,15 @@ describe('GithubSource', () => {
     const restarted = new GithubSource(api, { repo: 'o/r', self: 'superagent[bot]' }, f.store)
     expect(await restarted.poll()).toHaveLength(1)
   })
+  it('a comment arrives clipped to the length an issue body gets', async () => {
+    // Measured 2026-11-07 audit: a 900 KB CI log pasted into a ticket bought its own judge prompt and worker
+    // brief, and the router shipped that text to GitHub in the receipt. An issue body is capped; a comment was not.
+    const f = fixture([comment({ body: 'trace: at Frame()\n'.repeat(1000) })], [])
+    f.source.bootstrap()
+    const [trigger] = await f.source.poll()
+    expect(trigger!.text).toHaveLength(4000)
+  })
+
   it("the agent's own review and a bot's review are not requests", async () => {
     const f = fixture([], [], [review({ author: 'superagent[bot]' }), review({ id: 502, author: 'github-actions[bot]' })])
     f.source.bootstrap()

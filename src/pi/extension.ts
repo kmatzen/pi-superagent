@@ -5,7 +5,6 @@ import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
-import { SessionInbox } from './sink-session-inbox.ts'
 import { GithubSource, REPLY_MARKER, type GithubApi } from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
 import { parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi } from './pulls.ts'
@@ -117,13 +116,20 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         if (seen.some(c => c.body.trimEnd() === `${body}\n\n${REPLY_MARKER}`)) return
         await githubApi.postComment(issue, body, repo)
       } catch (error) {
-        log.line('warn', 'outbox.github_failed', { issue, error: String(error).slice(0, 200) })
+        log.line('warn', 'outbox.github_failed', { issue, repo, error: String(error).slice(0, 200) })
         throw error
       }
     },
-  }, repos.kv)
+  }, repos.kv, () => Date.now(), 12,
+     (m, tries, error) => log.line('error', 'outbox.given_up', { thread: m.channel.thread, tries, error }))
   const accounts = ghAccounts(cfg)
-  const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({ repo: cfg.githubRepo, ...accounts.watched }) : undefined)
+  const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({
+    repo: cfg.githubRepo, ...accounts.watched,
+    // The reviews a ticket waits on are the ones on the pull requests it follows.
+    followed: () => repos.tickets.open().flatMap(t => (t.follows ?? [])
+      .filter(f => !f.closed && f.thread.startsWith('github:'))
+      .flatMap(f => parseThread(f.thread.slice('github:'.length), cfg.githubRepo ?? '') ?? [])),
+  }) : undefined)
   const github = githubApi
     ? new GithubSource(githubApi, { repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots }, repos.kv)
     : undefined
@@ -208,7 +214,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       }),
       deliver: (ticket, assignment) => afterCommit('deliver', () => {
         const fresh = repos.tickets.get(ticket.id)
-        if (fresh) executorRef?.deliver(fresh, assignment)
+        if (!fresh) return
+        // Say it out loud: a delivery that the worker's model never read is the difference between a worker
+        // that ignored a review and one that was never told, and only the trail can tell them apart later.
+        log.line('info', 'input.delivered', { ticket: ticket.id, thread: fresh.channels[0]?.thread ?? ticket.id, waiting: fresh.undelivered.length })
+        executorRef?.deliver(fresh, assignment)
       }),
       stop: (ticket, assignment, reason) => afterCommit('stop', () => executorRef?.stop(ticket, assignment, reason)),
     },
@@ -370,7 +380,6 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // A text Input is the operator's own words: rendering it as `[text]` would deliver the literal
       // string to the worker and mark the answer read.
       : input.kind === 'text' ? input.text : `[${input.kind}]`,
-    inbox: new SessionInbox(`${cfg.dataDir}/inbox`),
     reported,
     follow,
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
@@ -580,6 +589,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     ? createPanelServer({
       repos, engine, assessor, config: cfg,
       load: () => panelLoad(), isPaused: () => paused, workers: () => executor.workers(),
+      health: () => { try { return JSON.parse(readFileSync(`${cfg.dataDir}/health.json`, 'utf8')) as Record<string, unknown> } catch { return {} } },
       log: (level, event, fields) => log.line(level, event, fields), setPaused: (v: boolean) => { paused = v },
       now: deps.now ?? (() => new Date().toISOString()),
     })

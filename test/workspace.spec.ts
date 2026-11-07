@@ -28,6 +28,14 @@ describe('the worker environment', () => {
     expect(w.dir).toBe(join(root, 'TK-1'))
   })
 
+  it('refuses a repository that is not one owner and one name', async () => {
+    const root = tmp()
+    const w = prepareWorkspace({ root, ticketId: 'TK-9', stateDir: root })
+    for (const bad of ['../evil', 'org/..', 'org/.', '/repo', 'repo', 'org/repo/extra', 'org/repo;rm -rf /', 'org/_', 'ORG/REPO ']) {
+      await expect(checkoutRepository(w, bad, 'TK-9'), bad).rejects.toThrow(/invalid GitHub repository/)
+    }
+  })
+
   it('publishes a complete ticket clone, retries failed clones and preserves edits on resume', async () => {
     const root = tmp()
     const source = join(root, 'source')
@@ -42,6 +50,9 @@ describe('the worker environment', () => {
       expect(existsSync(join(workspace.dir, 'partial'))).toBe(false)
       writeFileSync(gh, `#!/bin/sh\n[ "$3" = github.com/org/repo ] && git clone -q "${source}" .\n`)
       await checkoutRepository(workspace, 'org/repo', 'TK-1')
+      // Enterprise-managed accounts carry an underscore, and they are the accounts this board runs on.
+      writeFileSync(gh, `#!/bin/sh\n[ "$3" = github.com/acme_corp/super-agent-board ] && git clone -q "${source}" .\n`)
+      await checkoutRepository(prepareWorkspace({ root, ticketId: 'TK-2', stateDir: root }), 'acme_corp/super-agent-board', 'TK-2')
       expect(execFileSync('git', ['branch', '--show-current'], { cwd: workspace.dir, encoding: 'utf8' }).trim()).toBe('superagent/TK-1')
       writeFileSync(join(workspace.dir, 'unfinished'), 'draft')
       await checkoutRepository(workspace, 'org/repo', 'TK-1')

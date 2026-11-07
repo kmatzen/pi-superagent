@@ -17,14 +17,6 @@ export interface WorkerSession {
   readonly watch?: string
 }
 
-function workerPrefix(rendered: string[]): string {
-  for (const text of rendered) {
-    const m = /session ([0-9a-f]{8})/i.exec(text)
-    if (m?.[1]) return m[1]
-  }
-  return ''
-}
-
 export type WorkerEvent =
   /** The session took queued input into a step: the engine may mark those Inputs read. */
   | { type: 'turnStarted' }
@@ -52,8 +44,6 @@ export interface ExecutorOptions {
   /** Render one Input into prompt text. Trigger inputs need the trigger's text, which the engine keeps
    *  in the store, not on the ticket: the deployment owns that lookup. Undefined = not worker-visible. */
   renderInput(input: TicketInput): string | undefined
-  /** Delivery when this process holds no session: adopted workers, the operator's own asks. */
-  inbox?: { write(prefix: string, body: string): void }
   slotPollMs?: number
   /** Every report the engine accepted, with who ended the run: the deployment tells the person. */
   reported?(ticket: Ticket, assignmentId: string, origin: ReportOrigin, report: Filed & { pullRequests?: readonly string[] }): void
@@ -87,6 +77,18 @@ export interface WorkerView {
   watch: string
   busy: boolean
 }
+
+/**
+ * Whether the ticket that ended did so with finished work: the worker reported its result, the pull request it
+ * opened merged, or the ticket closed with nothing to do. Escape cancels a run, and a cancel thrown at finished
+ * work kills whatever the worker is doing at that moment — measured 2026-11-07T02:33:07Z, where a merge landing
+ * while the worker called ticket_report destroyed the report, and the run then posted as stopped without a
+ * result. A person stopping the ticket, a pull request closed without merging, and a retry are real
+ * cancellations, and they still get Escape. The end is recorded on the ticket before this runs, so a stop that
+ * carries no end at all (a retry, a delayed stop for a crashed run) reads as a cancellation.
+ */
+export const finishedWork = (ticket: Ticket): boolean =>
+  ticket.ended?.outcome === 'completed' || ticket.ended?.outcome === 'merged' || ticket.ended?.outcome === 'dropped'
 
 export class PiExecutor {
   private readonly live = new Map<string, Live>()
@@ -179,23 +181,14 @@ export class PiExecutor {
     const pending = ticket.inputs.filter(i => ticket.undelivered.includes(i.id))
     const visible = pending.map(i => ({ id: i.id, text: this.options.renderInput(i) })).filter(i => i.text)
     if (visible.length === 0) return
-    if (!live) return this.deliverToInbox(ticket, assignment, visible)
+    // No session, no delivery: the input stays undelivered and the loop retries it when a worker exists.
+    // The file inbox this replaced picked its target by grepping the message for `session <8 hex>`, which let a
+    // person's comment steer whichever worker's id appeared in it, and nothing read the file for a ticket with
+    // no worker, so the input was marked delivered and lost. Measured 2026-11-07 audit.
+    if (!live) return this.engine.deliveryFailed(ticket.id, assignment.id, 'no live worker for this ticket')
     for (const input of visible) live.session.prompt(String(input.text), 'followUp')
     this.engine.inputsDelivered(ticket.id, assignment.id, visible.map(i => i.id))
     live.pendingRead.push(...visible.map(i => i.id))
-  }
-
-  /** An adopted worker runs in a session this process never opened, so the prompt goes to its inbox file
-   *  and the per-session reader delivers it. No prefix, no channel: say so, do not drop the input. */
-  private deliverToInbox(ticket: Ticket, assignment: Assignment,
-                         visible: { id: string; text: string | undefined }[]): void {
-    const prefix = workerPrefix(visible.map(i => String(i.text)))
-    if (!this.options.inbox || !prefix) {
-      this.engine.deliveryFailed(ticket.id, assignment.id, 'no live worker session for this ticket')
-      return
-    }
-    for (const input of visible) this.options.inbox.write(prefix, String(input.text))
-    this.engine.inputsDelivered(ticket.id, assignment.id, visible.map(i => i.id))
   }
 
   /** The router is going away, not the workers: stop listening without stopping them, so a reloaded router in
@@ -205,15 +198,17 @@ export class PiExecutor {
     this.live.clear()
   }
 
-  stop(ticket: Ticket, assignment: Assignment, reason: string): void {
+  stop(ticket: Ticket, assignment: Assignment, _reason: string): void {
     const live = this.live.get(ticket.id)
     if (!live || live.assignmentId !== assignment.id) return
     live.unsubscribe()
     this.live.delete(ticket.id)
     // The domain already ended the ticket before this call; the worker's job is to stop touching the box.
-    live.session.abort()
+    // Not when the ticket ended because this worker said it was done: Escape is a cancellation, it cuts the
+    // worker's last turn, and pi hands the run's queued messages back to the human's input box, where a review
+    // sits unprocessed and the ticket's next step never happens.
+    if (!finishedWork(ticket) && assignment.report?.state !== 'ready') live.session.abort()
     live.session.dispose()
-    void reason
   }
 
   /** What the operator can point a browser at: which worker, in which checkout, and when it last spoke. */

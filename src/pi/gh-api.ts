@@ -12,6 +12,12 @@ export interface GhOptions {
 
 export interface GithubApiOptions extends GhOptions {
   repo: string
+  /**
+   * The pull requests whose reviews matter. Reviews have no repository-wide feed, so a read costs one call
+   * per pull request: asking for every open one made the tick grow with the repository (50 open pull requests
+   * was 51 round trips per poll), while the tickets only ever wait on the ones they follow.
+   */
+  followed?: () => Array<{ repo: string; number: number }>
 }
 
 // A pull request's conversation comments arrive with an /issues/N url too (a pull request is issue N);
@@ -96,11 +102,21 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     },
 
     async reviews(sinceId) {
-      // Reviews have no repo-level feed: read the open PRs and pull each one's reviews above the cursor.
-      const open = await openPulls()
+      const targets = options.followed?.() ?? (await openPulls()).map(pr => ({ repo: options.repo, number: pr.number }))
       const out: PrReview[] = []
-      for (const pr of open) {
-        const rows = JSON.parse((await call(['api', `repos/${options.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
+      for (const pr of targets) {
+        let rows: ReviewRow[]
+        try {
+          rows = JSON.parse((await call(['api', `repos/${pr.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
+        } catch (error) {
+          // GitHub answers 404 for a pull request that is gone, moved, or private to this account, and that is
+          // a fact about one pull, not an outage. Measured live 2026-11-07: a followed pull answering 404 threw
+          // out of the whole read, so no review reached any ticket, and once it was the only pull in the batch
+          // every poll reported the source down. Skipping it loses nothing — the cursor is per source, so a
+          // pull that becomes readable again is read from where it left off.
+          if (!/HTTP 404/.test(String(error))) throw error
+          continue
+        }
         for (const r of rows) if (r.id > sinceId && r.submitted_at) {
           out.push({ pr: pr.number, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at, body: r.body ?? '' })
         }

@@ -111,6 +111,20 @@ it('the panel links tickets to their GitHub issue and names the source', async (
 })
 
 describe('the panel and the API', () => {
+  it('refuses a malformed pause request, and stays alive to say so', async () => {
+    // Measured 2026-11-07 audit: this handler sat outside the request's try, so a body that was not JSON was an
+    // uncaught exception in the router process — a curl typo from the panel killed every running worker.
+    const f = await boot(true)
+    const res = await fetch(`http://127.0.0.1:${f.port}/api/executor/pause`, {
+      method: 'POST', body: '{paused', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1' },
+    })
+    expect(res.status).toBe(400)
+    const state = (await f.api('/api/state', '1')).json() as Record<string, unknown>
+    expect(state, 'the panel shows the same health document `superagent status` reads').toHaveProperty('health')
+    expect(f.running.workers(), 'the router is alive with its worker running').toHaveLength(1)
+    f.running.stop()
+  })
+
   it('the operator can stop a ticket, and its worker stops with it', async () => {
     const f = await boot(true)
     const [open] = (await f.api('/api/tickets', '1')).json() as unknown as Array<{ id: string }>
