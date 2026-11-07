@@ -42,6 +42,36 @@ describe('GithubSource', () => {
     })
   })
 
+  it('an ask-labelled issue is a question for the operator, never a request for the fleet', async () => {
+    const ask = issue({ issue: 300, title: 'DECIDE the release scope', labels: ['needs-decision'] })
+    const work = issue({ issue: 301, title: 'DO: ship the panel' })
+    const f = fixture([], [ask, work])
+    f.source.bootstrap()
+    expect(await f.source.poll(), 'the first look is history, not a backlog').toHaveLength(0)
+    expect(await f.source.poll(), 'an open ask must not start work, a poll after poll').toHaveLength(0)
+    expect(f.source.openThreads()?.has('#300'), 'the ask thread is still a thread the router knows').toBe(true)
+  })
+
+  it("the operator's reply to an ask is an answer, not a new request", async () => {
+    const ask = issue({ issue: 302, title: 'DECIDE the release scope', labels: ['needs-decision'] })
+    const f = fixture([comment({ issue: 302, author: 'matzen_adobe', body: 'cut 0.1.3' })], [ask])
+    f.source.bootstrap()
+    expect(await f.source.poll()).toHaveLength(0)
+    expect(await f.source.poll(), 'the ask channel delivers answers; the intake must not act on them').toHaveLength(0)
+  })
+
+  it('removing the label turns an answer into work, in the next poll', async () => {
+    const f = fixture([], [issue({ issue: 303, title: 'DO: cut 0.1.3', labels: ['needs-decision'] })])
+    f.source.bootstrap()
+    await f.source.poll()
+    expect(await f.source.poll()).toHaveLength(0)
+    const unlabelled = fixture([], [issue({ issue: 303, title: 'DO: cut 0.1.3', labels: [] })])
+    unlabelled.store.set('source:github:o/r:issues', [' #301'.trim()])
+    unlabelled.source.bootstrap()
+    const fired = await unlabelled.source.poll()
+    expect(fired.map(t => t.text), 'the label is the fence: lift it and the request lands').toEqual(['DO: cut 0.1.3'])
+  })
+
   it('a crash before the next poll rewinds the cursor: the request replays, same id — never lost', async () => {
     // Intake.tla C3/C6 in code: poll 1 emits and STAGES the cursor; the process dies
     // before poll 2 commits it. The fresh source must re-emit the very same trigger
