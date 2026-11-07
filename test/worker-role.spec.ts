@@ -55,6 +55,21 @@ describe('the worker role', () => {
     expect(lines(join(dir, 'reports.jsonl'))[1]).not.toHaveProperty('pullRequests')
   })
 
+  it('turns a worker asking a person into a blocked report, and refuses the ask that has no keyboard', () => {
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir })
+    const verdicts = f.emit('tool_call', {
+      toolName: 'ask_user_question',
+      input: { questions: [{ question: 'Fix the shared harness too?', options: [{ label: 'Just my PR' }, { label: 'A second PR' }] }] },
+    })
+    expect(verdicts.some(v => (v as { block?: boolean } | undefined)?.block), 'the ask cannot sit waiting for a keystroke in a headless tab').toBe(true)
+    expect(lines(join(dir, 'reports.jsonl')).at(-1), 'the question, with its options, reaches the router').toMatchObject({
+      state: 'blocked', question: 'Fix the shared harness too?\n1. Just my PR\n2. A second PR', origin: 'ask',
+    })
+    expect(f.emit('tool_call', { toolName: 'read', input: { path: '/w/a.ts' } }).every(v => v === undefined), 'every other tool is untouched').toBe(true)
+  })
+
   it('the guard refuses delegation inside the worker, where it now runs', () => {
     const f = fakePi()
     workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp(), PI_SUPERAGENT_WORKSPACE: '/w' })
