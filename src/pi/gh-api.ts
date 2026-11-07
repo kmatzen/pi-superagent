@@ -143,7 +143,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
         }
         if (deadPulls.delete(`${pr.repo}#${pr.number}`)) options.onPullUnreadable?.(`${pr.repo}#${pr.number}`, null)
         for (const r of rows) if (r.id > sinceId && r.submitted_at) {
-          out.push({ pr: pr.number, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at, body: r.body ?? '' })
+          out.push({ pr: pr.number, repo: pr.repo, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at, body: r.body ?? '' })
         }
       }
       return out.sort((a, b) => a.id - b.id)
@@ -179,7 +179,7 @@ export function ghPulls(options: GhOptions = {}): PullApi {
     async reviews(repo, number) {
       const rows = JSON.parse((await call(['api', `repos/${repo}/pulls/${number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
       return rows.filter(r => r.submitted_at).map(r => ({
-        pr: number, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at!, body: r.body ?? '',
+        pr: number, repo, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at!, body: r.body ?? '',
       }))
     },
   }
