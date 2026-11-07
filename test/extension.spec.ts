@@ -75,7 +75,7 @@ afterEach(() => { for (const r of live.splice(0)) r.stop() })
 function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
                  options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number;
                    workerTiming?: { pollMs?: number; livenessMs?: number }; pullApi?: PullApi; blocked?: string[];
-                   judgeFails?: boolean; workerTokenFile?: string } = {}) {
+                   judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [] }
   const api: GithubApi = options.githubApi ?? {
@@ -95,6 +95,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', githubRepo: 'o/r', prepare: options.prepare ?? 'true',
     bots: new Set(['fleet-answer-loop']), tickMs: options.tickMs ?? 5, ...(herdr ? { workers: 'herdr' as const } : {}),
     ...(options.blocked ? { blockedCommands: options.blocked } : {}),
+    ...(options.watchRepoIsAsks ? { watchRepoIsAsks: true } : {}),
     ...(options.workerTokenFile ? { workerTokenFile: options.workerTokenFile } : {}),
   }
   const workers: Spy[] = []
@@ -889,6 +890,18 @@ describe('a pull request per ticket', () => {
     expect(h.workers[0]!.prompts[0]).toContain('no GitHub access')
     expect(h.workers[0]!.prompts[0]).not.toContain('gh pr create')
   })
+
+  it('tells a worker where its code lives when the watched repository carries asks', async () => {
+    // A worker handed a checkout of the ask board edits nothing: the repository it must change is the one the
+    // request names, so in asks-only mode the brief says to clone it, and says to stop when it names none.
+    const asks = fixture(true, undefined, undefined, undefined, { pullApi: pullsFake().api, watchRepoIsAsks: true })
+    await working(asks, '499')
+    expect(asks.workers[0]!.prompts[0]).toContain('the watched repository carries asks')
+    expect(asks.workers[0]!.prompts[0]).toContain('report blocked and say what you need')
+    const code = fixture(true, undefined, undefined, undefined, { pullApi: pullsFake().api })
+    await working(code, '500')
+    expect(code.workers[0]!.prompts[0]).not.toContain('the watched repository carries asks')
+  })
 })
 
 describe('the state a router start leaves behind', () => {
@@ -922,6 +935,12 @@ describe('the state a router start leaves behind', () => {
       expect(panelToken(dir)).toBe(secret)
       expect(statSync(join(dir, 'panel-token')).mode & 0o077).toBe(0)
     } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('names the asks-only watched repository from the environment', () => {
+    const base = { PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_GITHUB_REPO: 'o/r', PI_SUPERAGENT_STATE: '/s', PI_SUPERAGENT_WORKTREES: '/w' }
+    expect(configFrom({ ...base, PI_SUPERAGENT_WATCH_REPO_ASKS: '1' })?.watchRepoIsAsks).toBe(true)
+    expect(configFrom(base)?.watchRepoIsAsks).toBeUndefined()
   })
 
   it('reads how many checkouts to keep from the environment', () => {
