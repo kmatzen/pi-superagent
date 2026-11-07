@@ -583,6 +583,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const recovered = (async () => {
     for (const ticket of repos.tickets.open()) await recover(ticket)
     const openIds = new Set(repos.tickets.open().map(t => t.id))
+    // Ninety days: the ticket row is the engine's working set, and the issue on GitHub is the record.
+    const pruned = repos.pruneClosedTickets(new Date(Date.now() - 90 * 86_400_000).toISOString())
+    if (pruned) log.line('info', 'tickets.pruned', { removed: pruned, olderThanDays: 90 })
     const swept = sweepWorktrees(cfg.worktreeRoot, openIds, cfg.keepWorktrees ?? 20)
     const homes = sweepHomes(join(cfg.dataDir, 'worker-homes'), openIds)
     if (swept.removed || swept.keptWork || homes) {

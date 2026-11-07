@@ -125,6 +125,17 @@ export class SqliteRepositories implements Repositories {
       .filter(t => t.undelivered.length > 0 || ['pending', 'running'].includes(latestAssignment(t)?.state ?? '')),
   }
 
+  /**
+   * Forget tickets that ended before a date. The audit trail is the issue on GitHub, and the ticket row is a
+   * working set: measured live, 81 of 89 tickets were closed, and every one of them was parsed on every
+   * `open()` call. Returns the rows it deleted.
+   */
+  pruneClosedTickets(olderThanIso: string): number {
+    return this.db.prepare(
+      "DELETE FROM ticket WHERE COALESCE(json_extract(value, '$.ended'), 0) != 0"
+      + " AND COALESCE(json_extract(value, '$.ended.at'), json_extract(value, '$.updatedAt')) < ?").run(olderThanIso).changes as number
+  }
+
   readonly decisions = {
     get: (id: string): Decision | undefined => this.row<Decision>('SELECT value FROM decision WHERE id = ?', id),
     save: (decision: Decision): void => {
