@@ -892,7 +892,7 @@ describe('a pull request per ticket', () => {
 })
 
 describe('the state a router start leaves behind', () => {
-  it('keeps the newest settled checkouts and deletes the rest', () => {
+  it('keeps the newest settled checkouts and deletes the rest', async () => {
     // Measured live: 570 MB a checkout, 75 of them, nothing deleted any: 43 GB of audit trail.
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-'))
     try {
@@ -902,16 +902,16 @@ describe('the state a router start leaves behind', () => {
         writeFileSync(join(root, name, 'f'), 'x')
         utimesSync(join(root, name), new Date(Date.now() - age * day), new Date(Date.now() - age * day))
       }
-      const report = sweepWorktrees(root, new Set(['tk-open']), 2)
+      const report = await sweepWorktrees(root, new Set(['tk-open']), 2)
       expect(report.removed).toBe(1)
       expect(report.keptWork).toBe(0)
       expect(readdirSync(root).sort()).toEqual(['mid', 'new', 'tk-open'])
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
-  it('says nothing when there are no checkouts yet', () => {
-    expect(sweepWorktrees(join(tmpdir(), 'sa-sweep-absent'), new Set(), 20))
-      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0 })
+  it('says nothing when there are no checkouts yet', async () => {
+    expect(await sweepWorktrees(join(tmpdir(), 'sa-sweep-absent'), new Set(), 20))
+      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, keptWorkIds: [] })
   })
 
   it('makes one panel secret per state directory, readable only by its owner', () => {
@@ -960,28 +960,28 @@ describe('the sweep of settled checkouts', () => {
   const aged = (dir: string, days: number) =>
     utimesSync(dir, new Date(Date.now() - days * 86_400_000), new Date(Date.now() - days * 86_400_000))
 
-  it('deletes a settled checkout whose work is on a remote', () => {
+  it('deletes a settled checkout whose work is on a remote', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-git-'))
     try {
       seed(root, 'pushed', true)
       seed(root, 'keepme', false)
       aged(join(root, 'pushed'), 9)
-      expect(sweepWorktrees(root, new Set(), 1)).toMatchObject({ removed: 1, keptWork: 0 })
+      expect(await sweepWorktrees(root, new Set(), 1)).toMatchObject({ removed: 1, keptWork: 0 })
       expect(readdirSync(root)).toContain('keepme')
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
-  it('keeps a settled checkout whose commits exist on no remote, and says so', () => {
+  it('keeps a settled checkout whose commits exist on no remote, and says so', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-dirty-'))
     try {
       seed(root, 'unpushed', false)
       aged(join(root, 'unpushed'), 9)
-      expect(sweepWorktrees(root, new Set(), 0)).toMatchObject({ removed: 0, keptWork: 1 })
+      expect(await sweepWorktrees(root, new Set(), 0)).toMatchObject({ removed: 0, keptWork: 1, keptWorkIds: ['unpushed'] })
       expect(existsSync(join(root, 'unpushed', 'repo', 'f'))).toBe(true)
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
-  it('deletes a workspace that never cloned, and counts the split it deleted', () => {
+  it('deletes a workspace that never cloned, and counts the split it deleted', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-bare-'))
     try {
       mkdirSync(join(root, 'notes'))
@@ -989,7 +989,7 @@ describe('the sweep of settled checkouts', () => {
       mkdirSync(join(root, 'unused'))
       aged(join(root, 'notes'), 9)
       aged(join(root, 'unused'), 8)
-      expect(sweepWorktrees(root, new Set(), 0)).toMatchObject({ removed: 2, bare: 1, empty: 1 })
+      expect(await sweepWorktrees(root, new Set(), 0)).toMatchObject({ removed: 2, bare: 1, empty: 1 })
       expect(readdirSync(root)).toEqual([])
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
