@@ -211,7 +211,10 @@ export class PiExecutor {
     live.unsubscribe()
     this.live.delete(ticket.id)
     // The domain already ended the ticket before this call; the worker's job is to stop touching the box.
-    live.session.abort()
+    // Not when the ticket ended because this worker said it was done: Escape is a cancellation, it cuts the
+    // worker's last turn, and pi hands the run's queued messages back to the human's input box, where a review
+    // sits unprocessed and the ticket's next step never happens.
+    if (assignment.report?.state !== 'ready') live.session.abort()
     live.session.dispose()
     void reason
   }
