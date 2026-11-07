@@ -21,6 +21,12 @@ export interface RouterConfig {
   workerTokenFile?: string
   /** Report a worker that has run this long without finishing. Reports; never kills. */
   workerDeadlineHours?: number
+  /**
+   * The watched repository carries asks, not code: don't hand a worker a checkout of the ask board, and tell it
+   * to clone the repository the request names. Off by default, since a single-repository deployment works code
+   * out of the repository it watches.
+   */
+  watchRepoIsAsks?: boolean
   judgeThinking?: string
   /** 'herdr': each worker is its own pi session in a herdr tab. Unset, workers run in-process (tests only). */
   workers?: 'herdr'
