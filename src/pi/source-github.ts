@@ -55,7 +55,12 @@ export interface GithubSourceOptions {
   bots?: ReadonlySet<string>
   people?: ReadonlySet<string>
   selfMarker?: string
+  /** Issues under this label are questions for the operator, not requests for the fleet: the intake
+   *  skips them, and the ask channel (scripts/ops-ask plus the ops-issue-poll extension) delivers them. */
+  askLabel?: string
 }
+
+export const ASK_LABEL = 'needs-decision'
 
 const sinceKey = (repo: string) => `source:github:${repo}:since`
 /** Group rows by a key, keeping the order in which the keys first appear. */
@@ -83,6 +88,8 @@ export class GithubSource {
    *  produced are in the engine — commit-at-emit + crash = cursor past a request never accepted. */
   private staged: Array<[string, unknown]> = []
   private lastOpen: ReadonlySet<string> | undefined
+  private askIssues: ReadonlySet<number> = new Set()
+  private get askLabel(): string { return this.options.askLabel ?? ASK_LABEL }
 
   constructor(private readonly api: GithubApi, private readonly options: GithubSourceOptions,
               private readonly store: PositionStore, private readonly now: () => number = () => Date.now()) {}
@@ -110,6 +117,9 @@ export class GithubSource {
     const out: Trigger[] = []
     for (const c of incoming) {
       if (c.at > newest) newest = c.at
+      // The operator's reply to an ask is an answer, and the answer channel delivers it; treated as a
+      // comment here it would reach the engine as a request on a ticket that does not exist.
+      if (this.askIssues.has(c.issue)) continue
       if (c.author === this.options.self || c.body.includes(this.options.selfMarker ?? REPLY_MARKER)) continue
       out.push(this.toTrigger(c))
     }
@@ -121,12 +131,15 @@ export class GithubSource {
   private async issueTriggers(): Promise<Trigger[]> {
     const stored = this.store.get<string[]>(issuesKey(this.options.repo))
     const open = await this.api.issues('open')
+    this.askIssues = new Set(open.filter(i => i.labels.includes(this.askLabel)).map(i => i.issue))
     const pulls = this.api.pullsOpen ? await this.api.pullsOpen() : []
     this.lastOpen = new Set<string>([...open.map(i => `#${i.issue}`), ...pulls.map(n => `#${n}`)])
     const seen = new Set(stored ?? [])
     // Issues already open at the first look are history: the first version fired them all as requests.
     if (!stored) {
-      for (const issue of open) seen.add(`#${issue.issue}`)
+      // An ask-labelled issue stays unseen on purpose: removing the label is how the operator turns an
+      // answer into work, and a seeded key would swallow that request forever.
+      for (const issue of open) if (!issue.labels.includes(this.askLabel)) seen.add(`#${issue.issue}`)
       // The seed commits now, not at the next poll: losing it to a crash would fire the whole backlog.
       this.store.set(issuesKey(this.options.repo), [...seen])
       if (open.length > 0) return []
@@ -136,6 +149,7 @@ export class GithubSource {
     // A closed issue leaves the seen set, so reopening it fires afresh: closing, then reopening, is a person saying go again.
     for (const key of [...seen]) if (!openKeys.has(key)) seen.delete(key)
     for (const issue of open) {
+      if (issue.labels.includes(this.askLabel)) continue
       const key = `#${issue.issue}`
       if (!seen.has(key)) {
         seen.add(key)
