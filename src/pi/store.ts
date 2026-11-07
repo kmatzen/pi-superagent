@@ -49,6 +49,10 @@ export class SqliteRepositories implements Repositories {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const result = work()
+      // An async body returns before its writes land, and the COMMIT below commits nothing it covers.
+      if (result && typeof (result as { then?: unknown }).then === 'function') {
+        throw new Error('atomic work must be synchronous: an async body commits before its writes land')
+      }
       this.db.exec('COMMIT')
       return result
     } catch (error) {
@@ -119,6 +123,17 @@ export class SqliteRepositories implements Repositories {
       "SELECT value FROM ticket WHERE json_array_length(json_extract(value, '$.undelivered')) > 0"
       + " OR json_extract(value, '$.assignments[#-1].state') IN ('pending','running') ORDER BY seq")
       .filter(t => t.undelivered.length > 0 || ['pending', 'running'].includes(latestAssignment(t)?.state ?? '')),
+  }
+
+  /**
+   * Forget tickets that ended before a date. The audit trail is the issue on GitHub, and the ticket row is a
+   * working set: measured live, 81 of 89 tickets were closed, and every one of them was parsed on every
+   * `open()` call. Returns the rows it deleted.
+   */
+  pruneClosedTickets(olderThanIso: string): number {
+    return this.db.prepare(
+      "DELETE FROM ticket WHERE COALESCE(json_extract(value, '$.ended'), 0) != 0"
+      + " AND COALESCE(json_extract(value, '$.ended.at'), json_extract(value, '$.updatedAt')) < ?").run(olderThanIso).changes as number
   }
 
   readonly decisions = {

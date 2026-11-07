@@ -14,6 +14,11 @@ export interface RouterConfig {
   workerQuietMinutes?: number
   /** Settled checkouts to keep at startup, newest first. Measured: each one is about 570 MB. */
   keepWorktrees?: number
+  /**
+   * A file holding a scoped GitHub token to hand a worker, so it can push a branch and open a pull request as
+   * that token instead of as the operator. Unset, the brief tells the worker it cannot push.
+   */
+  workerTokenFile?: string
   judgeThinking?: string
   /** 'herdr': each worker is its own pi session in a herdr tab. Unset, workers run in-process (tests only). */
   workers?: 'herdr'
@@ -81,13 +86,18 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
 ].join('\n')
 
 /** How work reaches a repository: a pull request the ticket then waits on. Work that changes no repository ends as before. */
-export const pullBrief = (closes?: string): string => [
+export const pullBrief = (closes?: string, canPush = true): string => canPush ? [
   'If the request changes code or files in a GitHub repository, work in a git checkout inside your workspace on a new branch,',
   'push it, and open a pull request with `gh pr create`, ready for review rather than a draft. Its body says what changed and',
   `why${closes ? `, and ends with \`Closes ${closes}\` when merging it completes the request` : ''}. Report ready with pullRequests`,
   'set to its URL: the ticket then waits for the pull request, comments and reviews on it come to you, and the ticket ends when',
   'it is merged or closed. Do not comment on the pull request yourself. A request that changes no repository, such as a',
   'question, an investigation or an operation, reports ready without one.',
+].join('\n') : [
+  'If the request changes code or files, work in the git checkout inside your workspace on a new branch and commit it',
+  'there. This worker has no GitHub access, so do not try to push or open a pull request: report ready with `branch` set',
+  'to the branch name, and say in the summary that the commits are in the ticket workspace. A request that changes no',
+  'repository, such as a question, an investigation or an operation, reports ready as it is.',
 ].join('\n')
 
 export function policyOf(config: RouterConfig): Policy {
