@@ -25,7 +25,8 @@ import { briefFor, ghAccounts, loadSdk, policyOf, pullBrief, scopeOf, type Route
 
 export interface PiLike {
   registerTool(tool: RegisteredTool): void
-  sendUserMessage(text: string, options?: { deliverAs?: 'text' | 'prompt' }): void
+  // pi reads only these two and steers mid-turn on any other value (agent-session.js:1640), which is how 'text' injected unchosen.
+  sendUserMessage(text: string, options?: { deliverAs?: 'steer' | 'followUp' }): void
   on(event: string, handler: (payload?: unknown) => void): () => void
 }
 
@@ -165,7 +166,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     } catch (error) {
       judgeFailed = true
       log.line('error', 'judge.open_failed', { error: String(error).slice(0, 220), queued: judgeQueue.length })
-      for (const body of judgeQueue.splice(0)) pi.sendUserMessage(body, { deliverAs: 'text' })
+      // One turn each: steered into the running turn, a burst is answered out of order and the tail expires.
+      for (const body of judgeQueue.splice(0)) pi.sendUserMessage(body, { deliverAs: 'followUp' })
     }
   }
   const pilot: SessionPilot = {
@@ -182,7 +184,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       judgeQueue.push(body)
       if (judgeFailed) {
         log.line('warn', 'eval.deliver', { eval: evalId, bytes: body.length, target: 'pane-fallback' })
-        pi.sendUserMessage(body, { deliverAs: 'text' })
+        pi.sendUserMessage(body, { deliverAs: 'followUp' })
         return
       }
       log.line('info', 'eval.deliver', { eval: evalId, bytes: body.length, target: 'judge-starting' })

@@ -28,17 +28,19 @@ const invoke0 = (pi: FakePi, name: string, args: object): SyncTool =>
 interface FakePi extends PiLike {
   tools: Map<string, RegisteredTool>
   sent: string[]
+  modes: string[]
   handlers: Map<string, Array<(p?: unknown) => void>>
 }
 
 function fakePi(): FakePi {
   const tools = new Map<string, RegisteredTool>()
   const sent: string[] = []
+  const modes: string[] = []
   const handlers = new Map<string, Array<(p?: unknown) => void>>()
   return {
-    tools, sent, handlers,
+    tools, sent, modes, handlers,
     registerTool: t => { tools.set(t.name, t) },
-    sendUserMessage: text => { sent.push(text) },
+    sendUserMessage: (text, options) => { sent.push(text); modes.push(options?.deliverAs ?? '') },
     on: (event, handler) => { handlers.set(event, [...(handlers.get(event) ?? []), handler]); return () => { handlers.set(event, []) } },
   }
 }
@@ -72,7 +74,8 @@ afterEach(() => { for (const r of live.splice(0)) r.stop() })
 
 function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
                  options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number;
-                   workerTiming?: { pollMs?: number; livenessMs?: number }; pullApi?: PullApi; blocked?: string[] } = {}) {
+                   workerTiming?: { pollMs?: number; livenessMs?: number }; pullApi?: PullApi; blocked?: string[];
+                   judgeFails?: boolean } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [] }
   const api: GithubApi = options.githubApi ?? {
@@ -98,11 +101,13 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   const judgeSessions: string[] = []
   const loaders: Array<Record<string, unknown>> = []
   const judgeListeners: Array<(event: { type: string }) => void> = []
+  const judgeFails = options.judgeFails === true
   const sdk: SdkSurface = {
     createAgentSession: async (options) => {
       const tool = (options.customTools as RegisteredTool[])[0]!
       // The judge session carries the decide tool; every other session is a ticket worker.
       if (tool.name === 'ticket_decide') {
+        if (judgeFails) throw new Error('no sdk for the judge')
         judgeSessions.push('opened')
         judge.report = args => tool.execute('judge-1', args as never)
         return { session: { sessionId: 'judge', prompt: async (t: string) => { judge.prompts.push(t) }, subscribe: (l: (event: { type: string }) => void) => { judgeListeners.push(l); return () => {} }, abort: () => {}, dispose: () => {} } }
@@ -449,6 +454,17 @@ describe('the router extension', () => {
     expect(log, 'the pane must not be the judge').not.toMatch(/target=pane-fallback/)
     expect(log).toMatch(/eval\.decided eval=\S+ kind=accept/)
     expect(log).toMatch(/tick n=\d+ inflight=/)
+  })
+
+  it('the pane fallback gives each queued judgement its own turn', async () => {
+    const f = fixture(true, undefined, undefined, undefined, { judgeFails: true })
+    f.addComment('511', 'octocat', 'ship it tonight')
+    f.addComment('512', 'octocat', 'cut the release', '2026-11-05T09:01:00Z')
+    await f.running.tick()
+    await until(() => f.pi.modes.length >= 1)
+    f.decide('accept')
+    await until(() => f.pi.modes.length >= 2)
+    expect(f.pi.modes, 'steered into the running turn, a burst is answered out of order').toEqual(['followUp', 'followUp'])
   })
 
   it('tickets_open tells a person what is running and what it waits for', async () => {
