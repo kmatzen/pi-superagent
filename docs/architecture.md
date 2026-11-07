@@ -1,53 +1,37 @@
 # Architecture
 
-The router connects GitHub, the ticket engine and a set of pi workers. The diagram follows one
-accepted request from its first poll through review. [Design decisions](design-decisions.md) ·
-[Formal verification](formal-verification.md)
+A GitHub issue is where people talk about the work. A ticket is how pi-superagent remembers whose
+turn it is. The **router** keeps the two in step. It watches the repository, asks a **judge** to
+interpret new requests, and gives each accepted task to a **worker** with its own terminal and
+checkout.
 
-## The path of one request
+## Follow a comment through the system
 
-```
- GitHub: issues, comments, reviews                     the only way in
-     │  polled every 30 s through the gh CLI            gh-api.ts
-     ▼
- GitHub source        seed rule · deferred read positions · own-writing filter
-     │  Trigger: content-derived id, thread #N           source-github.ts
-     ▼
- engine               scope: GitHub association or login list          src/core, router.ts
-     │                policy gate: a person, not a bot
-     │  Evaluation: the thread's waiting triggers
-     ▼
- judge                one candidate at a time, answered through ticket_decide
-     │  accept                                          assessor.ts, judge.ts
-     ▼
- engine               ticket + pending assignment; acknowledgement queued
-     ▼
- executor             a pi worker in its own herdr tab and workspace
-     │  ticket_report: ready · blocked · failed · cancelled, and any pull requests
-     ▼                                                  executor.ts, herdr-workers.ts
- engine               pull requests bound first; the report lands on the ticket;
-     │                the receipt is queued
-     ▼
- outbox               the comment, posted on the issue once  outbox.ts
-     ⋮
- pull request         merged or closed: the ticket ends, and the issue hears it
-                      read each poll, or every 2 min elsewhere   pulls.ts
-```
+Imagine adding “Please keep the keyboard shortcut” to an issue while a worker is editing the menu.
+On its next poll, the router reads your comment through the GitHub CLI. The GitHub source turns it
+into a **trigger**, a message with an ID and a thread. The engine checks who sent it, finds the
+ticket that already owns the thread and queues the comment for that worker.
 
-The router records progress at each handoff so it can recover after a crash.
+A new thread takes one extra step. The judge reads the request and calls `ticket_decide`. An
+acceptance opens a ticket and queues an acknowledgement on GitHub. The worker later calls
+`ticket_report` with its outcome. If the report links a pull request, the router records that link
+before the engine processes the report. That’s how an issue can stay active through code review
+even after the worker has finished its first edit.
 
-- **GitHub to source.** Read positions are staged during a poll and committed at the next one, after the
-  engine holds every trigger they produced. A crash replays the last poll instead of skipping it.
-- **Source to engine.** Comment IDs use the author, time and body. Issue IDs use the issue number,
-  title and last update. Reviews use GitHub’s review ID. The engine accepts each trigger ID once.
-- **Inside the engine.** Each command is one SQLite transaction: its writes land together or not at all.
-- **Engine to executor.** The engine's calls to start, deliver to and stop a worker run only after the
-  command commits, so a worker never acts on a write that could still roll back.
-- **Executor and worker.** A worker writes its events and reports to files; the router reads them from a
-  cursor it persists. A restarted router resumes reading where the last one stopped, and adopts the
-  running worker instead of starting a second.
-- **Outbox to GitHub.** A message is marked sent only once GitHub accepts it. A retry first looks for the
-  comment on the issue, in case the last attempt landed before the process died.
+## If the router restarts halfway through
+
+Suppose the router reads your comment and loses power a moment later. Whether the worker received
+it depends on where the router stopped. Three records let it resume the conversation.
+
+- **The GitHub read position** records how far the router has read. A poll saves its new position
+  at the start of the next poll, after the engine has received the triggers. On replay, stable IDs
+  let the engine recognize a comment, issue or review it has already seen.
+- **The ticket and worker records** say who has the assignment. Each engine command commits its
+  changes in one SQLite transaction. Worker starts, deliveries and stops follow that commit.
+  The worker’s tab and files can outlive the router, which uses a saved position to resume reading
+  the worker’s events and reports.
+- **The outbox** records what the router owes the GitHub thread. If a reply was pending when the
+  router stopped, a retry looks for the comment on GitHub before posting it again.
 
 ## The parts
 

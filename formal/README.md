@@ -1,7 +1,9 @@
 # TLA+ models
 
-TLC explores the possible event orderings in three bounded models. Each model covers a failure that
-can be hard to reproduce in a running router, such as a crash between reading a comment and saving it.
+A worker finishes just as the router restarts. Should the router start another worker, adopt the
+one it finds, or close the tab? Small differences in timing matter here. These three models let
+TLC, the TLA+ model checker, explore the possible orderings within a set of bounds. Start with
+the model closest to the code you’re changing.
 
 | Specification | Code it models | Distinct states |
 | --- | --- | ---: |
