@@ -79,7 +79,8 @@ describe('herdr workers', () => {
     expect(m.calls[0]).toMatch(/^tabCreate #7 · DO: rotate the keys /)
     expect(m.calls[0]).toContain('"PI_SUPERAGENT_ROLE":"worker"')
     expect(m.calls[0]).toContain(`"PI_SUPERAGENT_WORKER_DIR":"${join(dir, 'workers', session.sessionId)}"`)
-    expect(m.calls[1]).toBe(`agentStart ${agentName('#7', session.sessionId)} --session-id ${session.sessionId}`)
+    // --no-extensions: a worker session must not load the operator's harness extensions with the operator's credentials.
+    expect(m.calls[1]).toBe(`agentStart ${agentName('#7', session.sessionId)} --session-id ${session.sessionId} --no-extensions`)
     expect(session.watch).toContain('superagent')
   })
 

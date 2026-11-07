@@ -9,6 +9,8 @@ import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-panel-')); dirs.push(d); return d }
+// The POST routes take the panel secret from the state directory the router made on its first start.
+const panelSecret = (dir: string) => readFileSync(join(dir, 'panel-token'), 'utf8').trim()
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
 
 const piStub = (): PiLike & { tools: Map<string, RegisteredTool> } => {
@@ -127,7 +129,7 @@ describe('the panel and the API', () => {
     // uncaught exception in the router process — a curl typo from the panel killed every running worker.
     const f = await boot(true)
     const res = await fetch(`http://127.0.0.1:${f.port}/api/executor/pause`, {
-      method: 'POST', body: '{paused', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1' },
+      method: 'POST', body: '{paused', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir) },
     })
     expect(res.status).toBe(400)
     const state = (await f.api('/api/state', '1')).json() as Record<string, unknown>
@@ -140,12 +142,12 @@ describe('the panel and the API', () => {
     const f = await boot(true)
     const [open] = (await f.api('/api/tickets', '1')).json() as unknown as Array<{ id: string }>
     expect(f.running.workers().map(w => w.ticketId)).toEqual([open!.id])
-    const res = await fetch(`http://127.0.0.1:${f.port}/api/tickets/${open!.id}/stop`, { method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1' } })
+    const res = await fetch(`http://127.0.0.1:${f.port}/api/tickets/${open!.id}/stop`, { method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir) } })
     expect(res.status).toBe(200)
     expect((await f.api('/api/tickets', '1')).json()).toEqual([])
     await new Promise(r => setTimeout(r, 30))
     expect(f.running.workers(), 'the stop reached the worker').toEqual([])
-    const missing = await fetch(`http://127.0.0.1:${f.port}/api/tickets/nope/stop`, { method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1' } })
+    const missing = await fetch(`http://127.0.0.1:${f.port}/api/tickets/nope/stop`, { method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir) } })
     expect(missing.status).toBe(404)
     f.running.stop()
   })
@@ -179,7 +181,7 @@ describe('the panel and the API', () => {
   it('pause round-trips through the API and stops new work', async () => {
     const f = await boot(false)
     const res = await fetch(`http://127.0.0.1:${f.port}/api/executor/pause`, {
-      method: 'POST', headers: { 'x-superagent-request': '1', host: `127.0.0.1:${f.port}`, 'content-type': 'application/json' }, body: JSON.stringify({ paused: true }),
+      method: 'POST', headers: { 'x-superagent-request': '1', host: `127.0.0.1:${f.port}`, 'content-type': 'application/json', 'x-superagent-token': panelSecret(f.dir) }, body: JSON.stringify({ paused: true }),
     })
     expect(await res.json()).toEqual({ paused: true })
     expect(f.running.isPaused()).toBe(true)
@@ -221,4 +223,18 @@ const rawRequest = (port: number, request: string): Promise<string> => new Promi
   socket.on('data', c => { data += c })
   socket.on('end', () => resolve(data))
   socket.on('error', reject)
+})
+
+describe('the panel POST secret', () => {
+  it('refuses a POST that carries no panel token, and changes nothing', async () => {
+    // A localhost bind keeps remote callers out; it keeps a worker process out of nothing. Pause is a write.
+    const f = await boot(true)
+    const before = (await f.api('/api/state', '1')).json() as { paused: boolean }
+    const res = await fetch(`http://127.0.0.1:${f.port}/api/executor/pause`, {
+      method: 'POST', body: '{"paused":true}', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1' },
+    })
+    expect(res.status).toBe(403)
+    const after = (await f.api('/api/state', '1')).json() as { paused: boolean }
+    expect(after.paused, 'a refused pause leaves the router running the same work').toBe(before.paused)
+  })
 })

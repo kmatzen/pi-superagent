@@ -15,6 +15,15 @@ export interface WorkspaceRequest {
   extra?: Record<string, string>
 }
 
+/** Names that hand a worker the operator's identity: token paths, agent config, cloud credentials. */
+const LEAKS = /^(PI_SUPERAGENT_(GITHUB_TOKEN_FILE|GITHUB_SELF|STATE|WORKTREES)|PI_OPS_|SSH_AUTH_SOCK|AWS_|GOOGLE_|GH_TOKEN|GITHUB_TOKEN)/
+
+/** The base of a worker's environment: the operator's secrets stay in the router's process. */
+export function workerBase(source: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(source)
+    .filter((entry): entry is [string, string] => entry[1] !== undefined && !LEAKS.test(entry[0])))
+}
+
 export interface PreparedWorkspace {
   dir: string
   path: string
@@ -40,16 +49,26 @@ export function prepareWorkspace(request: WorkspaceRequest): PreparedWorkspace {
   }
   const bin = shims(request.stateDir, request.blockedCommands ?? [])
   const path = `${bin}:${process.env.PATH ?? ''}`
+  // A ticket's text is prompt content, so a worker's HOME is its own: the real HOME holds the gh keychain,
+  // ~/.ssh and the token files the blocked-command shims only paper over. Outside the checkout, because a
+  // checkout directory that is not empty means "already cloned" to checkoutRepository.
+  const home = join(request.stateDir, 'worker-homes', request.ticketId)
+  mkdirSync(home, { recursive: true, mode: 0o700 })
   const env: Record<string, string> = {
-    ...process.env as Record<string, string>,
+    ...workerBase(process.env),
     PATH: path,
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, '.config'),
+    GH_CONFIG_DIR: join(home, '.config', 'gh'),
     PI_SUPERAGENT_TICKET: request.ticketId,
     PI_SUPERAGENT_DIR: dir,
     ...request.extra,
   }
+  // The prepare script is the operator's own file, so it runs with the operator's environment.
+  const prepareEnv = { ...process.env as Record<string, string>, PATH: path, PI_SUPERAGENT_TICKET: request.ticketId, PI_SUPERAGENT_DIR: dir }
   if (request.prepare) {
     try {
-      execFileSync('/bin/bash', ['-lc', request.prepare], { cwd: dir, env, encoding: 'utf8', timeout: 300_000, stdio: ['ignore', 'pipe', 'pipe'] })
+      execFileSync('/bin/bash', ['-lc', request.prepare], { cwd: dir, env: prepareEnv, encoding: 'utf8', timeout: 300_000, stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (error) {
       const e = error as { stderr?: string; message?: string; signal?: string }
       throw new WorkspaceError('prepare-failed', `prepare command failed for ${request.ticketId}`, e.stderr || e.message || e.signal || 'unknown')

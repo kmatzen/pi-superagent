@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import superagent, { activationRefusal, createRouterExtension, configFrom, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import superagent, { activationRefusal, createRouterExtension, configFrom, panelToken, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
@@ -878,5 +878,42 @@ describe('a pull request per ticket', () => {
     const g = fixture(true, undefined, undefined, undefined, { pullApi: pullsFake().api, blocked: ['gh'] })
     await working(g, '497')
     expect(g.workers[0]!.prompts[0]).not.toContain('gh pr create')
+  })
+})
+
+describe('the state a router start leaves behind', () => {
+  it('keeps the newest settled checkouts and deletes the rest', () => {
+    // Measured live: 570 MB a checkout, 75 of them, nothing deleted any: 43 GB of audit trail.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-'))
+    try {
+      const day = 86_400_000
+      for (const [name, age] of [['old', 9], ['mid', 5], ['new', 1], ['tk-open', 7]] as const) {
+        mkdirSync(join(root, name))
+        writeFileSync(join(root, name, 'f'), 'x')
+        utimesSync(join(root, name), new Date(Date.now() - age * day), new Date(Date.now() - age * day))
+      }
+      expect(sweepWorktrees(root, new Set(['tk-open']), 2)).toBe(1)
+      expect(readdirSync(root).sort()).toEqual(['mid', 'new', 'tk-open'])
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('says nothing when there are no checkouts yet', () => {
+    expect(sweepWorktrees(join(tmpdir(), 'sa-sweep-absent'), new Set(), 20)).toBe(0)
+  })
+
+  it('makes one panel secret per state directory, readable only by its owner', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sa-panel-'))
+    try {
+      const secret = panelToken(dir)
+      expect(secret).toMatch(/^[0-9a-f]{32}$/)
+      expect(panelToken(dir)).toBe(secret)
+      expect(statSync(join(dir, 'panel-token')).mode & 0o077).toBe(0)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('reads how many checkouts to keep from the environment', () => {
+    const base = { PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_GITHUB_REPO: 'o/r', PI_SUPERAGENT_STATE: '/s', PI_SUPERAGENT_WORKTREES: '/w' }
+    expect(configFrom({ ...base, PI_SUPERAGENT_KEEP_WORKTREES: '7' })?.keepWorktrees).toBe(7)
+    expect(configFrom(base)?.keepWorktrees).toBeUndefined()
   })
 })

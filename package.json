@@ -49,7 +49,6 @@
     "docs",
     "formal",
     "launchd",
-    "vendor/dsh-superagent",
     "config.example.env",
     "README.md",
     "ADAPTATION.md",

@@ -147,3 +147,26 @@ or close the issue to stop.
 **A worker could not start.** Read the error on the issue. Check repository access if the clone
 failed, or inspect `PI_SUPERAGENT_PREPARE` if you use a custom setup command. The router retries
 on each poll and posts the launch failure once.
+
+## The panel's write endpoints (2026-11-10)
+
+`POST /api/executor/pause` and `POST /api/tickets/<id>/stop` need the panel secret, because binding to
+`127.0.0.1` keeps out remote callers and keeps out nothing local. The router writes it to
+`panel-token` in the state directory (`0600`) at startup:
+
+```sh
+curl -X POST -H "x-superagent-request: 1" -H "x-superagent-token: $(cat ~/.pi/superagent/panel-token)" \
+  -H 'content-type: application/json' -d '{"paused":true}' http://127.0.0.1:8788/api/executor/pause
+```
+
+## What a worker is given (2026-11-10)
+
+A ticket's text is prompt content, so a worker session now starts with `--no-extensions` (the harness in
+`~/.pi/agent` is yours, with your watchers and your credentials) and a `HOME` under
+`<state>/worker-homes/<ticket>`, with `PI_SUPERAGENT_GITHUB_TOKEN_FILE`, `PI_OPS_*`, `SSH_AUTH_SOCK`,
+`GH_TOKEN`, `GITHUB_TOKEN` and cloud credential names removed from its environment.
+
+The consequence to plan for: a worker can no longer run `gh` as you, so it cannot open a pull request
+with your login. It works in its checkout, commits to its branch, and reports; the router's receipts and
+reports carry the ticket. To hand a worker GitHub access, give it a fine-grained single-repository token
+in that home directory — do not restore the ambient login, which is the operator's whole account.
