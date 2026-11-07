@@ -206,6 +206,27 @@ describe('PiExecutor', () => {
     expect([s.aborted, s.disposed]).toEqual([1, 1])
   })
 
+  it('a ticket that ended because its worker finished does not cut that worker off mid-sentence', async () => {
+    // Escape is a cancellation: pi aborts the run and puts anything queued for it back in the human's input box.
+    // A worker that just reported ready is finishing its own turn, and the messages waiting for it are its next work.
+    const f = fixture()
+    f.executor.start(ticket(), assignment())
+    await f.executor.idle()
+    const done = ticket({ assignments: [{ id: 'A1', report: { state: 'ready', summary: 'merged the fix', at: 'now' } } as unknown as Assignment] })
+    f.executor.stop(done, done.assignments[0]!, 'ready')
+    expect(f.sessions[0]!.aborted, 'no Escape: the run ends by itself').toBe(0)
+    expect(f.sessions[0]!.disposed, 'its session is still released').toBe(1)
+  })
+
+  it('a ticket cancelled while its worker works does cut that worker off', async () => {
+    const f = fixture()
+    f.executor.start(ticket(), assignment())
+    await f.executor.idle()
+    const running = ticket({ assignments: [{ id: 'A1', report: { state: 'progress', summary: 'halfway', at: 'now' } } as unknown as Assignment] })
+    f.executor.stop(running, running.assignments[0]!, 'the conversation closed on GitHub')
+    expect(f.sessions[0]!.aborted).toBe(1)
+  })
+
   it('tells the deployment who ended each run: the worker, a run with no report, a crash, a failed launch', async () => {
     const f = fixture({}, { launch: 'T2' })
     f.executor.start(ticket(), assignment())
