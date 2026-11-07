@@ -49,6 +49,10 @@ export class SqliteRepositories implements Repositories {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const result = work()
+      // An async body returns before its writes land, and the COMMIT below commits nothing it covers.
+      if (result && typeof (result as { then?: unknown }).then === 'function') {
+        throw new Error('atomic work must be synchronous: an async body commits before its writes land')
+      }
       this.db.exec('COMMIT')
       return result
     } catch (error) {
