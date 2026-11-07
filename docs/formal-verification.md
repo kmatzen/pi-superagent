@@ -1,8 +1,16 @@
 # Formal verification
 
-TLC, the TLA+ model checker, explores every reachable state within the bounds of three models.
-Together they cover the order in which the engine handles tickets, the source reads GitHub events
-and the router cleans up worker tabs.
+When is it safe to mark a GitHub comment as read? An early router saved its place as soon as it
+read the comment. If it crashed before passing the message to the ticket engine, it restarted one
+comment too far ahead. From the requester’s point of view, the worker had simply ignored them.
+
+TLC found the precise sequence that lost the comment. It works by trying every ordering of events
+allowed by a small model written in TLA+. That sequence became a regression test, and the router
+now waits until the engine has received the comment before saving its place.
+
+The project checks three such models. The ticket model asks who owns each conversation and how
+work can end. The intake model follows messages across polls and crashes. The worker model follows
+terminal tabs as agents start, finish and leave tabs behind.
 
 | Specification | Models | States explored (distinct) | Claims |
 | --- | --- | --- | --- |
@@ -10,10 +18,9 @@ and the router cleans up worker tabs.
 | [`Intake.tla`](../formal/Intake.tla) | the GitHub source (`source-github.ts`) | 565,551 (113,281) | 6 |
 | [`Workers.tla`](../formal/Workers.tla) | worker records, tabs and agents (`herdr-workers.ts`) | 347 (94) | 5 |
 
-All listed properties hold under the configurations checked. The intake model exposed a bug in
-shipped code. The router could save a cursor, crash before delivering its comment, then restart
-past the missing request. TLC’s sequence of events became a regression test. The checker also
-caught two modeling errors involving a dropped evaluation batch and a transition that revived a stopped ticket.
+The counts include repeat visits to a state. The numbers in parentheses count each distinct
+state once. All listed properties hold within the bounds below. TLC also caught two errors in the
+models themselves, one that dropped a batch of requests and another that revived a stopped ticket.
 
 ## Running the checks
 

@@ -1,24 +1,25 @@
 # Operator guide
 
-Use the GitHub thread to request work and answer the worker. Open its herdr tab when you need to
-inspect the session or intervene directly.
+Most of the time, the issue is the only window you need. Ask for a change there, answer any questions
+in the thread, and review the pull request when it arrives. If you want to see a command run or help
+a worker past a snag, its terminal is open to you too.
 
-## Asking for work
+## Ask for work
 
-Open an issue on the watched repository (`PI_SUPERAGENT_GITHUB_REPO`) and describe the change you want. Include anything the worker should preserve.
+Open an issue in the repository you configured with `superagent init`. A sentence about the outcome
+and one detail that matters to you usually give the worker a good place to start.
 
-```
-Title: Rename the Export button to "Ship"
-Body:  The primary button in the header should say Ship instead of Export. Keep the keyboard shortcut.
-```
+> **Show the export shortcut in the Help menu**
+>
+> I always forget how to export from the keyboard. Could you show the existing shortcut beside
+> Export in the Help menu? Please use the same wording as the File menu.
 
-When the judge accepts the request, the router replies on the issue and opens a worker tab in the
-`superagent` herdr workspace. Look for the issue number in the tab title. The worker’s report
-appears on the same thread.
+The **judge** reads new requests and decides which ones call for action. When it accepts yours,
+the router acknowledges it on the issue. Look for a tab with that issue number in the
+`superagent` herdr workspace. Inside is the **worker**, the pi session doing the work.
 
-The judge accepts a concrete action someone asks the agent to take, even one that calls itself a test.
-It ignores chatter, notes addressed to other people, and new requests on a thread that already has an
-open ticket. An ignore posts nothing on the issue; the reason is in the engine log.
+An aside to a teammate can stay an aside. If the judge passes over a comment, you can find its
+reason in the engine log. Once your issue has an open ticket, further comments go to the worker.
 
 ### Who can start work
 
@@ -64,13 +65,14 @@ curl -X POST -H 'x-superagent-request: 1' "http://127.0.0.1:8788/api/tickets/<id
 
 ## Watch a worker
 
-- **The herdr workspace `superagent`.** The `engine log` tab streams every poll, judgement, launch and
-  receipt. Each worker has its own tab, labelled `#<issue> · <title>`; it is an ordinary pi session, so
-  you can read along, type into it, or press Esc to interrupt it.
-- **The panel** at <http://127.0.0.1:8788/>. It shows what needs a person, what is running and queued,
-  and what the judge decided.
-- **Engine log.** `tail -F ~/.pi/superagent/engine.log`. Each line is one event with its fields, so
-  `grep eval.decided` lists every judgement with its reason.
+To see the work itself, open the herdr tab labeled `#<issue> · <title>`. It’s an ordinary pi
+session. You can read the output, type a suggestion or press Esc to interrupt a command. For a
+view across all your issues, open the local panel. It shows what’s running, what’s queued and
+which workers need an answer. [Open the panel](http://127.0.0.1:8788/)
+
+The **engine log** tab tells the other half of the story. It records when the router checked
+GitHub, what the judge decided and when a worker started. To follow the same log from another
+terminal, run `tail -F ~/.pi/superagent/engine.log`.
 
 ## Manage the router
 
@@ -100,17 +102,17 @@ The job finds `superagent`, `pi` and `herdr` on its own PATH: Homebrew's directo
 `~/.npm-global/bin`. If `command -v superagent` or `command -v pi` prints a directory outside those, as nvm's
 do, add it to the job's PATH. From a checkout, replace `superagent` in the job with the script's full path.
 
-## Capacity
+## When several issues arrive at once
 
-Up to four workers can be on a run at once (`PI_SUPERAGENT_MAX_WORKERS`); further tickets wait their
-turn, queued on the panel. A worker between runs, waiting on your answer or simply done, is *parked*: it
-keeps its tab and everything it knows, but gives up its slot, so the queue keeps moving. A reply puts it
-back on a run. The judge answers one request at a time. Every worker's brief says the machine is shared:
-sequential builds, bounded parallel jobs, nothing left running after the report.
+By default, four workers can run at once. If you open a fifth issue while all four are busy, its
+ticket waits in the queue on the panel. A worker waiting for your answer can **park**. It keeps
+its tab and its conversation history, and another ticket can use the free slot. When you reply,
+the parked worker picks up where it left off. Set `PI_SUPERAGENT_MAX_WORKERS` to change the limit.
 
-A worker on a run that emits nothing for 15 minutes is flagged on the panel, and only there, under *Needs a
-person*: steer it, stop it, or accept its work. The flag does not stop the worker. If it is only running a
-long build, let it be; the flag clears when the worker reports.
+The judge reads one request at a time. Workers can build and test side by side, so their
+instructions ask them to limit parallel jobs and clean up any processes they start. If a worker
+goes quiet for 15 minutes, it appears under *Needs a person* on the panel. A long build can be
+quiet, too. Take a look in the tab before interrupting it.
 
 ## When something goes wrong
 

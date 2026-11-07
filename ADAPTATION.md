@@ -1,7 +1,13 @@
 # Adaptation ledger
 
-The ticket engine comes from DeepSeek’s dsh-superagent-prototype. Use this ledger to verify the
-upstream files and find the local code that connects them to pi, herdr and GitHub.
+If you follow a request from GitHub into the code, you’ll cross a boundary at `src/core/`.
+DeepSeek’s dsh-superagent-prototype supplies the rules for opening a ticket, assigning a worker
+and recording the outcome. This project supplies the pieces that talk to GitHub, run pi and keep
+the worker’s terminal open in herdr.
+
+That split gives maintainers a place to start. For a question about what a *ready* report means,
+look in the engine. For a question about how that report becomes a GitHub comment, look in
+`src/pi/`. The tables below identify the upstream files and the local code on either side.
 
 ## The baseline
 

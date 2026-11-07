@@ -1,11 +1,12 @@
 # Design decisions
 
-## Taking requests from GitHub
+## Why work starts on GitHub
 
-**Use a single intake path.** Issues, comments and submitted reviews all enter through
-`source-github.ts`. Sharing the path keeps identity checks consistent whether someone is asking
-for new work or steering a worker already running. Maintainers can make either request in the
-GitHub thread where they will review the result.
+A reviewer who spots a problem in a pull request already has the diff and a place to leave a
+comment. Asking them to copy that comment onto a separate task board would split the conversation
+just when the worker needs its context. Issues, comments and reviews therefore enter through the
+same source, `source-github.ts`. A new request can open a ticket, and feedback can reach the
+worker that made the change.
 
 **Check the author before routing the message.** An accepted request starts a worker with a shell
 on the operator’s machine. A comment on an existing ticket goes straight to that worker, so a
@@ -41,15 +42,17 @@ without extensions, skills or context files. It opens the session once because s
 
 ## Running a worker
 
-**Record outcomes through a tool.** A worker calls `ticket_report` with `ready`, `blocked`,
-`failed` or `cancelled`. Only the engine updates the ticket. A reviewer can therefore distinguish
-a worker saying “done” in conversation from a recorded ready report. When a run ends without a
-report, the worker records a failure. See `Ticket.tla` I2.
+A worker can write “done” in its terminal while the person who opened the issue is still waiting
+on GitHub. To finish a run, it calls `ticket_report` with an outcome. A *ready* report can carry
+the link to a PR. A *blocked* report carries the question the requester needs to answer. The other
+outcomes are *failed* and *cancelled*. Only the engine writes the result to the ticket.
+See `Ticket.tla` I2.
 
-**Post the outcome where the person asked.** Reports, questions, crashes and launch failures appear
-on the GitHub thread with the next action available to the requester. The outbox deduplicates
-repeated failures so a broken setup command produces one notice across many polls. A worker quiet
-for 15 minutes appears on the panel. A long-running build can trigger this flag and continue.
+If a run ends without a report, the router posts a failure on the thread. Launch errors and crashes
+also get a reply there, so the person who asked knows what happened. The outbox recognizes repeat
+failures. One broken setup command deserves one notice, even if the router tries it on every poll.
+A quiet worker is a different case. After 15 minutes of silence it appears on the panel, where the
+operator can see whether it needs help or is simply waiting for a build.
 
 **Keep tool use within the assignment.** Worker tool hooks check file edits and writes against the
 ticket workspace, block configured commands and disable delegation by default. The prepare hook
