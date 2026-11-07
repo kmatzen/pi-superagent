@@ -49,6 +49,20 @@ const associationOf = (row: { author_association?: string }): string => row.auth
 // on the next mtime tick without a restart.
 let cachedToken: { file: string, mtimeMs: number, token: string } | undefined
 
+/**
+ * GitHub answers 100 rows a page: a read that stops at the first page hides what came after it, and the
+ * caller then moves its read position past rows it never saw. Measured live: this repository runs about 100
+ * comments a day, and a cold start reads a day back, which lands on exactly that cliff.
+ */
+async function paged<T>(call: (args: string[]) => Promise<string>, url: (page: number) => string, map: (row: any) => T): Promise<T[]> {
+  const out: T[] = []
+  for (let page = 1; ; page += 1) {
+    const rows = JSON.parse((await call(['api', `${url(page)}&per_page=100`])) || '[]') as unknown[]
+    out.push(...rows.map(map))
+    if (rows.length < 100) return out
+  }
+}
+
 const ghCall = ({ bin = 'gh', tokenFile }: GhOptions) => (args: string[], stdin?: string): Promise<string> => new Promise((resolve, reject) => {
   let env = process.env
   if (tokenFile) {
@@ -97,11 +111,11 @@ export function ghApi(options: GithubApiOptions): GithubApi {
   }
   return {
     async comments(since) {
-      const query = `repos/${options.repo}/issues/comments?per_page=100&sort=created&direction=asc${since ? `&since=${encodeURIComponent(since)}` : ''}`
-      const rows = JSON.parse((await call(['api', query])) || '[]') as Array<Record<string, never | string>>
-      return (rows as unknown as Array<{ issue_url: string; user?: { login: string }; author_association?: string; created_at: string; body: string }>)
-        .filter(r => /\/issues\/\d+/.test(r.issue_url))
-        .map(r => ({ issue: issueOf(r.issue_url), author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
+      const rows = await paged(call, page => `repos/${options.repo}/issues/comments?sort=created&direction=asc${since ? `&since=${encodeURIComponent(since)}` : ''}&page=${page}`,
+        (r: { issue_url: string; user?: { login: string }; author_association?: string; created_at: string; body: string }) =>
+          ({ url: r.issue_url, issue: issueOf(r.issue_url), author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
+      // A row with no issue number is a pull-request review body: filing it under #0 reads as a real thread.
+      return rows.filter(r => /\/issues\/\d+/.test(r.url)).map(({ url, ...rest }) => rest)
     },
 
     async issues(state) {
@@ -136,7 +150,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       for (const pr of targets) {
         let rows: ReviewRow[]
         try {
-          rows = JSON.parse((await reviewCall(['api', `repos/${pr.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
+          rows = await paged<ReviewRow>(reviewCall, page => `repos/${pr.repo}/pulls/${pr.number}/reviews?page=${page}`, r => r)
         } catch (error) {
           // GitHub answers 404 for a pull request that is gone, moved, or private to this account, and that is
           // a fact about one pull, not an outage. Measured live 2026-11-07: a followed pull answering 404 threw
@@ -183,9 +197,8 @@ export function ghPulls(options: GhOptions = {}): PullApi {
       }
     },
     async comments(repo, number, since) {
-      const query = `repos/${repo}/issues/${number}/comments?per_page=100${since ? `&since=${encodeURIComponent(since)}` : ''}`
-      const rows = JSON.parse((await call(['api', query])) || '[]') as CommentRow[]
-      return rows.map(r => ({ issue: number, author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
+      return paged(call, page => `repos/${repo}/issues/${number}/comments?${since ? `since=${encodeURIComponent(since)}&` : ''}page=${page}`,
+        (r: CommentRow) => ({ issue: number, author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
     },
     async reviews(repo, number) {
       const rows = JSON.parse((await call(['api', `repos/${repo}/pulls/${number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
