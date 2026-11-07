@@ -676,6 +676,19 @@ describe('startup and recovery', () => {
     expect(configFrom({ PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_STATE: '/s', PI_SUPERAGENT_ALLOWED: ' alice, team-* ,' })?.allowed)
       .toEqual(new Set(['alice', 'team-*']))
   })
+
+  it('refuses a number the operator mistyped rather than running with a broken clock', () => {
+    const base = { PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_STATE: '/s' }
+    // setInterval(1ms) is what a NaN tickMs becomes: the router keeps "working" and never says why.
+    expect(() => configFrom({ ...base, PI_SUPERAGENT_TICK_MS: '30s' })).toThrow(/PI_SUPERAGENT_TICK_MS must be a positive number, got "30s"/)
+    expect(() => configFrom({ ...base, PI_SUPERAGENT_MAX_WORKERS: 'four' })).toThrow(/PI_SUPERAGENT_MAX_WORKERS/)
+    expect(() => configFrom({ ...base, PI_SUPERAGENT_PANEL_PORT: '0' })).toThrow(/PI_SUPERAGENT_PANEL_PORT/)
+    expect(() => configFrom({ ...base, PI_SUPERAGENT_MAX_WORKERS: '-2' })).toThrow(/positive number/)
+    expect(configFrom({ ...base, PI_SUPERAGENT_MAX_WORKERS: '  ' }), 'an empty value is the operator unsetting it')
+      .not.toHaveProperty('maxConcurrent')
+    expect(configFrom({ ...base, PI_SUPERAGENT_TICK_MS: '90000', PI_SUPERAGENT_PANEL_PORT: '8799', PI_SUPERAGENT_MAX_WORKERS: '6' }))
+      .toMatchObject({ tickMs: 90000, panelPort: 8799, maxConcurrent: 6 })
+  })
 })
 
 describe("the agent's own GitHub account", () => {
