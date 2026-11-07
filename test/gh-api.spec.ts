@@ -189,7 +189,7 @@ case "$*" in
   "api repos/x/y/pulls/11") echo '{"state":"open","merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/404") echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
   "api repos/x/y/pulls/502") echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
-  "api repos/x/y/issues/11/comments?per_page=100&since="*) echo '[{"user":{"login":"rev"},"author_association":"MEMBER","created_at":"2026-11-06T09:00:00Z","body":"rename it"}]' ;;
+  "api repos/x/y/issues/11/comments?"*since=*) echo '[{"user":{"login":"rev"},"author_association":"MEMBER","created_at":"2026-11-06T09:00:00Z","body":"rename it"}]' ;;
   "api repos/x/y/pulls/11/reviews?per_page=100") echo '[{"id":5,"user":{"login":"rev"},"author_association":"OWNER","state":"APPROVED","submitted_at":"2026-11-06T09:30:00Z","body":""},{"id":6,"state":"PENDING"}]' ;;
   "api -X POST repos/x/y/issues/11/comments --input -") cat - > "$(dirname "$0")/posted.json" ;;
   *) echo "unexpected: $*" >&2; exit 1 ;;
@@ -215,7 +215,7 @@ describe('ghPulls', () => {
     expect(await api.comments('x/y', 11, '2026-11-06T08:00:00Z')).toEqual([
       { issue: 11, author: 'rev', association: 'MEMBER', at: '2026-11-06T09:00:00Z', body: 'rename it' },
     ])
-    expect(gh.calls()).toContain('api repos/x/y/issues/11/comments?per_page=100&since=2026-11-06T08%3A00%3A00Z')
+    expect(gh.calls()).toContain('api repos/x/y/issues/11/comments?since=2026-11-06T08%3A00%3A00Z&page=1&per_page=100')
     expect(await api.reviews('x/y', 11)).toEqual([
       { pr: 11, repo: 'x/y', id: 5, author: 'rev', association: 'OWNER', state: 'APPROVED', at: '2026-11-06T09:30:00Z', body: '' },
     ])
@@ -260,5 +260,45 @@ esac
     await expect(ghPulls({ bin: gh.bin, tokenFile: join(gh.dir, 'nope') }).pull('x/y', 11)).rejects.toThrow(/token file .*nope: ENOENT/)
     writeFileSync(gh.token, '\n')
     await expect(ghPulls({ bin: gh.bin, tokenFile: gh.token }).pull('x/y', 11)).rejects.toThrow(/is empty/)
+  })
+})
+
+describe('paged GitHub reads', () => {
+  // GitHub answers 100 rows a page. The comment read asked for one page, and the source then moved its read
+  // position past rows it never fetched: measured 2026-11-10, this repository runs ~100 comments a day and a
+  // cold start reads a day back, so page two held operator instructions that never became tickets.
+  const many = (dir: string, name: string, total: number, shape: (i: number) => unknown) => {
+    for (let page = 1, left = total; left > 0; page += 1) {
+      const size = Math.min(100, left)
+      writeFileSync(join(dir, `${name}.${page}.json`), JSON.stringify(Array.from({ length: size }, (_, i) => shape(total - left + i))))
+      left -= size
+    }
+  }
+
+  it('reads every page of comments, issues, open pulls and reviews', async () => {
+    const dir = tmp()
+    many(dir, 'comments', 150, i => ({ issue_url: `https://api.github.com/repos/o/r/issues/${10 + (i % 5)}`, user: { login: 'op' }, author_association: 'OWNER', created_at: `2026-11-06T00:00:${String(i % 60).padStart(2, '0')}Z`, body: `c${i}` }))
+    many(dir, 'issues', 120, i => ({ number: 100 + i, title: `t${i}`, body: '', labels: [], user: { login: 'op' }, author_association: 'OWNER', created_at: '2026-11-06T00:00:00Z', updated_at: '2026-11-06T00:00:00Z' }))
+    many(dir, 'pulls', 120, i => ({ number: 500 + i }))
+    many(dir, 'reviews7', 120, i => ({ id: 1000 + i, user: { login: 'op' }, author_association: 'OWNER', state: 'APPROVED', submitted_at: '2026-11-06T00:00:00Z', body: '' }))
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, [
+      "#!/bin/bash",
+      "d=\"$(dirname \"$0\")\"; u=\"$2\"; p=1",
+      "p=$(printf \"%s\" \"$u\" | sed -n \"s/.*[?&]page=\\([0-9]*\\).*/\\1/p\"); p=\"${p:-1}\"",
+      "n=none",
+      "case \"$u\" in *issues/comments*) n=comments ;; esac",
+      "case \"$u\" in *\"repos/o/r/issues?\"*) n=issues ;; esac",
+      "case \"$u\" in *\"pulls?state=open\"*) n=pulls ;; esac",
+      "case \"$u\" in *\"pulls/7/reviews\"*) n=reviews7 ;; esac",
+      "f=\"$d/$n.$p.json\"",
+      "if [ -f \"$f\" ]; then cat \"$f\"; else echo \"[]\"; fi",
+    ].join('\n') + '\n')
+    chmodSync(bin, 0o755)
+    const api = ghApi({ bin, repo: 'o/r', followed: () => [{ repo: 'o/r', number: 7 }] })
+    expect((await api.comments()).length).toBe(150)
+    expect((await api.issues('open')).length).toBe(120)
+    expect((await api.pullsOpen!()).length).toBe(120)
+    expect((await api.reviews!(0)).length).toBe(120)
   })
 })
