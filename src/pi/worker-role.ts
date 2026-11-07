@@ -10,6 +10,15 @@ export interface WorkerPi {
   sendUserMessage(content: string, options?: { deliverAs?: 'steer' | 'followUp' }): Promise<void> | void
 }
 
+/** The ask's own words and its choices, as one block: the person answers on the issue, where the options
+ *  have to be readable to be worth offering. */
+function askText(questions: unknown): string {
+  if (!Array.isArray(questions)) return ''
+  return questions.map((q: { question?: string; options?: { label?: string }[] }) =>
+    [q.question, ...(q.options ?? []).map((o, i) => `${i + 1}. ${o.label}`)].filter(Boolean).join('\n')
+  ).join('\n\n')
+}
+
 export const ACTIVITY_EVERY_MS = 5000
 export const SILENT_FINISH = 'the worker finished its run without calling ticket_report'
 
@@ -32,6 +41,21 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
     workspace: env.PI_SUPERAGENT_WORKSPACE ?? process.cwd(),
     allowDelegation: env.PI_SUPERAGENT_ALLOW_DELEGATION === '1',
   })(pi as never)
+
+  /** A worker has no person at its keyboard. `ask_user_question` renders in the herdr tab and waits for a
+   *  keystroke that never comes: the run sits, the router gets no report and no question, and the ticket
+   *  stalls with nothing on the issue to answer. Measured 2026-11-07, when a worker parked on a four-option
+   *  harness question until a person read the tab. The ask becomes the blocked report the router already
+   *  posts to the issue, and the reply comes back through the inbox as a normal input. */
+  pi.on('tool_call', (event?: unknown) => {
+    const call = event as { toolName?: string; input?: Record<string, unknown> }
+    if (call.toolName !== 'ask_user_question') return
+    const ask = askText(call.input?.questions)
+    if (!ask) return
+    reported = true
+    append('reports.jsonl', { state: 'blocked', summary: ask, question: ask, origin: 'ask' })
+    return { block: true, reason: 'Filed on the ticket as a blocked report. End your turn now: the answer arrives as a new input. Asking again buries it.' }
+  })
 
   // Inputs are kept in the inbox until a run takes them. pi queues a message sent into a running turn and hands
   // the queue back to the human's input box when that turn is aborted, so a file deleted at send time is a message
