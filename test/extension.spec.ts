@@ -75,7 +75,7 @@ afterEach(() => { for (const r of live.splice(0)) r.stop() })
 function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
                  options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number;
                    workerTiming?: { pollMs?: number; livenessMs?: number }; pullApi?: PullApi; blocked?: string[];
-                   judgeFails?: boolean } = {}) {
+                   judgeFails?: boolean; workerTokenFile?: string } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [] }
   const api: GithubApi = options.githubApi ?? {
@@ -95,6 +95,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', githubRepo: 'o/r', prepare: options.prepare ?? 'true',
     bots: new Set(['fleet-answer-loop']), tickMs: options.tickMs ?? 5, ...(herdr ? { workers: 'herdr' as const } : {}),
     ...(options.blocked ? { blockedCommands: options.blocked } : {}),
+    ...(options.workerTokenFile ? { workerTokenFile: options.workerTokenFile } : {}),
   }
   const workers: Spy[] = []
   const judge: Spy = { prompts: [], report: undefined }
@@ -869,8 +870,13 @@ describe('a pull request per ticket', () => {
     expect(f.workers[0]!.prompts[0], 'and so does the worker').toContain('gh issue view 5 --repo other/lib')
   })
 
-  it('the brief asks for a pull request that closes the issue, unless gh is blocked for workers', async () => {
-    const f = fixture(true, undefined, undefined, undefined, { pullApi: pullsFake().api })
+  it('the brief asks for a pull request when the worker holds a token, and for a branch when it holds none', async () => {
+    // The worker's HOME is its own, so it has no login of the operator's: asking it to push without a token
+    // of its own sent every code ticket to a step it could not finish (measured, gh asks for `gh auth login`).
+    const dir = tmp()
+    const tokenFile = join(dir, 'worker-token')
+    writeFileSync(tokenFile, 'ghp_scoped\n')
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pullsFake().api, workerTokenFile: tokenFile })
     await working(f, '496')
     expect(f.workers[0]!.prompts[0]).toContain('gh pr create')
     expect(f.workers[0]!.prompts[0]).toContain('Closes o/r#496')
@@ -878,6 +884,10 @@ describe('a pull request per ticket', () => {
     const g = fixture(true, undefined, undefined, undefined, { pullApi: pullsFake().api, blocked: ['gh'] })
     await working(g, '497')
     expect(g.workers[0]!.prompts[0]).not.toContain('gh pr create')
+    const h = fixture(true, undefined, undefined, undefined, { pullApi: pullsFake().api })
+    await working(h, '498')
+    expect(h.workers[0]!.prompts[0]).toContain('no GitHub access')
+    expect(h.workers[0]!.prompts[0]).not.toContain('gh pr create')
   })
 })
 
@@ -922,14 +932,17 @@ describe('the state a router start leaves behind', () => {
 })
 
 describe('the sweep of settled checkouts', () => {
+  const origins: string[] = []
+  afterAll(() => { for (const d of origins) rmSync(d, { recursive: true, force: true }) })
   const git = (dir: string, ...args: string[]) =>
     spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-C', dir, ...args], { encoding: 'utf8' })
 
   // A checkout whose branch is pushed has a remote; one whose branch is local is the only copy of the work.
-  // The origin lives outside the swept root, so a bare repository is never a sweep candidate.
+  // The origin lives in its own temp dir, so a bare repository is never a sweep candidate and never survives
+  // into the next run, where a clone of it would arrive with files already in it.
   const seed = (root: string, name: string, pushed: boolean) => {
-    const bare = join(root, '..', `${name}.bare`)
-    mkdirSync(bare, { recursive: true })
+    const bare = mkdtempSync(join(tmpdir(), 'sa-sweep-origin-'))
+    origins.push(bare)
     git(bare, 'init', '-q', '--bare', '.')
     const dir = join(root, name)
     spawnSync('git', ['clone', '-q', bare, dir], { encoding: 'utf8' })
