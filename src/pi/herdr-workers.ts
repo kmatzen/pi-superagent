@@ -94,7 +94,10 @@ export class HerdrWorkers {
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.options.herdr.agentStart({
-          name, kind: 'pi', pane, timeoutMs: this.options.startTimeoutMs ?? 120_000, args: ['--session-id', sessionId],
+          // --no-extensions: the harness in ~/.pi/agent is the operator's, and a worker session that loads
+          // it runs the operator's watchers with the operator's credentials.
+          name, kind: 'pi', pane, timeoutMs: this.options.startTimeoutMs ?? 120_000,
+          args: ['--session-id', sessionId, '--no-extensions'],
         })
       } catch (error) {
         if (!(error instanceof HerdrError && error.code === 'agent_pane_busy') || attempt >= 30) throw error

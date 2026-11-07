@@ -12,6 +12,8 @@ export interface RouterConfig {
   sdkPath?: string
   maxConcurrent?: number
   workerQuietMinutes?: number
+  /** Settled checkouts to keep at startup, newest first. Measured: each one is about 570 MB. */
+  keepWorktrees?: number
   judgeThinking?: string
   /** 'herdr': each worker is its own pi session in a herdr tab. Unset, workers run in-process (tests only). */
   workers?: 'herdr'

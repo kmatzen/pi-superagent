@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { checkoutRepository, DELEGATION_TOOLS, decideToolCall, prepareWorkspace, setupProblems, WorkspaceError } from '../src/pi/workspace.ts'
+import { checkoutRepository, DELEGATION_TOOLS, decideToolCall, prepareWorkspace, setupProblems, workerBase, WorkspaceError } from '../src/pi/workspace.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ws-')); dirs.push(d); return d }
@@ -119,5 +119,43 @@ describe('the worker tool-call boundary', () => {
     allow({ toolName: 'write', args: { path: '/ws/TK-9/src/a.ts' } })
     expect(decideToolCall({ toolName: 'edit', args: { path: '/Users/octocat/git/other/x.ts' } }, policy)?.deny).toMatch(/outside this ticket's workspace/)
     allow({ toolName: 'edit', args: { path: 'relative/x.ts' } })
+  })
+})
+
+describe('what a worker is given', () => {
+  it('carries no operator credential and a HOME of its own', () => {
+    // Audit 2026-11-10: a worker runs prompt content from ticket text, and its environment used to carry the
+    // operator's HOME, token paths and SSH agent, so a blocked `gh` only hid the name of the way out.
+    const root = tmp()
+    const keys = ['PI_SUPERAGENT_GITHUB_TOKEN_FILE', 'PI_SUPERAGENT_GITHUB_SELF', 'PI_OPS_TOKEN_FILE', 'SSH_AUTH_SOCK', 'GH_TOKEN', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY'] as const
+    const saved = keys.map(k => [k, process.env[k]] as const)
+    for (const k of keys) process.env[k] = '/leaky'
+    try {
+      const w = prepareWorkspace({ root, ticketId: 'TK-sec', stateDir: root })
+      expect(w.env.HOME).toBe(join(root, 'worker-homes', 'TK-sec'))
+      expect(w.env.GH_CONFIG_DIR).toContain('worker-homes')
+      for (const k of keys) expect(w.env, k).not.toHaveProperty(k)
+      expect(w.env.PI_SUPERAGENT_TICKET).toBe('TK-sec')
+      expect(statSync(join(root, 'worker-homes', 'TK-sec')).mode & 0o077).toBe(0)
+    } finally {
+      for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+    }
+  })
+
+  it('keeps the settings a prepare script needs, and gives the script the operator own environment', () => {
+    const root = tmp()
+    const w = prepareWorkspace({ root, ticketId: 'TK-prep', stateDir: root, prepare: 'echo "$HOME" > prep-home.txt' })
+    expect(readFileSync(join(w.dir, 'prep-home.txt'), 'utf8').trim()).toBe(process.env.HOME)
+    expect(w.env.HOME).not.toBe(process.env.HOME)
+  })
+})
+
+describe('workerBase', () => {
+  it('drops the credential names and keeps everything a build needs', () => {
+    const out = workerBase({ PATH: '/bin', HOME: '/home/op', PI_SUPERAGENT_GITHUB_TOKEN_FILE: '/t', PI_OPS_REPO: 'a/b', PI_SUPERAGENT_MAX_WORKERS: '8' })
+    expect(out.PATH).toBe('/bin')
+    expect(out.PI_SUPERAGENT_MAX_WORKERS).toBe('8')
+    expect('PI_OPS_REPO' in out).toBe(false)
+    expect('PI_SUPERAGENT_GITHUB_TOKEN_FILE' in out).toBe(false)
   })
 })
