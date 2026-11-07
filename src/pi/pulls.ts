@@ -79,14 +79,18 @@ export interface FollowerOptions {
   everyMs?: number
 }
 
+// Four `gh` round trips (~0.9 s each) at a time finishes a pass inside one tick; the cap overlaps the calls, it adds none.
+const READS_AT_ONCE = 4
+
 export class PullFollower {
   private readonly polled = new Map<string, number>()
+  private readonly unreadable = new Set<string>()
 
   constructor(private readonly options: FollowerOptions) {}
 
   /** Closed pull requests end their tickets' wait; talk on those outside the watched repository becomes triggers. */
   async reconcile(tickets: readonly Ticket[]): Promise<void> {
-    const { home, api } = this.options
+    const { home } = this.options
     const now = this.options.now?.() ?? Date.now()
     const followed = new Map<string, PullRef>()
     for (const ticket of tickets) {
@@ -98,6 +102,7 @@ export class PullFollower {
       }
     }
     const open = this.options.openThreads()
+    const due: Array<{ id: string; pull: PullRef; local: boolean }> = []
     for (const [id, pull] of followed) {
       const local = id.startsWith('#')
       if (local && (!open || open.has(id))) continue
@@ -105,20 +110,29 @@ export class PullFollower {
         if (now - (this.polled.get(id) ?? -Infinity) < (this.options.everyMs ?? 120_000)) continue
         this.polled.set(id, now)
       }
-      let state: PullState | undefined
-      try {
-        state = await api.pull(pull.repo, pull.number)
-      } catch (error) {
-        this.options.warn('pull.read_failed', { thread: id, error: String(error).slice(0, 200) })
-        continue
-      }
-      // A pull request GitHub no longer has cannot be merged: waiting for it would keep the ticket open forever.
-      if (!state || !state.open) {
-        this.options.closed({ source: 'github', id }, pull, state?.merged ? 'merged' : 'closed', state?.closedAt ?? new Date(now).toISOString())
-        continue
-      }
-      if (!local) await this.listen(id, pull, state.createdAt)
+      due.push({ id, pull, local })
     }
+    // Side by side, because serially seven follows serialized one tick out to 20 s (measured live 2026-11-07, every 120 s) and every worker launch in that window waited on GitHub.
+    const queue = [...due]
+    await Promise.all(Array.from({ length: Math.min(READS_AT_ONCE, queue.length) }, async () => {
+      for (let next = queue.shift(); next !== undefined; next = queue.shift()) await this.read(next.id, next.pull, next.local, now)
+    }))
+  }
+
+  private async read(id: string, pull: PullRef, local: boolean, now: number): Promise<void> {
+    let state: PullState | undefined
+    try {
+      state = await this.options.api.pull(pull.repo, pull.number)
+    } catch (error) {
+      this.options.warn('pull.read_failed', { thread: id, error: String(error).slice(0, 200) })
+      return
+    }
+    // A pull request GitHub no longer has cannot be merged, so the ticket's wait ends here: `undefined` is GitHub's only answer for one.
+    if (!state || !state.open) {
+      this.options.closed({ source: 'github', id }, pull, state?.merged ? 'merged' : 'closed', state?.closedAt ?? new Date(now).toISOString())
+      return
+    }
+    if (!local) await this.listen(id, pull, state.createdAt)
   }
 
   private async listen(id: string, pull: PullRef, createdAt: string): Promise<void> {
@@ -145,8 +159,13 @@ export class PullFollower {
         this.options.receive(this.trigger(id, pull, r.author, r.association, r.at, said, 'review', `github:${id}:review:${r.id}`))
       }
       if (top !== seen) this.options.positions.set(reviewKey, top)
+      if (this.unreadable.delete(id)) this.options.warn('pull.listen_readable', { thread: id })
     } catch (error) {
-      this.options.warn('pull.listen_failed', { thread: id, error: String(error).slice(0, 200) })
+      // Once per pull request, not once per poll: 720 identical lines a day bury the one that is new.
+      if (!this.unreadable.has(id)) {
+        this.unreadable.add(id)
+        this.options.warn('pull.listen_failed', { thread: id, error: String(error).slice(0, 200) })
+      }
     }
   }
 
