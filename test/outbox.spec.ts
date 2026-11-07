@@ -29,6 +29,20 @@ describe('the outbox', () => {
     expect(outbox.status('m1')).toBe('sent')
   })
 
+  it('a reply the channel will never take is given up on, not retried for the life of the router', async () => {
+    // A pull request in a repository this account cannot see answers 404 forever: the router posted at it
+    // 217 times, and the reply a person was owed sat in the queue with no end and no alarm.
+    const posts: string[] = []
+    const givenUp: Array<{ id: string; tries: number; error: string }> = []
+    const deaf: CommentSink = { accepts: () => true, post: async () => { throw new Error('gh: Not Found (HTTP 404)') } }
+    const outbox = new CommentOutbox(deaf, store(), () => Date.now(), 3, (m, tries, error) => givenUp.push({ id: m.id, tries, error }))
+    outbox.send(github('m1'))
+    for (let pass = 0; pass < 8; pass++) { outbox.flush(); await settle() }
+    expect(posts).toEqual([])
+    expect(outbox.status('m1'), 'no longer pending: it will not be retried').toBe('dropped')
+    expect(givenUp).toEqual([{ id: 'm1', tries: 3, error: expect.stringContaining('Not Found (HTTP 404)') }])
+  })
+
   it('a failed post stays pending and goes out on the next flush, once', async () => {
     const posts: string[] = []
     const fail = { next: true }
