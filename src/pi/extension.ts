@@ -638,17 +638,31 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
 
 
 /** A session is the router only when the start script says so; for every other session this is null. */
+/**
+ * A number the operator set, or nothing when they set nothing. Garbage fails at startup: a NaN tick
+ * interval becomes a 1ms loop, a NaN worker cap silences the fleet, and neither says why.
+ */
+function positiveNumber(name: string, raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number, got "${raw}"`)
+  return value
+}
+
 export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   if (env.PI_SUPERAGENT_ROLE !== 'router') return null
   const dataDir = env.PI_SUPERAGENT_STATE
   if (!dataDir) throw new Error('PI_SUPERAGENT_STATE is required for role=router')
+  const maxWorkers = positiveNumber('PI_SUPERAGENT_MAX_WORKERS', env.PI_SUPERAGENT_MAX_WORKERS)
+  const tickMs = positiveNumber('PI_SUPERAGENT_TICK_MS', env.PI_SUPERAGENT_TICK_MS)
+  const panelPort = positiveNumber('PI_SUPERAGENT_PANEL_PORT', env.PI_SUPERAGENT_PANEL_PORT)
   return {
     dataDir, worktreeRoot: env.PI_SUPERAGENT_WORKTREES ?? `${dataDir}/work`,
     self: env.PI_SUPERAGENT_SELF ?? 'pi-superagent',
+    ...(maxWorkers === undefined ? {} : { maxConcurrent: maxWorkers }),
+    ...(tickMs === undefined ? {} : { tickMs }),
+    ...(panelPort === undefined ? {} : { panelPort }),
     bots: new Set((env.PI_SUPERAGENT_BOTS ?? 'pi-*,fleet-*').split(',').map(s => s.trim()).filter(Boolean)),
-    ...(env.PI_SUPERAGENT_MAX_WORKERS ? { maxConcurrent: Number(env.PI_SUPERAGENT_MAX_WORKERS) } : {}),
-    ...(env.PI_SUPERAGENT_TICK_MS ? { tickMs: Number(env.PI_SUPERAGENT_TICK_MS) } : {}),
-    ...(env.PI_SUPERAGENT_PANEL_PORT ? { panelPort: Number(env.PI_SUPERAGENT_PANEL_PORT) } : {}),
     ...(env.PI_SUPERAGENT_PREPARE ? { prepare: env.PI_SUPERAGENT_PREPARE } : {}),
     ...(env.PI_SUPERAGENT_BLOCKED ? { blockedCommands: env.PI_SUPERAGENT_BLOCKED.split(',').map(s => s.trim()).filter(Boolean) } : {}),
     ...(env.PI_SUPERAGENT_ALLOW_DELEGATION === '1' ? { allowDelegation: true } : {}),
