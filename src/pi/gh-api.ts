@@ -17,7 +17,14 @@ export interface GithubApiOptions extends GhOptions {
    * per pull request: asking for every open one made the tick grow with the repository (50 open pull requests
    * was 51 round trips per poll), while the tickets only ever wait on the ones they follow.
    */
-  followed?: () => Array<{ repo: string; number: number }>
+  followed: () => Array<{ repo: string; number: number }>
+  /**
+   * Called when a followed pull request's reviews go unreadable (a string) or readable again (null). A 404
+   * is permanent — the pull is deleted, moved, or private to this account — and a ticket that follows it
+   * waits for a review nobody will ever read. Silence is the defect: measured 2026-11-07 with a ghost pull
+   * that stalled a ticket with no reason a person could see.
+   */
+  onPullUnreadable?: (ref: string, problem: string | null) => void
 }
 
 // A pull request's conversation comments arrive with an /issues/N url too (a pull request is issue N);
@@ -59,6 +66,7 @@ type CommentRow = { user?: { login: string }; author_association?: string; creat
 
 export function ghApi(options: GithubApiOptions): GithubApi {
   const call = ghCall(options)
+  const deadPulls = new Set<string>()
   const openPulls = async (): Promise<Array<{ number: number }>> => {
     const open: Array<{ number: number }> = []
     for (let page = 1; ; page += 1) {
@@ -102,7 +110,8 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     },
 
     async reviews(sinceId) {
-      const targets = options.followed?.() ?? (await openPulls()).map(pr => ({ repo: options.repo, number: pr.number }))
+      // Reported once per pull, not once per poll: 2880 polls a day is not a log.
+      const targets = options.followed()
       const out: PrReview[] = []
       for (const pr of targets) {
         let rows: ReviewRow[]
@@ -114,9 +123,16 @@ export function ghApi(options: GithubApiOptions): GithubApi {
           // out of the whole read, so no review reached any ticket, and once it was the only pull in the batch
           // every poll reported the source down. Skipping it loses nothing — the cursor is per source, so a
           // pull that becomes readable again is read from where it left off.
-          if (!/HTTP 404/.test(String(error))) throw error
+          const problem = String(error)
+          if (!/HTTP 404/.test(problem)) throw error
+          const ref = `${pr.repo}#${pr.number}`
+          if (!deadPulls.has(ref)) {
+            deadPulls.add(ref)
+            options.onPullUnreadable?.(ref, problem.slice(0, 200))
+          }
           continue
         }
+        if (deadPulls.delete(`${pr.repo}#${pr.number}`)) options.onPullUnreadable?.(`${pr.repo}#${pr.number}`, null)
         for (const r of rows) if (r.id > sinceId && r.submitted_at) {
           out.push({ pr: pr.number, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at, body: r.body ?? '' })
         }

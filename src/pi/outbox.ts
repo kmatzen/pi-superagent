@@ -57,15 +57,17 @@ export class CommentOutbox implements OutboxPort {
 
   flush(): number {
     let sent = 0
+    let touched = false
     // Send-once only has to outlive a restart; a ledger of every message ever posted is just growth. A reply
     // the channel refused forever (a repository this account cannot see) ages out on the same clock.
     for (const [id, row] of Object.entries(this.rows)) {
-      if ((row.status === 'sent' || row.status === 'dropped') && Date.parse(row.at) < this.now() - KEEP_SENT_MS) delete this.rows[id]
+      if ((row.status === 'sent' || row.status === 'dropped') && Date.parse(row.at) < this.now() - KEEP_SENT_MS) { delete this.rows[id]; touched = true }
     }
     for (const [id, row] of Object.entries(this.rows)) {
       if (row.status !== 'pending' || this.posting.has(id)) continue
       if (!this.sink.accepts(row.message)) {
         row.status = 'dropped'
+        touched = true
         continue
       }
       try {
@@ -81,12 +83,17 @@ export class CommentOutbox implements OutboxPort {
           continue
         }
         row.status = 'sent'
+        touched = true
         sent++
       } catch (error) {
+        const before = row.status
         this.failed(row, error)
+        if (row.status !== before) touched = true
       }
     }
-    this.persist()
+    // The ledger is one blob, and the tick flushes it twice: persisting an untouched one measured 5,700
+    // identical writes a day on an idle router.
+    if (touched) this.persist()
     return sent
   }
 
