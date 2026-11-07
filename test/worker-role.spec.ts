@@ -117,6 +117,21 @@ describe('the worker role', () => {
     f.emit('session_shutdown')
   })
 
+  it('parks an inbox file it cannot read instead of reading it every second', async () => {
+    // Measured 2026-11-07 audit: a half-written file was caught, skipped, and caught again at 1 Hz for the
+    // whole life of the worker, with nothing to tell anyone. One rename, one event, and it stops happening.
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir }, 10)
+    mkdirSync(join(dir, 'inbox'), { recursive: true })
+    writeFileSync(join(dir, 'inbox', '1-0000.json'), '{ "text": "the brief is trunca')
+    f.emit('session_start')
+    await until(() => existsSync(join(dir, 'inbox', '1-0000.json.corrupt')))
+    expect(readdirSync(join(dir, 'inbox'))).toEqual(['1-0000.json.corrupt'])
+    expect(lines(join(dir, 'events.jsonl')).some(e => e.type === 'inbox_error'), 'the router can see it happened').toBe(true)
+    f.emit('session_shutdown')
+  })
+
   it('keeps an input the run was aborted before reading, and sends it again', async () => {
     // pi hands messages still queued when a run is aborted back to the human's input box: a router review
     // delivered into a long run died there, marked read, while the ticket waited for a worker that had it never.

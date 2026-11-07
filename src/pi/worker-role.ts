@@ -1,5 +1,5 @@
 /** The superagent inside a worker's own pi: report tool, guard, and a file bridge to the router in another process. */
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { reportTool } from './report-tool.ts'
 import { guardExtension } from './workspace.ts'
@@ -69,7 +69,10 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
       let input: { text: string; mode?: 'steer' | 'followUp' }
       try {
         input = JSON.parse(readFileSync(file, 'utf8')) as typeof input
-      } catch {
+      } catch (error) {
+        // Unreadable by this worker and by every later one: park it out of the scan and say so once.
+        renameSync(file, `${file}.corrupt`)
+        append('events.jsonl', { type: 'inbox_error', name, error: String(error).slice(0, 200) })
         continue
       }
       if (inflight.has(name)) continue // sent, waiting for the run that reads it

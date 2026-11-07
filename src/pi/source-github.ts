@@ -151,6 +151,8 @@ export class GithubSource {
         })
       }
     }
+    // The cap is a decision, not an accident: past 4000 open issues the oldest key is forgotten, and an issue
+    // still open that far back fires once more as a request. The watched repository has tens, not thousands.
     this.staged.push([issuesKey(this.options.repo), [...seen].slice(-4000)])
     return out
   }
@@ -200,7 +202,8 @@ export class GithubSource {
       actor: { source: 'github', id: c.author },
       human,
       at: c.at,
-      text: c.body,
+      // Bounded like an issue body: one pasted CI log would otherwise buy its own judge prompt and worker brief.
+      text: c.body.slice(0, 4000),
       channel: { source: 'github', thread: `#${c.issue}`, address: { issue: String(c.issue) } },
       // The scope sees a trigger's source and meta only, so who wrote it travels in meta as well.
       meta: { association: c.association, author: c.author },
