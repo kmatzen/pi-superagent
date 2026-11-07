@@ -95,7 +95,7 @@ export class SqliteRepositories implements Repositories {
         .run(thread.key, JSON.stringify(thread))
     },
     list: (): Thread[] => this.rows<Thread>('SELECT value FROM thread ORDER BY key'),
-    active: (): Thread[] => this.threads.list().filter(t => t.pending.length > 0 || t.evaluating !== undefined),
+    active: (): Thread[] => this.rows<Thread>("SELECT value FROM thread WHERE json_extract(value, '$.evaluating') IS NOT NULL OR COALESCE(json_array_length(json_extract(value, '$.pending')), 0) > 0 ORDER BY key"),
   }
 
   readonly tickets = {
@@ -106,10 +106,19 @@ export class SqliteRepositories implements Repositories {
          VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ticket), ?)
          ON CONFLICT(id) DO UPDATE SET value = excluded.value`).run(ticket.id, JSON.stringify(ticket))
     },
-    list: (): Ticket[] => this.rows<Ticket>('SELECT value FROM ticket ORDER BY seq DESC'),
-    open: (): Ticket[] => this.tickets.list().filter(t => !t.ended),
-    active: (): Ticket[] => this.tickets.list().filter(t =>
-      t.undelivered.length > 0 || ['pending', 'running'].includes(latestAssignment(t)?.state ?? '')),
+    // Insertion order, matching MemoryRepositories: a test on the memory store proves the same order production
+    // serves. Callers that want the newest first say so.
+    list: (): Ticket[] => this.rows<Ticket>('SELECT value FROM ticket ORDER BY seq'),
+    // The engine's hottest read, kept in the database: filtering list() in JavaScript read and parsed every
+    // ticket ever written, once per tick, per caller. `= 0` covers both shapes of an open ticket — no `ended`
+    // key at all, and `ended: false`, which json_extract reads as 0 rather than NULL.
+    open: (): Ticket[] => this.rows<Ticket>("SELECT value FROM ticket WHERE COALESCE(json_extract(value, '$.ended'), 0) = 0 ORDER BY seq"),
+    // The same rule as MemoryRepositories, half in SQL: the last Assignment's state is `[#-1]` in SQLite's json
+    // path syntax, and the JavaScript filter stays as the net in case a row predates the shape it reads.
+    active: (): Ticket[] => this.rows<Ticket>(
+      "SELECT value FROM ticket WHERE json_array_length(json_extract(value, '$.undelivered')) > 0"
+      + " OR json_extract(value, '$.assignments[#-1].state') IN ('pending','running') ORDER BY seq")
+      .filter(t => t.undelivered.length > 0 || ['pending', 'running'].includes(latestAssignment(t)?.state ?? '')),
   }
 
   readonly decisions = {

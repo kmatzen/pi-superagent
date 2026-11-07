@@ -55,6 +55,23 @@ describe('herdr workers', () => {
     expect(agentName('#159', '4f02aa')).toMatch(/^[a-z][a-z0-9_-]{0,31}$/)
   })
 
+  it('a router start forgets a worker directory 40 days old, and keeps a fresh one', async () => {
+    // Measured 2026-11-07 audit: 120 directories in two days, every one of them read by every sweep, forever.
+    const dir = tmp()
+    const stamp = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString()
+    const record = (id: string, days: number) => ({
+      ticketId: 'T', sessionId: id, agent: `sa-${id}`, paneId: 'p', tabId: 't', workspace: '/w', dir: join(dir, 'workers', id),
+      startedAt: stamp(days + 1), endedAt: stamp(days), tabSettledAt: stamp(days),
+    })
+    for (const [id, days] of [['aaaa1111', 40], ['bbbb2222', 2]] as const) {
+      mkdirSync(join(dir, 'workers', id), { recursive: true })
+      writeFileSync(join(dir, 'workers', id, 'worker.json'), JSON.stringify(record(id, days)))
+    }
+    await new HerdrWorkers(options(dir, memoryHerdr().herdr)).retireOrphans(new Set())
+    expect(existsSync(join(dir, 'workers', 'aaaa1111')), 'the 40-day trail is gone').toBe(false)
+    expect(existsSync(join(dir, 'workers', 'bbbb2222')), 'a month of trail is kept').toBe(true)
+  })
+
   it('starts a worker as pi in its own tab, with the role and the bridge directory in its environment', async () => {
     const dir = tmp()
     const m = memoryHerdr()

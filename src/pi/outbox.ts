@@ -34,12 +34,12 @@ export class CommentOutbox implements OutboxPort {
   /** A failed post stays pending: marking it sent after an exception is success reported out of nothing. A channel
    *  that answers the same way every time (a 404 for a repository this account cannot see) is no transient fault:
    *  past the budget the reply is dropped, and the give-up is said once, out loud. */
+  // The caller persists: a flush writes the ledger once, not once per row it touched.
   private failed(row: Row, error: unknown): void {
     if (row.tries && row.tries >= this.maxTries) {
       row.status = 'dropped'
       this.gaveUp(row.message, row.tries, String(error).slice(0, 200))
     }
-    this.persist()
   }
 
   send(message: OutboundMessage): void {
@@ -57,15 +57,15 @@ export class CommentOutbox implements OutboxPort {
 
   flush(): number {
     let sent = 0
-    // Send-once only has to outlive a restart; a ledger of every message ever posted is just growth.
+    // Send-once only has to outlive a restart; a ledger of every message ever posted is just growth. A reply
+    // the channel refused forever (a repository this account cannot see) ages out on the same clock.
     for (const [id, row] of Object.entries(this.rows)) {
-      if (row.status === 'sent' && Date.parse(row.at) < this.now() - KEEP_SENT_MS) { delete this.rows[id]; this.persist() }
+      if ((row.status === 'sent' || row.status === 'dropped') && Date.parse(row.at) < this.now() - KEEP_SENT_MS) delete this.rows[id]
     }
     for (const [id, row] of Object.entries(this.rows)) {
       if (row.status !== 'pending' || this.posting.has(id)) continue
       if (!this.sink.accepts(row.message)) {
         row.status = 'dropped'
-        this.persist()
         continue
       }
       try {
@@ -76,17 +76,17 @@ export class CommentOutbox implements OutboxPort {
         if (posted instanceof Promise) {
           // Sent only once the channel says so; a failed post stays pending for the next flush.
           this.posting.add(id)
-          posted.then(() => { row.status = 'sent'; this.persist() }, error => this.failed(row, error)).finally(() => this.posting.delete(id))
+          posted.then(() => { row.status = 'sent'; this.persist() }, error => { this.failed(row, error); this.persist() }).finally(() => this.posting.delete(id))
           sent++
           continue
         }
         row.status = 'sent'
-        this.persist()
         sent++
       } catch (error) {
         this.failed(row, error)
       }
     }
+    this.persist()
     return sent
   }
 

@@ -1,6 +1,6 @@
 /** Workers as real pi sessions in herdr tabs, reached through files because each outlives the router's process. */
 import { randomUUID } from 'node:crypto'
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Ticket } from '../core/index.ts'
 import type { WorkerEvent, WorkerSession } from './executor.ts'
@@ -113,6 +113,7 @@ export class HerdrWorkers {
   /** Every worker this router did not take over: its ticket ended, or moved on to a newer worker, while no
    *  router was listening. Interrupt each, and let its tab close. */
   async retireOrphans(adopted: ReadonlySet<string>): Promise<WorkerRecord[]> {
+    this.prune()
     const retired: WorkerRecord[] = []
     // A record this process wrote is no orphan: recovery relaunches workers before it sweeps, and a launch still in
     // flight is not adopted yet, so the sweep interrupted fresh workers and marked them ended.
@@ -156,6 +157,24 @@ export class HerdrWorkers {
       closed.push(tab.tabId)
     }
     return closed
+  }
+
+  /**
+   * A worker's files are the audit trail for its ticket, for a while. Kept forever they grew by ~60 directories
+   * a day, and every sweep reads every one of them, so the price of the trail landed on each router start.
+   */
+  private prune(olderThanMs = 30 * 86_400_000): void {
+    const cutoff = Date.now() - olderThanMs
+    if (!existsSync(this.root)) return
+    for (const entry of readdirSync(this.root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const dir = join(this.root, entry.name)
+      let record: WorkerRecord | undefined
+      try { record = JSON.parse(readFileSync(join(dir, 'worker.json'), 'utf8')) as WorkerRecord } catch { continue }
+      // Both stamps: a worker the router stopped with its tab still open is not finished being auditable.
+      if (!record.endedAt || !record.tabSettledAt || Date.parse(record.endedAt) > cutoff) continue
+      rmSync(dir, { recursive: true, force: true })
+    }
   }
 
   private records(ended = false): WorkerRecord[] {
