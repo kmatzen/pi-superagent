@@ -1,7 +1,8 @@
 /** The package entry point: the router in the session the start script launches, the worker role inside a
  *  worker, and inert everywhere else. */
 import { createHash, randomUUID } from 'node:crypto'
-import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
@@ -305,10 +306,13 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     launch: async ({ ticket, report }) => {
       const channel = ticket.channels[0]
       // A ticket with no workspace is the ticket's failure, with the command's own output as the summary.
+      const token = cfg.workerTokenFile ? workerToken(cfg.workerTokenFile, (event, fields) => log.line('warn', event, fields)) : undefined
       const workspace = prepareWorkspace({
         root: cfg.worktreeRoot, ticketId: ticket.id, stateDir: cfg.dataDir,
         ...(cfg.prepare ? { prepare: cfg.prepare } : {}),
         ...(cfg.blockedCommands ? { blockedCommands: cfg.blockedCommands } : {}),
+        ...(token ? { workerToken: token } : {}),
+        ...(cfg.githubSelf ? { identity: { name: cfg.githubSelf, email: `${cfg.githubSelf}@users.noreply.github.com` } } : {}),
       })
       if (cfg.githubRepo && !cfg.prepare) await checkoutRepository(workspace, cfg.githubRepo, ticket.id)
       if (herdrWorkers) {
@@ -371,8 +375,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const address = ticket.channels[0]?.source === 'github' ? ticket.channels[0].address as { issue?: string; repo?: string } : undefined
       const issue = address?.issue
       const repo = address?.repo ?? cfg.githubRepo
-      // Without gh the worker cannot open a pull request, so it is not asked to.
-      const pulls = cfg.blockedCommands?.includes('gh') ? '' : `\n${pullBrief(issue && repo ? `${repo}#${issue}` : undefined)}`
+      // Without gh the worker cannot open a pull request, so it is not asked to. Without a token of its own it
+      // cannot push either, and the old brief sent it to try: measured, gh answers "please run gh auth login".
+      const pulls = cfg.blockedCommands?.includes('gh') ? ''
+        : `\n${cfg.workerTokenFile
+          ? pullBrief(issue && repo ? `${repo}#${issue}` : undefined)
+          : pullBrief(undefined, false)}`
       if (!issue || !repo) return brief + pulls
       // A comment the worker posts itself carries no reply footer, so the router would read it as the
       // operator asking again on this thread.
@@ -574,8 +582,13 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
   const recovered = (async () => {
     for (const ticket of repos.tickets.open()) await recover(ticket)
-    const swept = sweepWorktrees(cfg.worktreeRoot, new Set(repos.tickets.open().map(t => t.id)), cfg.keepWorktrees ?? 20)
-    if (swept) log.line('info', 'worktree.swept', { removed: swept, kept: cfg.keepWorktrees ?? 20 })
+    const openIds = new Set(repos.tickets.open().map(t => t.id))
+    const swept = sweepWorktrees(cfg.worktreeRoot, openIds, cfg.keepWorktrees ?? 20)
+    const homes = sweepHomes(join(cfg.dataDir, 'worker-homes'), openIds)
+    if (swept.removed || swept.keptWork || homes) {
+      log.line('info', 'worktree.swept', { ...swept, kept: cfg.keepWorktrees ?? 20, homes,
+        note: swept.keptWork ? 'settled checkouts with commits on no remote are never deleted' : undefined })
+    }
     if (!herdrWorkers) return
     const adopted = new Set(executor.workers().map(w => w.sessionId))
     // Every tick waits on this: a herdr hiccup during the sweep must not wedge the router for its whole life.
@@ -660,23 +673,79 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
  * A number the operator set, or nothing when they set nothing. Garbage fails at startup: a NaN tick
  * interval becomes a 1ms loop, a NaN worker cap silences the fleet, and neither says why.
  */
+export interface SweepReport {
+  removed: number
+  /** Settled checkouts kept because they hold commits that exist on no remote: deleting these deletes work. */
+  keptWork: number
+  checkouts: number
+  /** Settled workspaces with files and no checkout, and empty ones: the 43 GB is not all code. */
+  bare: number
+  empty: number
+}
+
+/** A ticket's checkout is the ticket directory itself, or `repo` inside it: both layouts are live. */
+const checkoutOf = (dir: string): string | undefined =>
+  existsSync(join(dir, '.git')) ? dir : existsSync(join(dir, 'repo', '.git')) ? join(dir, 'repo') : undefined
+
+/** Commits on this checkout that exist on no remote. An unreadable checkout reads as unpushed and is kept:
+ *  the sweep frees disk, it never frees work it could not read. */
+function unpushedCommits(dir: string): number {
+  try {
+    // An unborn HEAD (a clone of an empty repository, a checkout mid-clone) reads as unpushed and is kept.
+    execFileSync('git', ['-C', dir, 'rev-parse', '--verify', '-q', 'HEAD'], { stdio: 'ignore', timeout: 10_000 })
+    return Number(execFileSync('git', ['-C', dir, 'rev-list', '--count', 'HEAD', '--not', '--remotes'],
+      { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim())
+  } catch { return 1 }
+}
+
 /**
- * Measured live: a ticket checkout is about 570 MB and nothing ever deleted one (75 tickets = 43 GB).
- * Keep the newest settled checkouts for the audit trail, delete the rest at startup.
+ * Measured live: a ticket checkout is about 570 MB, 75 of them, 43 GB, and nothing ever deleted one. Keep
+ * the newest settled ones for the audit trail; delete older ones only when the work inside is on a remote.
  */
-export function sweepWorktrees(root: string, open: ReadonlySet<string>, keep: number): number {
+export function sweepWorktrees(root: string, open: ReadonlySet<string>, keep: number): SweepReport {
+  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0 }
   let names: string[]
-  try { names = readdirSync(root) } catch { return 0 }
+  try { names = readdirSync(root) } catch { return report }
   const settled = names
     .filter(name => !open.has(name))
     .map(name => { try { return { name, at: statSync(join(root, name)).mtimeMs } } catch { return null } })
     .filter((e): e is { name: string; at: number } => e !== null)
     .sort((a, b) => b.at - a.at)
+  settled.forEach((entry, index) => {
+    const dir = join(root, entry.name)
+    const checkout = checkoutOf(dir)
+    if (index < keep) { if (checkout) report.checkouts++; return }
+    if (!checkout) {
+      if (readdirSync(dir).length === 0) report.empty++; else report.bare++
+    }
+    if (checkout && unpushedCommits(checkout) > 0) { report.keptWork++; return }
+    try { rmSync(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
+  })
+  return report
+}
+
+/** Each worker gets a HOME under the state directory: configuration skeletons, a few KB, and one per ticket forever. */
+export function sweepHomes(root: string, open: ReadonlySet<string>): number {
+  let names: string[]
+  try { names = readdirSync(root) } catch { return 0 }
   let removed = 0
-  for (const entry of settled.slice(keep)) {
-    try { rmSync(join(root, entry.name), { recursive: true, force: true }); removed++ } catch { /* a busy checkout lives to the next start */ }
+  for (const name of names) {
+    if (open.has(name)) continue
+    try { rmSync(join(root, name), { recursive: true, force: true }); removed++ } catch { /* in use: the next start tries again */ }
   }
   return removed
+}
+
+/** Read at every launch, so a rotated token lands on the next worker without a router restart. */
+function workerToken(file: string, warn: (event: string, fields: Record<string, unknown>) => void): string | undefined {
+  try {
+    const token = readFileSync(file, 'utf8').trim()
+    if (!token) throw new Error('empty')
+    return token
+  } catch (error) {
+    warn('worker.token_unreadable', { file, error: String(error).slice(0, 120) })
+    return undefined
+  }
 }
 
 /** The panel's POST secret, made once per state directory: pause and stop are writes, and localhost is not a credential. */
@@ -703,6 +772,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const tickMs = positiveNumber('PI_SUPERAGENT_TICK_MS', env.PI_SUPERAGENT_TICK_MS)
   const panelPort = positiveNumber('PI_SUPERAGENT_PANEL_PORT', env.PI_SUPERAGENT_PANEL_PORT)
   const keepWorktrees = positiveNumber('PI_SUPERAGENT_KEEP_WORKTREES', env.PI_SUPERAGENT_KEEP_WORKTREES)
+  const workerTokenFile = env.PI_SUPERAGENT_WORKER_TOKEN_FILE?.trim()
   return {
     dataDir, worktreeRoot: env.PI_SUPERAGENT_WORKTREES ?? `${dataDir}/work`,
     self: env.PI_SUPERAGENT_SELF ?? 'pi-superagent',
@@ -710,6 +780,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(tickMs === undefined ? {} : { tickMs }),
     ...(panelPort === undefined ? {} : { panelPort }),
     ...(keepWorktrees === undefined ? {} : { keepWorktrees: Math.floor(keepWorktrees) }),
+    ...(workerTokenFile ? { workerTokenFile } : {}),
     bots: new Set((env.PI_SUPERAGENT_BOTS ?? 'pi-*,fleet-*').split(',').map(s => s.trim()).filter(Boolean)),
     ...(env.PI_SUPERAGENT_PREPARE ? { prepare: env.PI_SUPERAGENT_PREPARE } : {}),
     ...(env.PI_SUPERAGENT_BLOCKED ? { blockedCommands: env.PI_SUPERAGENT_BLOCKED.split(',').map(s => s.trim()).filter(Boolean) } : {}),

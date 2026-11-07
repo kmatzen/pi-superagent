@@ -13,6 +13,13 @@ export interface WorkspaceRequest {
   blockedCommands?: readonly string[]
   stateDir: string
   extra?: Record<string, string>
+  /**
+   * A scoped token for this worker's GitHub work. The worker's HOME is its own, so it has no login: without
+   * this it writes code it cannot hand over, which is what the brief tells every code ticket to do.
+   */
+  workerToken?: string
+  /** What git records on the worker's commits: a worker with no git config gets `user@host.local`. */
+  identity?: { name: string, email: string }
 }
 
 /** Names that hand a worker the operator's identity: token paths, agent config, cloud credentials. */
@@ -54,9 +61,11 @@ export function prepareWorkspace(request: WorkspaceRequest): PreparedWorkspace {
   // checkout directory that is not empty means "already cloned" to checkoutRepository.
   const home = join(request.stateDir, 'worker-homes', request.ticketId)
   mkdirSync(home, { recursive: true, mode: 0o700 })
+  seedHome(home, request.workerToken, request.identity)
   const env: Record<string, string> = {
     ...workerBase(process.env),
     PATH: path,
+    ...(request.workerToken ? { GH_TOKEN: request.workerToken } : {}),
     HOME: home,
     XDG_CONFIG_HOME: join(home, '.config'),
     GH_CONFIG_DIR: join(home, '.config', 'gh'),
@@ -99,6 +108,17 @@ export async function checkoutRepository(workspace: PreparedWorkspace, repo: str
   } finally {
     rmSync(stage, { recursive: true, force: true })
   }
+}
+
+/** The worker's own HOME, seeded so its commits carry an identity and its scoped token can reach GitHub. */
+function seedHome(home: string, token?: string, identity?: { name: string, email: string }): void {
+  const name = identity?.name ?? 'pi-superagent'
+  const gitconfig = ['[user]', `\tname = ${name}`, `\temail = ${identity?.email ?? `${name}@users.noreply.github.com`}`]
+  if (token) {
+    writeFileSync(join(home, '.git-credentials'), `https://x-access-token:${token}@github.com\n`, { mode: 0o600 })
+    gitconfig.push('[credential]', '\thelper = store')
+  }
+  writeFileSync(join(home, '.gitconfig'), `${gitconfig.join('\n')}\n`, { mode: 0o600 })
 }
 
 /** One directory, first on PATH, holding a refusal for every blocked name. A shim says what it refused. */

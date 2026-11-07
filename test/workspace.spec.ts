@@ -150,6 +150,30 @@ describe('what a worker is given', () => {
   })
 })
 
+describe('what a worker is given when the operator names a token', () => {
+  it('gives it a git identity, and GitHub access only through that token', () => {
+    // Measured with the isolated HOME: `gh api user` answers "please run gh auth login", so the brief that
+    // says "push it and open a pull request" sends every code ticket to a failure it cannot avoid.
+    const root = tmp()
+    const withToken = prepareWorkspace({
+      root, ticketId: 'TK-tok', stateDir: root, workerToken: 'ghp_scoped',
+      identity: { name: 'bot', email: 'bot@users.noreply.github.com' },
+    })
+    const home = join(root, 'worker-homes', 'TK-tok')
+    expect(withToken.env.GH_TOKEN).toBe('ghp_scoped')
+    const gitconfig = readFileSync(join(home, '.gitconfig'), 'utf8')
+    expect(gitconfig).toContain('email = bot@users.noreply.github.com')
+    expect(gitconfig).toContain('helper = store')
+    expect(readFileSync(join(home, '.git-credentials'), 'utf8')).toContain('x-access-token:ghp_scoped@github.com')
+    expect(statSync(join(home, '.git-credentials')).mode & 0o077).toBe(0)
+
+    const bare = prepareWorkspace({ root, ticketId: 'TK-notok', stateDir: root })
+    expect(bare.env, 'no token, no GitHub identity in the environment').not.toHaveProperty('GH_TOKEN')
+    expect(existsSync(join(root, 'worker-homes', 'TK-notok', '.git-credentials'))).toBe(false)
+    expect(readFileSync(join(root, 'worker-homes', 'TK-notok', '.gitconfig'), 'utf8')).toContain('pi-superagent')
+  })
+})
+
 describe('workerBase', () => {
   it('drops the credential names and keeps everything a build needs', () => {
     const out = workerBase({ PATH: '/bin', HOME: '/home/op', PI_SUPERAGENT_GITHUB_TOKEN_FILE: '/t', PI_OPS_REPO: 'a/b', PI_SUPERAGENT_MAX_WORKERS: '8' })
