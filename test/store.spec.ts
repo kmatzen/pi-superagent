@@ -47,3 +47,18 @@ describe('the ticket store', () => {
     expect(r.tickets.active().map(t => t.id).sort()).toEqual(['queued', 'working'])
   })
 })
+
+describe('the transaction wrapper', () => {
+  it('refuses an async body, because the commit would land before its writes', () => {
+    // `work: () => T` infers T = Promise for an async body, so the call compiles and commits an empty
+    // transaction: every write inside it lands outside the atomic block, and a crash rolls back nothing.
+    const dir = mkdtempSync(join(tmpdir(), 'sa-atomic-'))
+    const store = new SqliteRepositories(join(dir, 't.db'))
+    try {
+      expect(() => store.atomic(async () => 1)).toThrow(/synchronous/)
+    } finally {
+      store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

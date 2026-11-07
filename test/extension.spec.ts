@@ -928,6 +928,9 @@ describe('the state a router start leaves behind', () => {
     const base = { PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_GITHUB_REPO: 'o/r', PI_SUPERAGENT_STATE: '/s', PI_SUPERAGENT_WORKTREES: '/w' }
     expect(configFrom({ ...base, PI_SUPERAGENT_KEEP_WORKTREES: '7' })?.keepWorktrees).toBe(7)
     expect(configFrom(base)?.keepWorktrees).toBeUndefined()
+    // A setting with no name in configFrom is a setting the operator cannot set: workerQuietMinutes had none.
+    expect(configFrom({ ...base, PI_SUPERAGENT_WORKER_QUIET_MINUTES: '45' })?.workerQuietMinutes).toBe(45)
+    expect(configFrom({ ...base, PI_SUPERAGENT_WORKER_TOKEN_FILE: '/s/worker-token' })?.workerTokenFile).toBe('/s/worker-token')
   })
 })
 
