@@ -38,6 +38,28 @@ describe('ghApi', () => {
   const row = (id: number) => ({ id, user: { login: 'octocat' }, author_association: 'OWNER', state: 'APPROVED',
     submitted_at: '2026-11-06T10:00:00Z', body: 'approved' })
 
+  it('reads reviews as the account that opened the pull request, not the watched one', async () => {
+    const dir = tmp()
+    const watched = join(dir, 'watched-token')
+    const opener = join(dir, 'opener-token')
+    writeFileSync(watched, 'watched-secret\n')
+    writeFileSync(opener, 'opener-secret\n')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+case "$1 $2" in
+  "api repos/o/r/issues/comments"*)   echo "$GH_TOKEN" >> "$(dirname "$0")/watched.log"; echo '[]' ;;
+  "api repos/"*"/pulls/"*"/reviews"*) echo "$GH_TOKEN" >> "$(dirname "$0")/reviews.log"; echo '[]' ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const api = ghApi({ bin, repo: 'o/r', tokenFile: watched, reviewsTokenFile: opener, followed: () => [{ repo: 'o/r', number: 9 }] })
+    await api.comments?.(undefined)
+    await api.reviews?.(0)
+    expect(readFileSync(join(dir, 'watched.log'), 'utf8').trim()).toBe('watched-secret')
+    expect(readFileSync(join(dir, 'reviews.log'), 'utf8').trim()).toBe('opener-secret')
+  })
+
   it('reads the reviews of the pull requests tickets follow, in their own repositories, and a dead pull does not stop the poll', async () => {
     // The old read walked every open pull request in one repository (50 open was 51 calls per poll) and could
     // not see a followed pull in a second repository at all.
