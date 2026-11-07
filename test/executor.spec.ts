@@ -144,6 +144,17 @@ describe('PiExecutor', () => {
     expect(f.executor.quiet(0).map(w => w.sessionId), 'activity ends the stretch; the next one is reported').toEqual(['s0'])
   })
 
+  it('a worker past its deadline is asked about once, and a settled worker is never late', async () => {
+    const f = fixture()
+    f.executor.start(ticket(), assignment())
+    await f.executor.idle()
+    expect(f.executor.overdue(6), 'six hours have not passed').toEqual([])
+    expect(f.executor.overdue(0).map(w => w.sessionId)).toEqual(['s0'])
+    expect(f.executor.overdue(0), 'the deadline asks the operator once, not on every tick').toEqual([])
+    f.sessions[0]!.emit({ type: 'settled' })
+    expect(f.executor.overdue(0), 'a parked worker is idle by design, not overdue').toEqual([])
+  })
+
   it('a worker with no events at all is quiet, which is a state the ticket can see', async () => {
     const f = fixture()
     f.executor.start(ticket(), assignment())
