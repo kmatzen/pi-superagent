@@ -1,7 +1,7 @@
 /** The package entry point: the router in the session the start script launches, the worker role inside a
  *  worker, and inert everywhere else. */
-import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
@@ -574,6 +574,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
   const recovered = (async () => {
     for (const ticket of repos.tickets.open()) await recover(ticket)
+    const swept = sweepWorktrees(cfg.worktreeRoot, new Set(repos.tickets.open().map(t => t.id)), cfg.keepWorktrees ?? 20)
+    if (swept) log.line('info', 'worktree.swept', { removed: swept, kept: cfg.keepWorktrees ?? 20 })
     if (!herdrWorkers) return
     const adopted = new Set(executor.workers().map(w => w.sessionId))
     // Every tick waits on this: a herdr hiccup during the sweep must not wedge the router for its whole life.
@@ -586,8 +588,23 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   })()
 
   let pollFailures = 0
-  const timer = setInterval(() => { void tick() }, cfg.tickMs ?? 30_000)
-  const off = pi.on('agent_settled', () => { void tick() })
+  // Ticks cost 1-5 s and every settled agent asks for one: five workers settling at once used to start
+  // five full GitHub polls. One runs, and the demand to run again after it is remembered.
+  let ticking = false
+  let again = false
+  const runTick = (): void => {
+    if (ticking) { again = true; return }
+    ticking = true
+    void tick().finally(() => {
+      ticking = false
+      if (again) { again = false; runTick() }
+    })
+  }
+  const timer = setInterval(runTick, cfg.tickMs ?? 30_000)
+  const off = pi.on('agent_settled', runTick)
+
+  // Made at startup, not at the first write: the operator reads this file to pause the fleet by hand.
+  if (cfg.panelPort) panelToken(cfg.dataDir)
 
   const panel = cfg.panelPort
     ? createPanelServer({
@@ -595,6 +612,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       load: () => panelLoad(), isPaused: () => paused, workers: () => executor.workers(),
       health: () => { try { return JSON.parse(readFileSync(`${cfg.dataDir}/health.json`, 'utf8')) as Record<string, unknown> } catch { return {} } },
       log: (level, event, fields) => log.line(level, event, fields), setPaused: (v: boolean) => { paused = v },
+      token: () => panelToken(cfg.dataDir),
       now: deps.now ?? (() => new Date().toISOString()),
     })
     : undefined
@@ -642,6 +660,34 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
  * A number the operator set, or nothing when they set nothing. Garbage fails at startup: a NaN tick
  * interval becomes a 1ms loop, a NaN worker cap silences the fleet, and neither says why.
  */
+/**
+ * Measured live: a ticket checkout is about 570 MB and nothing ever deleted one (75 tickets = 43 GB).
+ * Keep the newest settled checkouts for the audit trail, delete the rest at startup.
+ */
+export function sweepWorktrees(root: string, open: ReadonlySet<string>, keep: number): number {
+  let names: string[]
+  try { names = readdirSync(root) } catch { return 0 }
+  const settled = names
+    .filter(name => !open.has(name))
+    .map(name => { try { return { name, at: statSync(join(root, name)).mtimeMs } } catch { return null } })
+    .filter((e): e is { name: string; at: number } => e !== null)
+    .sort((a, b) => b.at - a.at)
+  let removed = 0
+  for (const entry of settled.slice(keep)) {
+    try { rmSync(join(root, entry.name), { recursive: true, force: true }); removed++ } catch { /* a busy checkout lives to the next start */ }
+  }
+  return removed
+}
+
+/** The panel's POST secret, made once per state directory: pause and stop are writes, and localhost is not a credential. */
+export function panelToken(dataDir: string): string {
+  const file = join(dataDir, 'panel-token')
+  try { const seen = readFileSync(file, 'utf8').trim(); if (seen) return seen } catch { /* the first start makes it */ }
+  const secret = createHash('sha256').update(`${randomUUID()}:${Date.now()}`).digest('hex').slice(0, 32)
+  writeFileSync(file, secret, { mode: 0o600 })
+  return secret
+}
+
 function positiveNumber(name: string, raw: string | undefined): number | undefined {
   if (raw === undefined || raw.trim() === '') return undefined
   const value = Number(raw)
@@ -656,12 +702,14 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const maxWorkers = positiveNumber('PI_SUPERAGENT_MAX_WORKERS', env.PI_SUPERAGENT_MAX_WORKERS)
   const tickMs = positiveNumber('PI_SUPERAGENT_TICK_MS', env.PI_SUPERAGENT_TICK_MS)
   const panelPort = positiveNumber('PI_SUPERAGENT_PANEL_PORT', env.PI_SUPERAGENT_PANEL_PORT)
+  const keepWorktrees = positiveNumber('PI_SUPERAGENT_KEEP_WORKTREES', env.PI_SUPERAGENT_KEEP_WORKTREES)
   return {
     dataDir, worktreeRoot: env.PI_SUPERAGENT_WORKTREES ?? `${dataDir}/work`,
     self: env.PI_SUPERAGENT_SELF ?? 'pi-superagent',
     ...(maxWorkers === undefined ? {} : { maxConcurrent: maxWorkers }),
     ...(tickMs === undefined ? {} : { tickMs }),
     ...(panelPort === undefined ? {} : { panelPort }),
+    ...(keepWorktrees === undefined ? {} : { keepWorktrees: Math.floor(keepWorktrees) }),
     bots: new Set((env.PI_SUPERAGENT_BOTS ?? 'pi-*,fleet-*').split(',').map(s => s.trim()).filter(Boolean)),
     ...(env.PI_SUPERAGENT_PREPARE ? { prepare: env.PI_SUPERAGENT_PREPARE } : {}),
     ...(env.PI_SUPERAGENT_BLOCKED ? { blockedCommands: env.PI_SUPERAGENT_BLOCKED.split(',').map(s => s.trim()).filter(Boolean) } : {}),

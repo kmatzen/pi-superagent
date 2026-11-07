@@ -150,10 +150,12 @@ start() {
   )
   # herdr starts the tab from its own environment, not this one: a setting reaches the router only by name.
   local key
-  for key in GITHUB_REPO GITHUB_SELF GITHUB_TOKEN_FILE SELF BOTS ALLOWED MAX_WORKERS TICK_MS PREPARE BLOCKED ALLOW_DELEGATION JUDGE_THINKING SDK_PATH; do
-    key="PI_SUPERAGENT_$key"
-    [ -n "${!key:-}" ] && env+=(--env "$key=${!key}")
-  done
+  # Every setting reaches the router by name, so a knob added to config.env works the day it is written;
+  # the old fixed list is how a documented setting silently did nothing.
+  local name
+  while IFS= read -r name; do
+    [ -n "${!name:-}" ] && env+=(--env "$name=${!name}")
+  done < <(compgen -v PI_SUPERAGENT_ | grep -vE '^PI_SUPERAGENT_(ROLE|STATE|WORKTREES|PANEL_PORT|SESSION_ID|HERDR_BIN|HERDR_WORKSPACE)$')
   local tab; tab="$("$HERDR_BIN" tab create --workspace "$ws" --cwd "$STATE" --label engine "${env[@]}" --no-focus)" || return 1
   local pane_id tab_id
   pane_id="$(printf '%s' "$tab" | field result root_pane pane_id)"

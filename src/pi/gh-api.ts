@@ -1,6 +1,6 @@
 /** GitHub through the `gh` CLI, as the account it is signed in as or as the one a token file names. */
 import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState, type PrReview } from './source-github.ts'
 import type { PullApi } from './pulls.ts'
 
@@ -45,12 +45,20 @@ const associationOf = (row: { author_association?: string }): string => row.auth
 
 // Asynchronous on purpose: execFileSync held the router's event loop for every round trip (1.5-4 s a
 // pass), and the panel and the judge froze with it.
+// Re-read on change, not on every call: a tick makes about six calls, and a rotated token still lands
+// on the next mtime tick without a restart.
+let cachedToken: { file: string, mtimeMs: number, token: string } | undefined
+
 const ghCall = ({ bin = 'gh', tokenFile }: GhOptions) => (args: string[], stdin?: string): Promise<string> => new Promise((resolve, reject) => {
   let env = process.env
   if (tokenFile) {
     // Read on every call, so a rotated token takes effect without a restart; only gh's environment holds it.
     let token = ''
-    try { token = readFileSync(tokenFile, 'utf8').trim() } catch (error) {
+    try {
+      const mtimeMs = statSync(tokenFile).mtimeMs
+      if (cachedToken?.file === tokenFile && cachedToken.mtimeMs === mtimeMs) token = cachedToken.token
+      else { token = readFileSync(tokenFile, 'utf8').trim(); cachedToken = { file: tokenFile, mtimeMs, token } }
+    } catch (error) {
       reject(new Error(`cannot read the GitHub token file ${tokenFile}: ${(error as NodeJS.ErrnoException).code ?? 'unreadable'}`))
       return
     }
