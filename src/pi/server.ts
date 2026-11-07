@@ -21,6 +21,8 @@ export interface PanelSource {
   health(): Record<string, unknown>
   isPaused(): boolean
   setPaused(v: boolean): void
+  /** Required on every POST: a localhost bind stops remote callers, not local ones. */
+  token?(): string
   now(): string
 }
 
@@ -138,6 +140,9 @@ export function createPanelServer(src: PanelSource): { server: Server; url(port:
     const host = String(req.headers.host ?? '')
     if (!/^127\.0\.0\.1:\d+$|^localhost:\d+$/.test(host)) { json(res, 403, { error: 'host must be 127.0.0.1 or localhost' }); return }
     if (url.pathname.startsWith('/api/') && req.headers['x-superagent-request'] !== '1') { json(res, 403, { error: 'missing x-superagent-request: 1' }); return }
+    if (req.method === 'POST' && src.token && req.headers['x-superagent-token'] !== src.token()) {
+      json(res, 403, { error: 'a POST needs the panel token in x-superagent-token' }); return
+    }
     const m = readModel(src)
     if (url.pathname === '/api/state') return json(res, 200, { paused: m.paused, load: m.load, counts: m.counts, health: m.health, workers: m.workers })
     if (url.pathname === '/api/settings') return json(res, 200, { policyVersion: m.policy.version, paused: m.paused, revision: 1 })
