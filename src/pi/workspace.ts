@@ -63,7 +63,10 @@ const run = promisify(execFile)
 /** Publish only a complete checkout. Resumed workers keep their branch, edits and any legacy workspace. */
 export async function checkoutRepository(workspace: PreparedWorkspace, repo: string, ticketId: string) {
   if (readdirSync(workspace.dir).length) return
-  if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/.test(repo) || ['.', '..'].includes(repo.split('/')[1]!)) {
+  // An enterprise-managed account name carries an underscore: the watched board's own account is one, and a
+  // stricter owner pattern refused to clone it, so no worker could start.
+  const [owner, name] = repo.split('/')
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9_.-]+$/.test(repo) || [owner, name].some(part => !part || !/[A-Za-z0-9]/.test(part) || ['.', '..'].includes(part))) {
     throw new WorkspaceError('prepare-failed', `invalid GitHub repository: ${repo}`)
   }
   const stage = mkdtempSync(`${workspace.dir}.clone-`)
