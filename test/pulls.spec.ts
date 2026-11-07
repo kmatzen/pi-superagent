@@ -77,7 +77,7 @@ const openPull: PullState = { open: true, merged: false, createdAt: created }
 const comment = (over: Partial<IssueComment> = {}): IssueComment =>
   ({ issue: 5, author: 'reviewer', association: 'MEMBER', at: later, body: 'please rename the flag', ...over })
 const review = (over: Partial<PrReview> = {}): PrReview =>
-  ({ pr: 5, id: 900, author: 'reviewer', association: 'MEMBER', state: 'CHANGES_REQUESTED', at: later, body: 'not yet', ...over })
+  ({ pr: 5, repo: 'o/r', id: 900, author: 'reviewer', association: 'MEMBER', state: 'CHANGES_REQUESTED', at: later, body: 'not yet', ...over })
 
 describe('following a ticket\'s pull requests', () => {
   it('asks GitHub nothing about a pull request in the watched repository while it is open there', async () => {

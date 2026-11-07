@@ -217,7 +217,7 @@ describe('ghPulls', () => {
     ])
     expect(gh.calls()).toContain('api repos/x/y/issues/11/comments?per_page=100&since=2026-11-06T08%3A00%3A00Z')
     expect(await api.reviews('x/y', 11)).toEqual([
-      { pr: 11, id: 5, author: 'rev', association: 'OWNER', state: 'APPROVED', at: '2026-11-06T09:30:00Z', body: '' },
+      { pr: 11, repo: 'x/y', id: 5, author: 'rev', association: 'OWNER', state: 'APPROVED', at: '2026-11-06T09:30:00Z', body: '' },
     ])
   })
 

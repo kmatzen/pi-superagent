@@ -13,7 +13,7 @@ const issue = (over: Partial<IssueState> = {}): IssueState => ({
 })
 
 const review = (over: Partial<PrReview> = {}): PrReview => ({
-  pr: 77, id: 500, author: 'octocat', association: 'OWNER', state: 'CHANGES_REQUESTED', at: at, body: 'use the cursor, not a scan', ...over,
+  pr: 77, repo: 'o/r', id: 500, author: 'octocat', association: 'OWNER', state: 'CHANGES_REQUESTED', at: at, body: 'use the cursor, not a scan', ...over,
 })
 
 function fixture(comments: IssueComment[], issues: IssueState[], reviews: PrReview[] = []) {
@@ -212,6 +212,33 @@ describe('GithubSource', () => {
     expect(triggers[0]!.text).toContain('changes requested')
     expect(triggers[0]!.channel).toMatchObject({ thread: '#77', address: { issue: '77' } })
   })
+  it('a review in another repository names that repository, so its reply lands there', async () => {
+    const reviews: PrReview[] = [review({ id: 30, repo: 'other/r', pr: 12 })]
+    const f = fixture([], [], reviews)
+    f.source.bootstrap()
+    await f.source.poll()
+    reviews.push(review({ id: 40, repo: 'other/r', pr: 12, body: 'ship it' }))
+    const [trigger] = await f.source.poll()
+    expect(trigger).toMatchObject({
+      id: 'github:other/r#12:review:40',
+      threads: [{ source: 'github', id: 'other/r#12' }],
+      channel: { thread: 'other/r#12', address: { repo: 'other/r', issue: '12' } },
+    })
+  })
+
+  it('a pull request joined late keeps its own cursor, so its history is not a replay', async () => {
+    const reviews: PrReview[] = []
+    const f = fixture([], [], reviews)
+    f.source.bootstrap()
+    await f.source.poll()
+    reviews.push(review({ id: 100 }))
+    expect(await f.source.poll()).toHaveLength(1)
+    reviews.push(review({ id: 500, repo: 'other/r', pr: 12 }))
+    expect(await f.source.poll(), 'the reviews it joined with are history, not new requests').toHaveLength(0)
+    reviews.push(review({ id: 501, repo: 'other/r', pr: 12 }))
+    expect((await f.source.poll()).map(t => t.id)).toEqual(['github:other/r#12:review:501'])
+  })
+
   it('the first look at reviews is silent history, not a replay of requests', async () => {
     const f = fixture([], [], [review(), review({ id: 501 })])
     f.source.bootstrap()
