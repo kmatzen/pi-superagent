@@ -47,3 +47,31 @@ describe('the ticket store', () => {
     expect(r.tickets.active().map(t => t.id).sort()).toEqual(['queued', 'working'])
   })
 })
+
+describe('the transaction wrapper', () => {
+  it('refuses an async body, because the commit would land before its writes', () => {
+    // `work: () => T` infers T = Promise for an async body, so the call compiles and commits an empty
+    // transaction: every write inside it lands outside the atomic block, and a crash rolls back nothing.
+    const store = repos()
+    expect(() => store.atomic(async () => 1)).toThrow(/synchronous/)
+    store.close()
+  })
+})
+
+describe('the ticket working set', () => {
+  it('forgets tickets that ended long ago and keeps open and recent ones', () => {
+    // Measured live: 81 of 89 ticket rows were closed, and tickets.open() parsed every one of them per call.
+    const store = repos()
+    const old = new Date(Date.now() - 120 * 86_400_000).toISOString()
+    const fresh = new Date(Date.now() - 2 * 86_400_000).toISOString()
+    store.atomic(() => {
+      store.tickets.save(ticket('tk-old', { ended: { at: old, by: 'host', outcome: 'completed' } }))
+      store.tickets.save(ticket('tk-fresh', { ended: { at: fresh, by: 'host', outcome: 'completed' } }))
+      store.tickets.save(ticket('tk-open'))
+    })
+    expect(store.pruneClosedTickets(new Date(Date.now() - 90 * 86_400_000).toISOString())).toBe(1)
+    expect(store.tickets.list().map(t => t.id)).toEqual(['tk-fresh', 'tk-open'])
+    expect(store.tickets.open().map(t => t.id)).toEqual(['tk-open'])
+    store.close()
+  })
+})

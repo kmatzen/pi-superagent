@@ -80,7 +80,9 @@ a crash. The router stores the ticket on disk, so after a restart it can find th
 up the conversation. [Architecture](docs/architecture.md) · [Design decisions](docs/design-decisions.md)
 
 The ticket engine comes from DeepSeek’s dsh-superagent-prototype. Three TLA+ models check how
-tickets, incoming messages and worker tabs behave when events arrive in different orders.
+tickets, incoming messages and worker tabs behave when events arrive in different orders. The models check
+the design: `scripts/check-formal` reads `formal/`, never `src/`, so a code change that leaves the design is
+caught by `npx vitest run` (492 tests) and not by TLC.
 [Upstream project](https://github.com/deepseek-ai/dsh-superagent-prototype) ·
 [Adaptation ledger](ADAPTATION.md) · [Formal verification](docs/formal-verification.md)
 
@@ -91,6 +93,8 @@ npm install
 npm run check            # Type-check and run the test suite
 npm run check:packed     # Install the tarball and exercise both the CLI and the pi extension
 scripts/check-formal     # Check all three models (about five minutes with a JDK)
+.ci/ci.yml               # The GitHub Actions job: copy to .github/workflows/ (a token needs the `workflow`
+                         # scope to push that path, which this repository's token does not have)
 ```
 
 The test suite clears `PI_SUPERAGENT_*` settings to isolate its router from yours.
