@@ -317,7 +317,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         ...(token ? { workerToken: token } : {}),
         ...(cfg.githubSelf ? { identity: { name: cfg.githubSelf, email: `${cfg.githubSelf}@users.noreply.github.com` } } : {}),
       })
-      if (cfg.githubRepo && !cfg.prepare) await checkoutRepository(workspace, cfg.githubRepo, ticket.id)
+      // In asks-only mode the watched repository is the ask board: cloning it put a checkout with no code in
+      // it in front of every worker, and a ticket naming no repository then ran for a day in an empty directory.
+      if (cfg.githubRepo && !cfg.prepare && !cfg.watchRepoIsAsks) await checkoutRepository(workspace, cfg.githubRepo, ticket.id)
       if (herdrWorkers) {
         return herdrWorkers.launch({
           ticket, thread: channel?.thread ?? ticket.id, workspace: workspace.dir, report,
@@ -387,8 +389,13 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       if (!issue || !repo) return brief + pulls
       // A comment the worker posts itself carries no reply footer, so the router would read it as the
       // operator asking again on this thread.
+      const clone = cfg.watchRepoIsAsks
+        ? 'Your workspace holds no checkout of code: the watched repository carries asks, not the repository this '
+          + 'request changes. Clone the repository the request names into your workspace before you change anything, '
+          + 'and if it names none, report blocked and say what you need. '
+        : ''
       return `${brief}\nThe request is GitHub issue ${repo}#${issue}: read it with \`gh issue view ${issue} --repo ${repo} --comments\`. `
-        + 'Do not comment on the issue yourself; ticket_report is how your result reaches it.' + pulls
+        + clone + 'Do not comment on the issue yourself; ticket_report is how your result reaches it.' + pulls
     },
     renderInput: input => input.kind === 'trigger'
       ? (repos.triggers.get(input.triggerId) ? `${repos.triggers.get(input.triggerId)!.actor.id}: ${repos.triggers.get(input.triggerId)!.text}` : undefined)
@@ -808,6 +815,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(workerTokenFile ? { workerTokenFile } : {}),
     ...(workerQuietMinutes === undefined ? {} : { workerQuietMinutes }),
     ...(deadlineHours === undefined ? {} : { workerDeadlineHours: deadlineHours }),
+    ...(env.PI_SUPERAGENT_WATCH_REPO_ASKS === '1' ? { watchRepoIsAsks: true } : {}),
     bots: new Set((env.PI_SUPERAGENT_BOTS ?? 'pi-*,fleet-*').split(',').map(s => s.trim()).filter(Boolean)),
     ...(env.PI_SUPERAGENT_PREPARE ? { prepare: env.PI_SUPERAGENT_PREPARE } : {}),
     ...(env.PI_SUPERAGENT_BLOCKED ? { blockedCommands: env.PI_SUPERAGENT_BLOCKED.split(',').map(s => s.trim()).filter(Boolean) } : {}),
