@@ -117,11 +117,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         if (seen.some(c => c.body.trimEnd() === `${body}\n\n${REPLY_MARKER}`)) return
         await githubApi.postComment(issue, body, repo)
       } catch (error) {
-        log.line('warn', 'outbox.github_failed', { issue, error: String(error).slice(0, 200) })
+        log.line('warn', 'outbox.github_failed', { issue, repo, error: String(error).slice(0, 200) })
         throw error
       }
     },
-  }, repos.kv)
+  }, repos.kv, () => Date.now(), 12,
+     (m, tries, error) => log.line('error', 'outbox.given_up', { thread: m.channel.thread, tries, error }))
   const accounts = ghAccounts(cfg)
   const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({ repo: cfg.githubRepo, ...accounts.watched }) : undefined)
   const github = githubApi

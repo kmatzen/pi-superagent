@@ -23,11 +23,24 @@ export class CommentOutbox implements OutboxPort {
   private readonly posting = new Set<string>()
 
   constructor(private readonly sink: CommentSink, private readonly store: OutboxStore,
-              private readonly now: () => number = () => Date.now()) {
+              private readonly now: () => number = () => Date.now(),
+              private readonly maxTries = 12,
+              private readonly gaveUp: (message: OutboundMessage, tries: number, error: string) => void = () => {}) {
     this.rows = this.store.get<Record<string, Row>>(KEY) ?? {}
   }
 
   private persist(): void { this.store.set(KEY, this.rows) }
+
+  /** A failed post stays pending: marking it sent after an exception is success reported out of nothing. A channel
+   *  that answers the same way every time (a 404 for a repository this account cannot see) is no transient fault:
+   *  past the budget the reply is dropped, and the give-up is said once, out loud. */
+  private failed(row: Row, error: unknown): void {
+    if (row.tries && row.tries >= this.maxTries) {
+      row.status = 'dropped'
+      this.gaveUp(row.message, row.tries, String(error).slice(0, 200))
+    }
+    this.persist()
+  }
 
   send(message: OutboundMessage): void {
     // Idempotent by id: the engine re-runs a command after a crash.
@@ -63,16 +76,15 @@ export class CommentOutbox implements OutboxPort {
         if (posted instanceof Promise) {
           // Sent only once the channel says so; a failed post stays pending for the next flush.
           this.posting.add(id)
-          posted.then(() => { row.status = 'sent'; this.persist() }, () => {}).finally(() => this.posting.delete(id))
+          posted.then(() => { row.status = 'sent'; this.persist() }, error => this.failed(row, error)).finally(() => this.posting.delete(id))
           sent++
           continue
         }
         row.status = 'sent'
         this.persist()
         sent++
-      } catch {
-        // Stays pending: marking it sent after an exception is success reported out of nothing.
-        this.persist()
+      } catch (error) {
+        this.failed(row, error)
       }
     }
     return sent
