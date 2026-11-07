@@ -208,7 +208,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       }),
       deliver: (ticket, assignment) => afterCommit('deliver', () => {
         const fresh = repos.tickets.get(ticket.id)
-        if (fresh) executorRef?.deliver(fresh, assignment)
+        if (!fresh) return
+        // Say it out loud: a delivery that the worker's model never read is the difference between a worker
+        // that ignored a review and one that was never told, and only the trail can tell them apart later.
+        log.line('info', 'input.delivered', { ticket: ticket.id, thread: fresh.channels[0]?.thread ?? ticket.id, waiting: fresh.undelivered.length })
+        executorRef?.deliver(fresh, assignment)
       }),
       stop: (ticket, assignment, reason) => afterCommit('stop', () => executorRef?.stop(ticket, assignment, reason)),
     },

@@ -171,6 +171,7 @@ describe('the router extension', () => {
     await f.running.tick()
     await until(() => f.workers[0]!.prompts.some(p => p.includes('octocat: tonight')))
     expect(f.workers[0]!.prompts.join('\n')).toContain('octocat: tonight')
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8'), 'the trail says the worker was told').toMatch(/input\.delivered .*thread=#482/)
   })
 
   it('a launch that fails on every poll says so on the issue once', async () => {
