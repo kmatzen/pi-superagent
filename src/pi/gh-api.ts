@@ -104,12 +104,25 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     async reviews(sinceId) {
       const targets = options.followed?.() ?? (await openPulls()).map(pr => ({ repo: options.repo, number: pr.number }))
       const out: PrReview[] = []
+      const unreadable: string[] = []
       for (const pr of targets) {
-        const rows = JSON.parse((await call(['api', `repos/${pr.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
+        let rows: ReviewRow[]
+        try {
+          rows = JSON.parse((await call(['api', `repos/${pr.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
+        } catch (error) {
+          // A followed pull request can be deleted, moved, or private to this account, and one such pull must
+          // not cost the poll every review in the batch: measured live 2026-11-07T04:07Z, where a pull that
+          // answers 404 stopped the router reading reviews at all. Nothing is lost by skipping it — the cursor
+          // is per source, so reviews on that pull are picked up above it whenever it becomes readable.
+          unreadable.push(`${pr.repo}#${pr.number}: ${String(error).slice(0, 100)}`)
+          continue
+        }
         for (const r of rows) if (r.id > sinceId && r.submitted_at) {
           out.push({ pr: pr.number, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at, body: r.body ?? '' })
         }
       }
+      // Every pull failing is the account or the network, and the poll must say so; one failing is one dead pull.
+      if (targets.length && unreadable.length === targets.length) throw new Error(unreadable.join('; '))
       return out.sort((a, b) => a.id - b.id)
     },
 

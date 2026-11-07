@@ -10,16 +10,21 @@ const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'ghapi-')); dirs.push(d
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
 
 /** A fake `gh`: answers the two reads from files and records every write, so no network is involved. */
-function fakeGh(comments: string, issues: string) {
+function fakeGh(comments: string, issues: string, reviews: Record<string, unknown[]> = {}) {
   const dir = tmp()
   writeFileSync(join(dir, 'comments.json'), comments)
   writeFileSync(join(dir, 'issues.json'), issues)
+  for (const [n, rows] of Object.entries(reviews)) writeFileSync(join(dir, `reviews.${n}.json`), JSON.stringify(rows))
   const bin = join(dir, 'gh')
   writeFileSync(bin, `#!/bin/bash
 case "$1 $2" in
   "api repos/o/r/issues/comments"*) cat "$(dirname "$0")/comments.json" ;;
   "api repos/o/r/issues?state="*)  cat "$(dirname "$0")/issues.json" ;;
   "api -X") cat - >> "$(dirname "$0")/posts.log" ;;
+  "api repos/"*"/pulls/"*"/reviews"*)
+    n="\${2##*pulls/}"; n="\${n%%/*}"
+    f="$(dirname "$0")/reviews.$n.json"
+    if [ -f "$f" ]; then cat "$f"; else echo 'gh: Not Found (HTTP 404)' >&2; exit 1; fi ;;
   *) echo "unexpected: $*" >&2; exit 1 ;;
 esac
 `)
@@ -28,6 +33,26 @@ esac
 }
 
 describe('ghApi', () => {
+  const row = (id: number) => ({ id, user: { login: 'octocat' }, author_association: 'OWNER', state: 'APPROVED',
+    submitted_at: '2026-11-06T10:00:00Z', body: 'approved' })
+
+  it('reads the reviews of the pull requests tickets follow, in their own repositories, and a dead pull does not stop the poll', async () => {
+    // The old read walked every open pull request in one repository (50 open was 51 calls per poll) and could
+    // not see a followed pull in a second repository at all.
+    const gh = fakeGh('[]', '[]', { 7: [row(501)], 9: [row(502)] })
+    const api = ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [
+      { repo: 'o/r', number: 7 }, { repo: 'o/r', number: 8 }, { repo: 'other/r', number: 9 }] })
+    const rows = await api.reviews!(500)
+    expect(rows.map(r => r.pr), 'the unreadable pull is skipped, the others are read').toEqual([7, 9])
+  })
+
+  it('fails the poll when no followed pull request can be read, because that is the account, not a dead pull', async () => {
+    const gh = fakeGh('[]', '[]')
+    const api = ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [{ repo: 'o/r', number: 7 }] })
+    await expect(api.reviews!(500)).rejects.toThrow(/Not Found/)
+  })
+
+
   it('maps a REST issue comment onto the domain comment', async () => {
     const gh = fakeGh(JSON.stringify([{
       issue_url: 'https://api.github.com/repos/o/r/issues/12', user: { login: 'octocat' }, author_association: 'COLLABORATOR',
