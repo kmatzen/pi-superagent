@@ -141,6 +141,38 @@ describe('following a ticket\'s pull requests', () => {
     expect(t.calls).toHaveLength(2)
   })
 
+  it('reads the pull requests it follows side by side, and never more than four at a time', async () => {
+    // Seven followed pulls read one at a time serialized a tick out to 20 s (measured live 2026-11-07, every 120 s); an uncapped fan-out spends GitHub's abuse threshold on a router with a hundred follows.
+    let live = 0
+    let peak = 0
+    let reads = 0
+    const t = follower({
+      pull: async () => {
+        live++; peak = Math.max(peak, live); reads++
+        await new Promise(resolve => setTimeout(resolve, 1))
+        live--
+        return openPull
+      },
+    })
+    const seven = ['other/lib#1', 'other/lib#2', 'other/lib#3', 'other/lib#4', 'other/lib#5', 'other/lib#6', 'other/lib#7']
+    await t.f.reconcile(t.following(...seven))
+    expect([reads, peak], 'every followed pull is read, four of them at once').toEqual([7, 4])
+    expect(t.closed).toEqual([])
+  })
+
+  it('names a pull request whose talk it cannot read once, and says when it reads it again', async () => {
+    const api: Partial<PullApi> = { pull: async () => openPull, comments: async () => { throw new Error('gh: Not Found (HTTP 404)') } }
+    const t = follower(api)
+    for (let pass = 0; pass < 3; pass++) {
+      await t.f.reconcile(t.following('other/lib#5'))
+      t.tick(120_000)
+    }
+    expect(t.warned, 'a pull request that stays unreadable is named once, not 720 times a day').toEqual(['pull.listen_failed'])
+    api.comments = async () => []
+    await t.f.reconcile(t.following('other/lib#5'))
+    expect(t.warned, 'and a pull request that becomes readable says so').toEqual(['pull.listen_failed', 'pull.listen_readable'])
+  })
+
   it('a closed follow is history: nothing is read for it', async () => {
     const t = follower({ pull: async () => openPull })
     await t.f.reconcile([{ follows: [{ thread: 'github:other/lib#5', own: true, closed: { at: later, outcome: 'merged' } }] }] as unknown as Ticket[])

@@ -15,7 +15,9 @@ export interface GithubApiOptions extends GhOptions {
   /**
    * The pull requests whose reviews matter. Reviews have no repository-wide feed, so a read costs one call
    * per pull request: asking for every open one made the tick grow with the repository (50 open pull requests
-   * was 51 round trips per poll), while the tickets only ever wait on the ones they follow.
+   * was 51 round trips per poll), while the tickets only ever wait on the ones they follow. Only the watched
+   * repository's entries are read from here — a followed pull in another repository is PullFollower's, and a
+   * caller that passes it gets the cost of the read and none of the effect.
    */
   followed: () => Array<{ repo: string; number: number }>
   /**
@@ -119,8 +121,9 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     },
 
     async reviews(sinceId) {
+      // Only the watched repository's: a followed pull elsewhere belongs to PullFollower, which owns its thread name, cursor and budget, and reading it here too cost 21 serialized round trips a poll for trigger ids already produced (measured 2026-11-07, seven foreign follows, 20 s ticks).
+      const targets = options.followed().filter(p => p.repo.toLowerCase() === options.repo.toLowerCase())
       // Reported once per pull, not once per poll: 2880 polls a day is not a log.
-      const targets = options.followed()
       const out: PrReview[] = []
       for (const pr of targets) {
         let rows: ReviewRow[]
