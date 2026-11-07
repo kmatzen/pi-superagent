@@ -111,6 +111,17 @@ it('the panel links tickets to their GitHub issue and names the source', async (
 })
 
 describe('the panel and the API', () => {
+  it('serves the newest open ticket first, where the operator is looking', async () => {
+    const f = await boot(true)
+    f.addComment(501, 'the newer ask')
+    await f.running.tick()
+    f.running.assessor.waiting().forEach(w => f.running.assessor.decide(w.evalId, { kind: 'accept', title: 'The newer ask', scope: 'now', reason: 'asked', acknowledgement: 'on it' }))
+    await f.running.tick()
+    const rows = (await f.api('/api/tickets', '1')).json() as unknown as Array<{ thread: string }>
+    expect(rows.map(t => t.thread), 'the panel leads with what just landed, not with the oldest ticket').toEqual(['#501', '#500'])
+    f.running.stop()
+  })
+
   it('refuses a malformed pause request, and stays alive to say so', async () => {
     // Measured 2026-11-07 audit: this handler sat outside the request's try, so a body that was not JSON was an
     // uncaught exception in the router process — a curl typo from the panel killed every running worker.

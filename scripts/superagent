@@ -48,6 +48,8 @@ ROUTER_PLACE="$STATE/router.herdr"
 GRACE="${PI_SUPERAGENT_GRACE:-30}"
 # How long start waits for the router to write its ready file. A router that never got there is not healthy.
 READY_WAIT="${PI_SUPERAGENT_READY_WAIT:-60}"
+# 0 reads as "do not wait" and would make every start report failure, so the floor is one second.
+[ "$READY_WAIT" -lt 1 ] 2>/dev/null && READY_WAIT=1
 # The panel is the operator's view of the engine (upstream's docs/005-panel.md: does anything need me, is
 # it healthy, what is the history of one piece of work). Loopback only; the API refuses a caller that does
 # not say what it is, and any non-local Host.

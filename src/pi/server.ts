@@ -48,7 +48,9 @@ const waitingOn = (t: Ticket): string => {
 export function readModel(src: PanelSource) {
   const now = src.now()
   const tickets = src.repos.tickets.list()
-  const open = tickets.filter(t => !t.ended)
+  // Newest first: list() is insertion order, and the operator opens this panel for the ticket that just
+  // landed. The ended list below says the same thing about its own order.
+  const open = tickets.filter(t => !t.ended).reverse()
   const threads = src.repos.threads.list()
   const decisions = threads.flatMap(t => src.repos.decisions.byThread(t.key))
   const filtered = threads.flatMap(t => src.repos.triggersOfThread(t.ref))

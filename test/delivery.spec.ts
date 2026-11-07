@@ -66,6 +66,16 @@ describe('delivery to a worker', () => {
     expect(readdirSync(stateDir), 'no file inbox appeared for the cited session').toEqual([])
   })
 
+  it('a ticket that keeps waiting for a worker is told once, not once per tick', () => {
+    const f = harness(undefined)
+    const t = ticket({})
+    f.executor.deliver(t, assignment())
+    const waiting = { ...t, delivery: { error: 'no live worker for this ticket', at: '2026-11-07T00:00:00Z' } } as never
+    f.executor.deliver(waiting, assignment())
+    f.executor.deliver(waiting, assignment())
+    expect(f.calls.filter(c => c.fn === 'deliveryFailed'), 'six parked tickets measured 17,000 row writes a day').toHaveLength(1)
+  })
+
   it('leaves the input undelivered so a later worker gets it, instead of marking it read', async () => {
     const f = harness(undefined)
     f.executor.deliver(ticket(), assignment())

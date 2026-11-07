@@ -39,6 +39,24 @@ export function parseThread(id: string, home: string): PullRef | undefined {
   return { repo: match[1] ?? home, number: Number(match[2]) }
 }
 
+/**
+ * The pull requests tickets are waiting on. A review read costs one call per pull, so the router reads these
+ * and nothing else; it lives here because a follow's thread takes two shapes in the database
+ * (`github:o/r#12`, and `github:#12` for the home repository) and that parsing must not be repeated at the
+ * call site, where a missed shape silently returns an empty set and no review is ever read again.
+ */
+export function followedPulls(tickets: readonly Ticket[], home: string): PullRef[] {
+  const out: PullRef[] = []
+  for (const ticket of tickets) {
+    for (const follow of ticket.follows ?? []) {
+      if (follow.closed) continue
+      const ref = follow.thread.startsWith('github:') ? parseThread(follow.thread.slice('github:'.length), home) : undefined
+      if (ref && !out.some(p => p.repo === ref.repo && p.number === ref.number)) out.push(ref)
+    }
+  }
+  return out
+}
+
 export const pullUrl = (pull: PullRef): string => `https://github.com/${pull.repo}/pull/${pull.number}`
 /** GitHub sends /issues/N on to /pull/N, so this one link serves both. */
 export const threadUrl = (id: string, home: string): string | undefined => {

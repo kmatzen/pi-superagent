@@ -44,6 +44,14 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     squatter.kill()
   })
 
+  it('treats a ready-wait of 0 as one second, not as a start that always fails', () => {
+    // 0 reads as "do not wait"; without a floor the loop never runs, the ready check fires, and a scheduled
+    // health check restarts a healthy router forever.
+    const out = run(['start'], { PI_SUPERAGENT_READY_WAIT: '0', FAKE_HERDR_READY: state })
+    expect(out.stderr).toMatch(/did not report ready within 1s/)
+    expect(out.status).toBe(1)
+  })
+
   it('exits 1 when the router never reports ready, because 0 promises healthy', () => {
     // The ready path is a directory here, so the fake herdr cannot write it and startup never completes.
     const out = run(['start'], { PI_SUPERAGENT_READY_WAIT: '1', FAKE_HERDR_READY: state })

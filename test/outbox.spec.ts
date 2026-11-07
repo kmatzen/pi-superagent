@@ -37,6 +37,22 @@ describe('the outbox', () => {
     expect(writes.length - before, 'three counted attempts, one write for the flush').toBe(4)
   })
 
+  it('an idle flush writes nothing at all', () => {
+    // The tick flushes the outbox twice, and the ledger is one blob: persisting an untouched one measured
+    // 5,700 identical SQLite writes a day on a router with nothing to send.
+    const writes: number[] = []
+    const kv = new Map<string, unknown>()
+    const countingStore = { get: <T,>(k: string) => kv.get(k) as T | undefined, set: (k: string, v: unknown) => { writes.push(1); kv.set(k, v) } }
+    const posts: string[] = []
+    const outbox = new CommentOutbox({ accepts: () => true, post: (m: { id: string }) => { posts.push(m.id) } }, countingStore)
+    outbox.send(github('m1'))
+    outbox.flush()
+    const before = writes.length
+    outbox.flush()
+    outbox.flush()
+    expect(writes.length - before, 'nothing changed, so nothing was written').toBe(0)
+  })
+
   it('a reply the channel will never take is gone after 30 days, like a sent one', () => {
     const now = Date.parse('2026-11-07T00:00:00Z')
     const kv = new Map<string, unknown>([['outbox', {

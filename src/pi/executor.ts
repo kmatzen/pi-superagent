@@ -17,6 +17,8 @@ export interface WorkerSession {
   readonly watch?: string
 }
 
+const NO_LIVE_WORKER = 'no live worker for this ticket'
+
 export type WorkerEvent =
   /** The session took queued input into a step: the engine may mark those Inputs read. */
   | { type: 'turnStarted' }
@@ -185,7 +187,12 @@ export class PiExecutor {
     // The file inbox this replaced picked its target by grepping the message for `session <8 hex>`, which let a
     // person's comment steer whichever worker's id appeared in it, and nothing read the file for a ticket with
     // no worker, so the input was marked delivered and lost. Measured 2026-11-07 audit.
-    if (!live) return this.engine.deliveryFailed(ticket.id, assignment.id, 'no live worker for this ticket')
+    if (!live) {
+      // The engine calls this every tick for every ticket with undelivered input; six parked tickets measured
+      // 17,000 row writes a day recording the same sentence, and stamped the ticket's last failure "now" forever.
+      if (ticket.delivery?.error === NO_LIVE_WORKER) return
+      return this.engine.deliveryFailed(ticket.id, assignment.id, NO_LIVE_WORKER)
+    }
     for (const input of visible) live.session.prompt(String(input.text), 'followUp')
     this.engine.inputsDelivered(ticket.id, assignment.id, visible.map(i => i.id))
     live.pendingRead.push(...visible.map(i => i.id))

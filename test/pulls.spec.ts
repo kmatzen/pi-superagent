@@ -1,7 +1,25 @@
 import { describe, expect, it } from 'vitest'
-import { parsePull, parseThread, PullFollower, threadOfPull, threadUrl, type PullApi, type PullState } from '../src/pi/pulls.ts'
+import { followedPulls, parsePull, parseThread, PullFollower, threadOfPull, threadUrl, type PullApi, type PullState } from '../src/pi/pulls.ts'
 import { REPLY_MARKER, type IssueComment, type PrReview } from '../src/pi/source-github.ts'
 import type { Ticket, Trigger } from '../src/core/index.ts'
+
+describe('the pull requests tickets follow', () => {
+  const ticket = (id: string, follows: Array<{ thread: string; closed?: boolean }>) =>
+    ({ id, follows: follows.map(f => ({ thread: f.thread, closed: f.closed ? { at: 'x' } : undefined })) }) as never
+
+  it('reads both thread shapes a follow takes, and skips closed ones', () => {
+    // The shapes come from live rows: a follow in another repository names it, one in the home repository does
+    // not. A filter that misses a shape returns an empty set, and an empty set reads no reviews and fails no test.
+    const open = [
+      ticket('a', [{ thread: 'github:other/r#14' }]),
+      ticket('b', [{ thread: 'github:#202' }]),
+      ticket('c', [{ thread: 'github:o/r#9', closed: true }]),
+      ticket('d', [{ thread: 'card:TASK-9' }]),
+      ticket('e', [{ thread: 'github:other/r#14' }]),
+    ]
+    expect(followedPulls(open, 'o/r')).toEqual([{ repo: 'other/r', number: 14 }, { repo: 'o/r', number: 202 }])
+  })
+})
 
 describe('naming a pull request', () => {
   it('reads only the URL gh pr create prints', () => {

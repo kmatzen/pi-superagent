@@ -7,7 +7,7 @@ import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type Out
 import { SqliteRepositories } from './store.ts'
 import { GithubSource, REPLY_MARKER, type GithubApi } from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
-import { parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi } from './pulls.ts'
+import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi } from './pulls.ts'
 import { CommentOutbox } from './outbox.ts'
 import { PiExecutor } from './executor.ts'
 import { renderCandidateFor, SessionAssessor, type SessionPilot } from './assessor.ts'
@@ -126,9 +126,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({
     repo: cfg.githubRepo, ...accounts.watched,
     // The reviews a ticket waits on are the ones on the pull requests it follows.
-    followed: () => repos.tickets.open().flatMap(t => (t.follows ?? [])
-      .filter(f => !f.closed && f.thread.startsWith('github:'))
-      .flatMap(f => parseThread(f.thread.slice('github:'.length), cfg.githubRepo ?? '') ?? [])),
+    onPullUnreadable: (ref, problem) => log.line('warn', 'pull.reviews_readability', { ref, problem: problem ?? 'readable again' }),
+    followed: () => followedPulls(repos.tickets.open(), cfg.githubRepo ?? ''),
   }) : undefined)
   const github = githubApi
     ? new GithubSource(githubApi, { repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots }, repos.kv)
