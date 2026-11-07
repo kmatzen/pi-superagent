@@ -79,14 +79,14 @@ esac
     expect(readFileSync(join(dir, 'reviews.log'), 'utf8').trim(), 'the watched token must not reach the reviews read').not.toBe('watched-secret')
   })
 
-  it('reads the reviews of the pull requests tickets follow, in their own repositories, and a dead pull does not stop the poll', async () => {
-    // The old read walked every open pull request in one repository (50 open was 51 calls per poll) and could
-    // not see a followed pull in a second repository at all.
+  it('reads the reviews of the watched repository\'s pull requests that tickets follow, and a dead pull does not stop the poll', async () => {
+    // The old read walked every open pull request in one repository (50 open was 51 calls per poll).
     const gh = fakeGh('[]', '[]', { 7: [row(501)], 9: [row(502)] })
     const api = ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [
       { repo: 'o/r', number: 7 }, { repo: 'o/r', number: 8 }, { repo: 'other/r', number: 9 }] })
     const rows = await api.reviews!(500)
-    expect(rows.map(r => r.pr), 'the unreadable pull is skipped, the others are read').toEqual([7, 9])
+    // A followed pull in another repository is not read here — PullFollower owns it, and reading it twice cost 21 serialized round trips a poll for trigger ids the follower had already produced (measured 2026-11-07).
+    expect(rows.map(r => r.pr), 'the unreadable pull is skipped, the one in another repository is left to its reader').toEqual([7])
   })
 
   it('reads nothing from a batch of only dead pull requests, which is not an outage', async () => {
