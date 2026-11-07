@@ -1,12 +1,11 @@
 # pi-superagent
 
-Suppose your app offers a keyboard shortcut, but nobody can find it in the help menu. Open a GitHub
-issue asking for the shortcut to be added to the menu. With pi-superagent watching the repository,
-a coding agent can pick up that issue, make the edit in its own copy of the code, and bring you a
-pull request. If the wording needs another pass, leave a review. The same agent gets your feedback.
+Open a GitHub issue and tell pi-superagent what you’d like to change. A coding agent works on it
+in a checkout on your machine and opens a pull request for you to review. If you ask for a
+revision, the same agent picks it up.
 
-You can follow the whole exchange on GitHub. If you’re curious how the agent found the right file,
-you can also open its terminal and watch it work.
+You can follow the conversation on GitHub or open the agent’s terminal to see what it’s trying
+and lend a hand.
 
 ## Install
 
@@ -47,8 +46,7 @@ superagent status
 
 In herdr, find the `superagent` workspace and wait for the first GitHub poll in the **engine log**
 tab. That first look records the issues already open. Now open a new issue with a small request.
-For the help menu example, you might write “Show the existing export shortcut beside Export in
-the Help menu.”
+For example, “Show the keyboard shortcut next to Export in the Help menu.”
 
 When the router accepts the request, it replies on the issue and opens a **ticket**, its record of
 the work. A **worker** is the pi session assigned to that ticket. It gets its own checkout and a
