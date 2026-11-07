@@ -2,59 +2,12 @@
 
 **Open a GitHub issue. An agent does the work and answers you there.**
 
-pi-superagent watches one GitHub repository. When someone opens an issue, comments on one, or reviews a
-pull request, a judge reads it and decides whether a person has asked for something concrete. If one has,
-a ticket opens and a worker starts: a full [pi](https://github.com/earendil-works/pi) session in its own
-tab of herdr, a terminal multiplexer for coding agents, where you can watch it work, type into it, or take
-over. The worker finishes by calling a report tool, and the result arrives on the issue as a reply. Work
-that changes a repository arrives as a pull request, and the ticket stays open until it is merged.
+pi-superagent watches one GitHub repository. Open an issue with a concrete request, and a pi worker
+takes it on. It can answer a question on the issue or open a pull request with a code change. Reply
+on the issue to clarify the task, or request changes on the PR to send feedback to the same worker.
 
-There are no labels to learn and no board to tend. The issue is the request, a comment is a follow-up,
-and closing the issue is the stop.
-
-The ticket engine underneath is DeepSeek's
-[dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype), vendored
-byte-for-byte. This repository binds it to pi, herdr and GitHub.
-
-## How a request travels
-
-1. **Trigger.** A new issue is a request; so is a comment on an issue or a pull request, and so is a
-   submitted review. Only people with write access to the repository are heard: on a public repository
-   anyone can open an issue, and a request starts a worker with a shell on your machine. On its first
-   look at a repository the router records what is already there and fires none of it.
-2. **Judgement.** The judge, a headless pi session, reads the request with its link and answers through
-   a tool: *accept*, *ignore* (chatter, a note to a colleague, a thread that already has a ticket) or
-   *stop*.
-3. **Work.** An accept opens a ticket and posts the judge's acknowledgement on the issue. A worker starts
-   in a workspace of its own, briefed with the ticket's mandate. Every later comment a person writes on
-   the thread goes straight to that worker.
-4. **Report.** The worker ends every run by calling `ticket_report`, and the router posts the report on
-   the issue. A *blocked* report asks you a question there, and your reply goes straight back to the
-   worker. A run that ends without a report, a worker that crashes, and a launch that fails are posted
-   too, each with what you can do next. A crashed worker is replaced once, without anyone asking.
-5. **Pull request.** Work that changes a repository, in any repository, goes out as a pull request the
-   worker opens and names in its report. The ticket then waits for review: comments and reviews on the
-   pull request go to the same worker. The merge ends the ticket, and the issue hears it is done; closing
-   the pull request unmerged ends it too. Work that changes no repository, such as an answer, an
-   investigation or a deployment, ends with its report.
-
-Closing the issue stops its ticket and says so on the thread. Reopening the issue starts the request again.
-
-## Why it is built this way
-
-pi-superagent grew out of a setup where agents polled markdown cards, prompts were typed into terminal
-panes, and a classifier guessed from prose whether a person had answered. Every failure there was the
-same defect in a different hat: **state recorded as text, transitions guessed by readers.** Three rules
-answer it:
-
-- **A worker reports through a tool call, never in prose.** "Done" in a chat message changes nothing.
-- **Only the engine writes a ticket.** A worker that could edit its own ticket could mark its own work done.
-- **A restart loses nothing and repeats nothing.** A read position commits only once the engine holds
-  what it produced, every trigger carries an id the engine accepts once, and every outgoing message
-  carries an id the outbox posts once.
-
-The ticket lifecycle, the GitHub intake and the worker sweep are specified in TLA+ and checked
-exhaustively, 1.5 million distinct states in all, by one command.
+Each worker runs in its own herdr terminal tab. You can open the tab at any point to watch the
+session, type a suggestion, or take over.
 
 ## Install
 
@@ -95,9 +48,39 @@ To supply your own workspace setup, set `PI_SUPERAGENT_PREPARE`. A replacement w
 ticket directory. To narrow who can start work or give the router its own GitHub identity, see
 [`config.example.env`](config.example.env). Stop the router with `superagent stop`.
 
-## Watching it
+## How a request travels
 
-Everything happens in the herdr workspace `superagent`:
+1. **Intake.** The router polls GitHub for new issues, comments and submitted reviews. By default it
+   accepts input from authors GitHub identifies as owners, organization members or collaborators.
+   The first poll records already-open issues as a baseline. Recent comments on them can still start work.
+2. **Judgement.** A headless pi session reads the thread and calls `ticket_decide` to accept,
+   ignore or stop. An accepted request opens a ticket. The router acknowledges it on GitHub and
+   starts a worker. Later comments on the open ticket go directly to that worker.
+3. **Report.** The worker calls `ticket_report`, and the router posts the result. If the worker
+   needs a decision, it asks on the issue. Launch failures, crashes and runs that end without a
+   report also get a reply. The router retries the first crash automatically.
+4. **Review.** When the worker opens a PR, it includes the URL in its report. The ticket stays
+   open for review until the PR merges or closes, even if the change belongs to another repository.
+   An answer or investigation can finish with a ready report alone.
+
+Closing the issue stops work on an ordinary ticket. Reopening it makes a fresh request.
+
+## How the router tracks work
+
+Earlier versions used Markdown cards and terminal output to infer whether a worker had finished.
+Today the worker reports through a tool call, and the ticket engine records the transition.
+A router restart can replay the last GitHub poll safely because the engine recognizes previously
+accepted trigger IDs. The outbox tracks acknowledgements and replies separately so it can retry a
+failed post.
+
+The engine comes from DeepSeek's research prototype. Three TLA+ models cover ticket transitions,
+GitHub intake and worker cleanup across more than 1.5 million distinct states.
+[Upstream project](https://github.com/deepseek-ai/dsh-superagent-prototype) ·
+[Verification scope](docs/formal-verification.md)
+
+## Watch a worker
+
+Open the `superagent` workspace in herdr to inspect the router or a worker.
 
 | Tab | What it shows |
 | --- | --- |
@@ -105,18 +88,18 @@ Everything happens in the herdr workspace `superagent`:
 | `engine` | the router itself, a pi session that stays quiet while its loop runs in the background |
 | one per ticket | that ticket's worker, live, labelled `#141 · <issue title>` |
 
-The panel at <http://127.0.0.1:8788/> answers three questions at a glance: does anything need me, what
-is running, and what did the judge decide.
+The local panel shows tickets waiting for your input, running workers and recent decisions.
+[Open the panel](http://127.0.0.1:8788/)
 
 ## Documentation
 
-| Read | When you want |
+| Guide | Use it to |
 | --- | --- |
-| [Operator guide](docs/operator-guide.md) | to ask for work, watch it, and fix what goes wrong |
-| [Architecture](docs/architecture.md) | the map: what runs, in what order, and which file owns each rule |
-| [Design decisions](docs/design-decisions.md) | the reasons, each with the failure that taught it |
-| [Formal verification](docs/formal-verification.md) | what the TLA+ specifications prove, and what they do not |
-| [Adaptation ledger](ADAPTATION.md) | how the vendored engine is bound, and how to prove it unmodified |
+| [Operator guide](docs/operator-guide.md) | Request work, follow progress and diagnose failures |
+| [Architecture](docs/architecture.md) | Trace a request through the source files |
+| [Design decisions](docs/design-decisions.md) | Understand why the router handles retries, reviews and stops this way |
+| [Formal verification](docs/formal-verification.md) | Check the properties, model bounds and assumptions |
+| [Adaptation ledger](ADAPTATION.md) | Verify the upstream copy and locate the local adapters |
 
 ## Repository layout
 
@@ -144,9 +127,9 @@ npm run check:packed     # pack, install globally into a temporary prefix, run b
 scripts/check-formal     # model-check all three specifications (about five minutes; needs a JDK)
 ```
 
-`npm publish` runs the first two first and stops on a failure.
+`npm publish` runs `npm run check` and `npm run check:packed` before uploading the package.
 
 The suite clears every `PI_SUPERAGENT_*` variable before it runs (`test/setup.ts`), so no test can reach a
 live router.
 
-MIT licensed. The vendored engine is MIT licensed too; see [NOTICE](NOTICE).
+Both projects use the MIT license. [Upstream attribution](NOTICE)

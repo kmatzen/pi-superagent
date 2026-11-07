@@ -1,230 +1,127 @@
 # Design decisions
 
-Each section states a rule the system keeps and the failure that taught it. Where each rule lives is
-mapped in [architecture.md](architecture.md); the proofs are in [formal-verification.md](formal-verification.md).
-
-## GitHub is the only way in
-
-Every request arrives as an issue, a comment or a review on one repository. There is no command-line
-submission, no board and no label vocabulary.
-
-Each extra door grows its own answers to "is this a person?" and "is this addressed to me?", and the
-agent's behavior then depends on which door a request happened to use. With one door, the identity rules
-live in one file (`source-github.ts`), and who is heard and who may start work in two functions
-(`scopeOf` and `policyOf` in `router.ts`).
-
-## Only people with write access are heard
-
-The router hears an author only when GitHub says they can write to the repository: the OWNER, MEMBER and
-COLLABORATOR author associations. Anyone else's issue, comment or review is stored as filtered and goes no
-further: no judgement, no ticket, no input to a running worker. `PI_SUPERAGENT_ALLOWED` replaces the rule
-with a list of logins.
-
-On a public repository anyone can open an issue, and an accepted issue starts a worker with a shell on
-the operator's machine. The judge cannot be that boundary, since a stranger's request reads like the
-owner's. The admission gate cannot either: a comment on an issue that already has a ticket goes straight
-to its worker and is never admitted again. So the check sits at the source scope, the engine's first step,
-where it covers every way in. An author whose association is missing counts as having none.
-
-## The first look is silent
-
-The first time the source sees a repository, it records every open issue and fires none of them. Only
-issues opened afterward are requests.
-
-The first version, pointed at a repository with a backlog, fired every open issue at once. A backlog is
-history, not a queue of fresh requests. Closing and reopening an issue, though, is a person saying "go
-again": a closed issue leaves the seen set and fires when it returns, under a new trigger id, because the
-id includes the issue's last update. The review cursor seeds the same way. (`Intake.tla` C1, C2.)
-
-## Read positions commit late; seeds commit at once
-
-A poll stages its read positions, and they commit at the start of the next poll, once the engine holds
-every trigger they produced.
-
-Committing at the moment of reading leaves a window: if the process dies between reading a comment and
-handing it to the engine, the saved position already points past a request the engine never saw, and
-that request is gone. A position that commits late can only cause a replay, and replays are free because
-the engine accepts each trigger id once. A seed is the mirror image: losing one would replay the backlog,
-and a seed can never swallow a request, so it commits immediately. The model checker found the early
-commit in shipped code; the fix ships with the counterexample as a regression test. (`Intake.tla` C3, C6.)
-
-## Code admits; the model judges
-
-A policy gate in code admits a trigger only from a person who is not on the bot list. Only then does
-the judge see it. When the judge accepts a thread that already has an open ticket, the router overrules
-it and records an ignore.
-
-A model's verdicts wobble; the deterministic layer keeps a wobble from turning bot traffic, the agent's
-own comments or a duplicate into work. Both checks were learned. A trigger stored before bot names were
-matched as patterns still said "human", and an agent asking the operator to approve a test became a ticket
-to run it; the gate now checks the author again. And the judge once opened a second ticket on a thread
-whose first ticket was right there in its prompt.
-
-## The judge works alone, one question at a time
-
-Judgements go to a headless pi session that loads no extensions, skills or context files, never to the
-operator's own pane, and the assessor hands it one candidate per turn.
-
-Judging in the operator's pane made the pane look frozen for every model turn. Sending candidates in a
-burst was worse: 41 of them steered into one running turn came back out of order, and the tail expired
-unanswered. The judge is also opened once and shared: opening a session takes 20 to 45 seconds, and
-before that rule every eval arriving in the window opened its own.
-
-## Workers report through a tool, never in prose
-
-A worker ends its assignment by calling `ticket_report` with a state: ready, blocked, failed or
-cancelled. Only *ready* completes a ticket.
-
-A model that says "done" in prose while having done nothing must be unable to complete anything. In the
-lifecycle model, completing without a *ready* report is not merely untested but unreachable
-(`Ticket.tla` I2). A run that ends without a report completes nothing either: the worker files it as a
-failure, and the person hears about it on the thread.
-
-## Every ending reaches the thread
-
-Whatever ends a worker's run is posted on the issue: its report, its question, a crash, a run that ended
-without a report, a launch that never got going. Each message says what happened and what the person can
-do next. The one exception is the 15-minute quiet flag, which stays on the panel: a long build is not news.
-
-The person who asked is on GitHub, not on the panel. An ending they cannot see is a request that died in
-silence, and a question they cannot see is a worker waiting forever. The same ending posts once per
-assignment, so a launch that fails on every poll says so once, not every 30 seconds.
-
-## A worker is fenced in
-
-Inside a worker, a guard refuses delegation tools, refuses blocked commands, and refuses writes outside
-the ticket's workspace. The workspace's setup script, which runs before pi does, meets the blocked
-commands as refusing shims first on its PATH. The brief also tells the worker that the machine is shared.
-
-Delegated work leaves the mandate, the workspace and the report behind. Blocked commands are the
-operator's personal tools (`gh`, for instance), and the operator's identity is not the worker's to use.
-The shared-machine brief exists because workers run side by side with each other and with people:
-sequential builds, bounded parallel jobs, and no process left running after the report.
-
-## A crash gets one fresh worker, not a loop
-
-When a worker crashes, the router retries the ticket once on its own, through the engine's retry. The
-crashed attempt ends on record, the comments it never read go to the new worker, and the new worker's brief
-says what happened, because the old one's changes are still in the workspace. A second crash on the same
-ticket waits for a person. Either way, the crashed worker's slot is freed at once.
-
-A lost tab or a killed process is usually bad luck, and one retry rides it out without waking anyone. A
-worker that crashes every time is a bug, and looping on it would open a new tab every few seconds while
-hiding the problem. One retry per ticket per router process is the same bound that startup recovery uses,
-and the lifecycle model already covers it: `Ticket.tla` lets a retry happen at any moment after a failed
-report.
-
-## A person's stop is final
-
-Once a person stops a ticket, nothing revives it: no new message, no wake-up, no retry. A request made
-again becomes a new ticket.
-
-A stop is a person saying "not now". An agent that resumes what it was told to stop teaches everyone that
-their words do not count. (`Ticket.tla` I1.)
-
-## A closed conversation stops its ticket
-
-GitHub ends a conversation in three ways: a merge closes the issue it names, a close says no, and a
-deletion says never mind. All three look the same from a poll, because the thread leaves the set of open
-issues and pull requests. The router then stops the ticket with a person's stop, posts one notice on the
-thread, and stays quiet until the issue is reopened. A ticket that follows its own pull request is the
-exception: that pull request's merge or close ends it, as merged or as closed, not as a stop.
-
-Closing the issue is the one stop that needs no tool and no knowledge of the system. Tickets on threads
-from other sources are left alone: the router can only tell whether a GitHub thread is open.
-
-## Work that changes a repository ends with its pull request
-
-A worker whose work changes a repository opens a pull request and names it in `ticket_report`. The router
-binds the pull request to the ticket before the engine reads the report, so *ready* then means awaiting
-review rather than done. Comments and reviews on the pull request go to the worker. The merge ends the
-ticket as merged, a close ends it as closed, and the router says which on the issue. A report that names
-no pull request ends the ticket as before.
-
-The work decides, not the request. A deployment, an answer or an investigation changes no repository, and a
-ticket made to wait for a pull request would never end; the worker knows by the end of its run whether it
-opened one. The worker opens it, not the router, because the worker knows which repository the work
-belongs in: the watched repository is often only where people ask. Only a pull request URL counts, since
-`#5` may be an issue, and a ticket bound to an issue would wait for a merge that never comes. The binding
-comes first because the engine completes a ticket on a *ready* report unless it already follows an open
-pull request. The lifecycle itself is the vendored engine's (`bindThread`, `threadClosed`, and upstream's
-`docs/003-execution.md`); the router feeds it facts.
-
-The watched repository's pull requests cost nothing extra: their comments and reviews arrive with every
-poll. One in another repository is read every two minutes, three calls each time, so a dozen open reviews
-stay well inside GitHub's hourly limit.
-
-## A review is a request; opening a pull request is not
-
-A submitted review, whether it requests changes or approves, is a person speaking about delivered work,
-on a conversation the ticket already owns. It fires a fresh judgement, and the reply lands in the pull
-request's own conversation (on GitHub a pull request is also issue N, so no second address is needed).
-
-Opening a pull request is a delivery, not a request. Treating every opening as a trigger would make the
-agent a mandatory reviewer of its own output, a loop that feeds itself.
-
-## Only work holds a slot
-
-The cap counts workers on a run. A worker between runs, waiting on a person's answer or simply done, is
-parked: it keeps its session and its context, and its slot goes to the next ticket in the queue. A reply
-puts it back on a run, even past the cap for a while.
-
-A slot is the machine's capacity, and an idle session uses almost none of it. When every live worker held
-a slot, a queue of 22 tickets waited while one of the four slots belonged to a worker that had finished its
-run without saying so.
-
-## A tab is closed only when nobody is in it
-
-A finished worker's tab stays open for ten minutes of follow-up and then closes only if its pi sits idle;
-while the agent is busy, the router looks again every ten minutes instead of giving up.
-The startup sweep closes a worker tab only when no record owns it or herdr no longer knows its agent.
-
-Worker tabs do outlive their purpose: a restart adopts a worker, a stop starts a newer one, and the older
-tab stays behind, so a sweep has to exist. But herdr has no guarded close, and a tab is someone's
-terminal. The liveness check is the single guard that keeps the sweep away from an agent that is still
-working. (`Workers.tla` W2, W4, W5.)
-
-## One router, one store, one state directory
-
-One router runs at a time, and one process holds the engine. The store is synchronous SQLite, and
-everything the system knows lives in one directory.
-
-The engine's commands are atomic only if the store is synchronous: an asynchronous driver would turn that
-atomicity into a comment. One directory makes the crash model concrete. A restart is "start again with
-this directory", which is exactly what the specifications model. One router per process matters too: the
-judge and every worker load this same extension, and each of them used to boot a router of its own.
-
-## Health is an exit code
-
-`superagent status` answers with a number: 0 healthy, 1 down, 2 a part is failing, 3 waiting for setup.
-A router that fails three polls in a row reports its GitHub source as failing.
-
-A scheduled check should act without reading prose, and each code has one remedy: a restart may fix 1
-and fixes neither 2 nor 3. A router that cannot reach GitHub otherwise looks healthy forever, answering
-nothing.
-
-## The panel is local and cannot be steered from a web page
-
-The panel binds 127.0.0.1, refuses any Host header but 127.0.0.1 and localhost, and serves its API only
-to callers that send `x-superagent-request: 1`.
-
-A browser will not let another site forge either one. Without them, any page you visit could read the
-queue, or pause the engine, by rebinding a hostname to localhost.
-
-## The engine stays byte-identical to upstream
-
-`src/core/` and its test suite are vendored from upstream and never edited. Every adaptation, from the
-judge's prompt to the GitHub shapes, lives in `src/pi/`.
-
-The engine is the part the lifecycle specification models and upstream maintains. Untouched, an upstream
-fix can be re-vendored by copying, and the specification keeps describing the code that runs. The
-[adaptation ledger](../ADAPTATION.md) says how to prove the copy is exact.
-
-## The specifications live beside the code
-
-`formal/` holds three TLA+ specifications, and `scripts/check-formal` checks all of them exhaustively in
-about five minutes. Every action names the function it mirrors; every header states what the model
-leaves out.
-
-A proof that cannot be re-run in one command rots. These are cheap to keep honest, and they have paid:
-the intake specification found a request-losing bug in shipped code.
+## Taking requests from GitHub
+
+**Use a single intake path.** Issues, comments and submitted reviews all enter through
+`source-github.ts`. Sharing the path keeps identity checks consistent whether someone is asking
+for new work or steering a worker already running. Maintainers can make either request in the
+GitHub thread where they will review the result.
+
+**Check the author before routing the message.** An accepted request starts a worker with a shell
+on the operator’s machine. A comment on an existing ticket goes straight to that worker, so a
+permission check in the judge alone would miss follow-ups. The engine checks `scopeOf` first.
+By default it admits the GitHub associations `OWNER`, `MEMBER` and `COLLABORATOR`. A missing
+association fails the check. Setting `PI_SUPERAGENT_ALLOWED` replaces that rule with a login list.
+
+**Establish a baseline on the first poll.** An early version treated an entire backlog as new work
+when the operator connected a repository. The source now saves the initial set of open issues and
+seeds the review cursor. Closing and reopening an issue makes it eligible again. Its updated
+timestamp distinguishes the new trigger from the earlier one. See `Intake.tla` C1 and C2.
+
+**Save later read positions after delivery.** A poll stages its read position for the next poll to
+commit. If the router crashes after reading a comment but before the engine receives it, the old
+position lets the router read it again. Stable trigger IDs make that replay safe. The initial
+baseline commits immediately because it represents history already present at setup. TLC found
+the comment-loss case in the original implementation. The regression test reproduces that event
+order. See `Intake.tla` C3 and C6.
+
+## Deciding what deserves a ticket
+
+**Apply policy in code.** The router checks the author against current bot patterns even when a
+stored trigger identifies the author as human. An older trigger once caused an agent’s request
+for test approval to become a ticket to run the test. After the judge answers, the router also
+checks whether an open ticket already owns the thread. The judge once accepted a duplicate despite
+having the existing ticket in its prompt.
+
+**Give the judge one request at a time.** Judging in the operator’s pane tied it up for an entire
+model turn. Sending 41 candidates into one active turn produced answers out of order, and some
+candidates expired before the judge got to them. The assessor now reuses one headless pi session
+without extensions, skills or context files. It opens the session once because startup took 20 to
+45 seconds and concurrent requests used to start separate judges.
+
+## Running a worker
+
+**Record outcomes through a tool.** A worker calls `ticket_report` with `ready`, `blocked`,
+`failed` or `cancelled`. Only the engine updates the ticket. A reviewer can therefore distinguish
+a worker saying “done” in conversation from a recorded ready report. When a run ends without a
+report, the worker records a failure. See `Ticket.tla` I2.
+
+**Post the outcome where the person asked.** Reports, questions, crashes and launch failures appear
+on the GitHub thread with the next action available to the requester. The outbox deduplicates
+repeated failures so a broken setup command produces one notice across many polls. A worker quiet
+for 15 minutes appears on the panel. A long-running build can trigger this flag and continue.
+
+**Keep tool use within the assignment.** Worker tool hooks check file edits and writes against the
+ticket workspace, block configured commands and disable delegation by default. The prepare hook
+also gets a PATH with shims for blocked commands. Operators can use these controls to restrict
+personal tools such as `gh`. The brief asks workers sharing the machine to run builds sequentially,
+bound parallel jobs and clean up processes when they finish.
+
+**Replace a crashed worker once.** The engine records the failed attempt, frees its slot and
+requeues unread comments. The replacement gets the original workspace and a brief explaining the
+crash. A second crash on the same ticket requires attention. The limit applies per router process
+and prevents a persistent fault from spawning a new tab every few seconds.
+
+**Count active work against the cap.** A parked worker retains its session for follow-ups and frees
+a slot for queued work. A reply can briefly take the active count above the cap. Counting every
+open session used to leave a queue of 22 tickets waiting while an idle worker occupied one of four
+slots.
+
+**Check the tab before closing it.** A finished worker gets ten minutes for follow-ups. The router
+closes its tab once pi is idle and checks again every ten minutes while it is busy. Startup cleanup
+handles tabs with no owning record or whose agent herdr no longer knows. Since herdr has no guarded
+close operation, the liveness check matters whenever someone could still be working in a tab.
+See `Workers.tla` W2, W4 and W5.
+
+## Ending a ticket
+
+**Respect an explicit stop.** Once a person stops a ticket, later messages, wake-ups and retries
+cannot resume it. Asking again creates a new ticket with its own history. See `Ticket.tla` I1.
+
+**Follow the GitHub conversation.** When an issue disappears from the open set, the router can
+observe the closure even if it cannot distinguish deletion, manual closure and closure by merge.
+It stops the ticket and queues a notice. For a ticket awaiting its own PR, the PR’s merge or close
+determines the outcome. Reopening an issue lets its author ask again.
+
+**Bind the PR before processing a ready report.** A worker that changes a repository opens a PR and
+includes its URL in its report. A number such as `#5` could also name an issue. Binding the URL
+first lets the engine hold the ticket open for review. Merging or closing the PR ends the ticket,
+and the issue receives the outcome. An investigation or deployment can finish with a ready report
+alone. The worker knows which repository it changed, even when the request originated elsewhere.
+
+The router calls the vendored engine’s `bindThread` and `threadClosed` transitions. It gets review
+activity on the watched repository during the regular poll. For a PR elsewhere it polls every two
+minutes, using three API calls per check.
+
+**Route review feedback to the worker.** A submitted review on a bound PR goes to its ticket.
+A review on an unrelated PR can reach the judge as a new request. GitHub accepts replies in the
+PR conversation through its issue number. Opening a PR alone produces no request, so a worker can
+deliver a change without triggering another worker to review it.
+
+## Operating the router
+
+**Keep ticket state in one store.** One router owns the synchronous SQLite store in its state
+directory. All writes from an engine command commit together. Recovery reopens the same directory.
+The router role is tied to the appointed process because pi also loads the extension in worker
+and judge sessions. Previously those sessions could each start a router.
+
+**Report health through exit codes.** A scheduled check can act on `superagent status`. Code 0
+means healthy or intentionally stopped. Code 1 indicates a router failure that a restart may fix.
+Code 2 directs the operator to a failing component, including a GitHub source that failed three
+polls in a row. Code 3 identifies a setup problem.
+
+**Limit panel access to local callers.** The panel binds to loopback, validates the Host header
+and requires `x-superagent-request: 1` for API calls. These checks prevent a page on another
+site from reading the queue or pausing the router through DNS rebinding.
+
+## Maintaining the engine
+
+The engine and its test suite match the pinned upstream revision. Local adapters live in
+`src/pi/`, so an upstream fix can be imported and compared directly with its source.
+[Adaptation ledger](../ADAPTATION.md)
+
+The three TLA+ models live beside the implementation. Their actions name the functions they mirror
+and their headers record the assumptions. When a transition changes, update its model and run
+`scripts/check-formal`. The intake model’s crash counterexample is one case where checking all
+orderings within a small bound found a failure the tests had missed.
+[Architecture](architecture.md) · [Formal verification](formal-verification.md)

@@ -1,8 +1,8 @@
 # Architecture
 
-This is the map: what runs, in what order, and which file owns each rule. The reasons behind the rules
-are in [design-decisions.md](design-decisions.md); the proofs about them are in
-[formal-verification.md](formal-verification.md).
+The router connects GitHub, the ticket engine and a set of pi workers. The diagram follows one
+accepted request from its first poll through review. [Design decisions](design-decisions.md) ·
+[Formal verification](formal-verification.md)
 
 ## The path of one request
 
@@ -13,7 +13,7 @@ are in [design-decisions.md](design-decisions.md); the proofs about them are in
  GitHub source        seed rule · deferred read positions · own-writing filter
      │  Trigger: content-derived id, thread #N           source-github.ts
      ▼
- engine               scope: write access only          src/core, router.ts
+ engine               scope: GitHub association or login list          src/core, router.ts
      │                policy gate: a person, not a bot
      │  Evaluation: the thread's waiting triggers
      ▼
@@ -34,13 +34,12 @@ are in [design-decisions.md](design-decisions.md); the proofs about them are in
                       read each poll, or every 2 min elsewhere   pulls.ts
 ```
 
-A crash anywhere on this path loses nothing and doubles nothing:
+The router records progress at each handoff so it can recover after a crash.
 
 - **GitHub to source.** Read positions are staged during a poll and committed at the next one, after the
   engine holds every trigger they produced. A crash replays the last poll instead of skipping it.
-- **Source to engine.** Trigger ids derive from content: a comment from its author, time and body; an
-  issue from its number, title and last update; a review from GitHub's own id. The engine accepts an id
-  once, so a replay is a no-op.
+- **Source to engine.** Comment IDs use the author, time and body. Issue IDs use the issue number,
+  title and last update. Reviews use GitHub’s review ID. The engine accepts each trigger ID once.
 - **Inside the engine.** Each command is one SQLite transaction: its writes land together or not at all.
 - **Engine to executor.** The engine's calls to start, deliver to and stop a worker run only after the
   command commits, so a worker never acts on a write that could still roll back.
@@ -52,80 +51,77 @@ A crash anywhere on this path loses nothing and doubles nothing:
 
 ## The parts
 
-**The engine: `src/core/` (vendored, unmodified).** The state machine. `intake.ts` hands a trigger to the
-ticket that owns its thread and queues an Evaluation only when no ticket does; `evals.ts` turns an
-accepted Evaluation into a ticket; `assignments.ts` records reports and keeps one running assignment per
-ticket; `tickets.ts` stops, retries and wakes tickets; `replies.ts` queues acknowledgements and replies,
-each under a key that is queued once. The engine is synchronous and does no I/O of its own: everything
-that touches a process, the network or a model arrives through a port in `ports.ts`.
+### Ticket engine
 
-**The router: `src/pi/extension.ts`.** The composition root. It builds the store, the GitHub source, the
-outbox, the judge, the executor and the panel, then runs the loop. Every 30 seconds, and whenever its own
-pi session goes idle, the loop polls GitHub, hands new triggers to the engine, stops tickets whose thread
-has closed, lets the engine start due evaluations, launches queued work, flags workers on a run that
-have gone quiet for 15 minutes, and flushes the outbox. Three failed polls in a row put an error in `health.json`.
+The vendored state machine lives in `src/core/`. `intake.ts` routes triggers to an existing ticket
+or queues an evaluation. `evals.ts` turns an accepted evaluation into a ticket.
+`assignments.ts` records reports and tracks the running assignment. `tickets.ts` handles stops,
+retries and wake-ups. `replies.ts` gives each acknowledgement or reply a stable queue key.
+The synchronous engine reaches storage, processes and models through the interfaces in `ports.ts`.
 
-**GitHub in: `source-github.ts` and `gh-api.ts`.** The source reads issues, issue and pull-request
-comments, and submitted reviews. Its first look at a repository records what already exists and fires
-none of it. Its read positions commit one poll late, as described above. It ignores its own writing,
-recognized by the account it posts from or by the hidden marker every reply carries, and it marks
-authors matching the bot patterns as not human. Every trigger carries its author's association with the
-repository, and the router's scope (`scopeOf` in `router.ts`) files one from anyone without write access
-as filtered: it reaches neither the judge nor a worker. `gh-api.ts` talks to GitHub through the `gh` CLI, so the
-credentials stay in the operator's keyring; every call is asynchronous, issue and pull-request lists are
-paginated, and comments are read forward from the cursor.
+### Router and intake
 
-**Pull requests: `pulls.ts`.** A report may name the pull requests its work opened. The executor hands
-them to the router before the engine reads the report, and the router binds each one to the ticket with
-the engine's `bindThread`, so a *ready* report waits for it instead of completing the ticket. Each poll,
-the follower asks GitHub about every followed pull request that is no longer open in the watched
-repository and reports the merge or close through `threadClosed`, which ends the ticket. A pull request
-in another repository is read every two minutes, and its comments and reviews become triggers on its own
-thread, `owner/repo#N`, with the read position committed once the engine holds them.
+`src/pi/extension.ts` creates the store, GitHub source, judge, executor, outbox and panel. By default
+the router polls every 30 seconds and also wakes when its pi session goes idle. A pass delivers new
+triggers, reconciles PRs and closed threads, evaluates requests, starts pending work, checks for quiet
+workers and flushes replies. Three consecutive GitHub poll failures set an error in `health.json`.
 
-**The judge: `assessor.ts` and `judge.ts`.** The engine's policy gate, defined in `router.ts`, admits a
-trigger only from a person who is not on the bot list. That check is code, not a model call. An admitted
-trigger becomes a candidate: the thread, its messages, the tickets already on it, and a link to the
-issue. The assessor sends candidates to the judge one at a time. The judge is a headless pi session with
-no extensions, skills or context files and a single tool, `ticket_decide`. If the judge accepts a thread
-that already has an open ticket, the router overrules it: that thread's messages belong to its worker.
+`source-github.ts` tracks issues, comments and submitted reviews. It recognizes the router’s own
+comments by the bot login or a hidden marker. `scopeOf` in `router.ts` checks each author’s GitHub
+association or the configured login list before the trigger can reach a judge or worker.
+`gh-api.ts` runs the CLI asynchronously, paginates issue and PR lists, and reads comments forward
+from the saved position.
 
-**Workers: `executor.ts`, `herdr-workers.ts` and `worker-role.ts`.** Each running assignment gets one
-worker, a pi session that herdr starts in a new tab, in a workspace of its own. Router and worker talk
-through files in `workers/<session>/`: inputs land in `inbox/`, and the worker appends events and reports
-to `events.jsonl` and `reports.jsonl`. The files and the tab outlive the router, which is why a restart
-adopts workers rather than replacing them. Inside the worker, `worker-role.ts` registers `ticket_report`
-and the guard from `workspace.ts`: no delegation tools, no blocked commands, no writes outside the
-workspace. It also files any run that ends without a report as a failure: only the worker process knows
-the order of its own events, so only it can tell for certain. A crash frees the worker's slot at once, and
-the router answers the ticket's first crash with the engine's retry: a fresh worker, told what happened. Only workers on a run count against the cap: a worker between runs is parked, keeping its
-session for follow-ups while its slot goes to the queue. A finished worker's tab lingers for ten minutes
-of follow-up and closes once its pi sits idle, checked again every ten minutes while it is busy. At startup the router also closes worker tabs that no record owns or whose agent herdr no longer
-knows.
+### Judge
 
-**GitHub out: `outbox.ts` and `receipts.ts`.** Every way a run ends (a report, a question, a crash, a run
-with no report, a launch that fails) becomes a message on the thread that says what happened and what the
-person can do next; `receipts.ts` holds the wording. Acknowledgements, receipts and notices are queued
-under ids, and an id is never queued twice: a launch that fails on every poll posts once. A message counts as sent only once GitHub accepts it; a failed post stays pending for
-the next pass. Every comment ends with an invisible marker, `<!-- superagent -->`, which lets the source
-recognize the agent's writing even when the agent and the operator share one GitHub account. Sent entries
-are pruned after 30 days.
+`policyOf` in `router.ts` checks human authorship and bot patterns. For a request that needs a
+decision, `assessor.ts` assembles the thread, messages, existing tickets and issue link.
+`judge.ts` runs one candidate at a time in a headless pi session with a single tool, `ticket_decide`.
+The session excludes extensions, skills and context files. The router overrides an acceptance if
+an open ticket already owns the thread.
 
-**The panel: `server.ts`.** A page and a small JSON API on 127.0.0.1, port 8788 by default, computed
-from the engine's store on every request, so the page can show no count the API would deny. It refuses
-any Host header other than 127.0.0.1 or localhost, and any API call without `x-superagent-request: 1`,
-so a web page elsewhere cannot read or steer it. If the port is taken, the panel binds a free one and logs
-which; it never takes the router down.
+### Workers
 
-**The start script: `scripts/superagent`.** Starts the router as a pi agent in a herdr tab, stops it, and
-reports its health as an exit code: 0 healthy, 1 down, 2 a part is failing, 3 waiting for setup. The
-launchd job in `launchd/` runs it every five minutes, restarts a router that is down, and leaves alone a
-router that was stopped on purpose.
+`executor.ts` schedules an assignment and `herdr-workers.ts` starts pi in a new tab. By default the
+worker gets a clone of the watched repository on its own ticket branch. Under `workers/<session>/`,
+the router writes prompts to `inbox/` and the worker appends to `events.jsonl` and `reports.jsonl`.
+A restarted router can adopt the tab and resume reading those files.
+
+Inside the session, `worker-role.ts` registers `ticket_report` and the tool guards in `workspace.ts`.
+The worker observes the order of its own events, so it can report a run that ended without a
+report. A crash frees the slot immediately. On the first crash the router starts a replacement in
+the same workspace and includes the previous failure in its brief.
+
+A parked worker keeps its context and releases its slot. A finished worker’s tab stays open for
+ten minutes. If pi is still busy, the router checks again ten minutes later. At startup it also
+checks for tabs with no owning record or no corresponding herdr agent.
+
+### Pull requests and replies
+
+`pulls.ts` binds each reported PR to its ticket with `bindThread` before the engine processes
+the report. That order matters. A ready report on a ticket with an open PR leaves it awaiting review.
+When the PR leaves the watched repository’s open list, the follower checks whether it merged or
+closed and calls `threadClosed`. For another repository it checks every two minutes and routes
+comments and reviews through the qualified thread ID, `owner/repo#N`.
+
+`receipts.ts` formats reports, questions, crashes and launch failures for the GitHub thread.
+`outbox.ts` queues messages by ID. Failed posts remain pending, and a recurring launch failure
+produces one notice. The source recognizes the hidden `<!-- superagent -->` marker on outgoing
+comments. Sent entries expire after 30 days.
+
+### Panel and process management
+
+`server.ts` reads the engine store for each page or API request. It listens on `127.0.0.1:8788`
+by default and logs the chosen port if it has to bind a free one. It checks the Host header against
+loopback names and requires `x-superagent-request: 1` on API calls.
+
+`scripts/superagent` configures the repository, starts or stops the router and reports health.
+The macOS job in `launchd/` checks every five minutes. It restarts a down router and respects the
+operator’s stop marker.
 
 ## The state directory
 
-Everything the system knows lives in one directory, `~/.pi/superagent` unless `PI_SUPERAGENT_STATE` says
-otherwise.
+The router stores its local state under `~/.pi/superagent`. Set `PI_SUPERAGENT_STATE` to use a different directory.
 
 | Path | What it holds |
 | --- | --- |
@@ -137,8 +133,7 @@ otherwise.
 | `work/<ticket>/` | one workspace per ticket |
 | `worker-bin/` | shims that refuse blocked commands, first on the PATH of each workspace's setup script |
 
-To start over, stop the router and delete the directory. The next first look treats every open issue as
-history.
+To start over, stop the router and delete the directory. On the next start, the first poll records existing open issues as history.
 
 ## Where each guarantee lives
 
@@ -149,12 +144,12 @@ history.
 | A person's stop is final | guards in `core/tickets.ts` and `core/intake.ts` | `Ticket.tla` I1 |
 | One running assignment per ticket | the executor's launch guard | `Ticket.tla` I3 |
 | Each acknowledgement queued and sent once | outbox keys in `core/replies.ts` | `Ticket.tla` I5, I6 |
-| Issues older than the router fire nothing | the seed rule | `Intake.tla` C1 |
+| The initial poll treats existing open issues as history | the seed rule | `Intake.tla` C1 |
 | One request per open interval of an issue | the seen set | `Intake.tla` C2 |
 | No comment lost to a crash | deferred read positions | `Intake.tla` C3, C6 |
 | No trigger accepted twice | content-derived ids | `Intake.tla` C4 |
 | A bot never passes for a person | bot patterns and the policy gate | `Intake.tla` C5 |
-| A stranger reaches neither the judge nor a worker | the source scope, `scopeOf` | tests only |
+| Only authors admitted by the source scope reach the judge or a worker | the source scope, `scopeOf` | tests only |
 | A ticket with a pull request ends with it, as merged or closed | binding before the report, `threadClosed` | tests only |
 | A live agent's tab is never swept | the liveness check in `closeStaleTabs` | `Workers.tla` W2, W4 |
 | Dead workers' tabs do not pile up | the sweep and the linger close | `Workers.tla` W5 |

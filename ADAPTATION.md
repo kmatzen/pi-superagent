@@ -1,13 +1,12 @@
 # Adaptation ledger
 
-The engine in `src/core/` is DeepSeek's, copied from upstream without a single change. This file is the
-record that keeps that true: the commit it was copied from, how to prove the copy is exact, and where
-everything that is *not* upstream plugs in.
+The ticket engine comes from DeepSeek’s dsh-superagent-prototype. Use this ledger to verify the
+upstream files and find the local code that connects them to pi, herdr and GitHub.
 
 ## The baseline
 
-Upstream commit `8c32a9dc5d72c033816c6a8110b37f40cf94fba4`, also recorded in
-`vendor/dsh-superagent/UPSTREAM_SHA`. At that commit these are byte-identical:
+The files below match upstream commit `8c32a9dc5d72c033816c6a8110b37f40cf94fba4` byte for byte.
+The pinned revision is recorded in `vendor/dsh-superagent/UPSTREAM_SHA`.
 
 | Here | Upstream |
 | --- | --- |
@@ -16,7 +15,7 @@ Upstream commit `8c32a9dc5d72c033816c6a8110b37f40cf94fba4`, also recorded in
 | `vendor/dsh-superagent/docs/` | `docs/` |
 | `vendor/dsh-superagent/LICENSE` | `LICENSE` |
 
-To prove it, compare against a fresh clone. Every `diff` should print nothing:
+Run these comparisons from the repository root. Each `diff` exits successfully for an exact match.
 
 ```sh
 git clone https://github.com/deepseek-ai/dsh-superagent-prototype /tmp/upstream
@@ -24,50 +23,43 @@ git -C /tmp/upstream checkout "$(cat vendor/dsh-superagent/UPSTREAM_SHA)"
 diff -r /tmp/upstream/src/core src/core
 diff /tmp/upstream/tests/core-engine.spec.ts test/core-engine.spec.ts
 diff -r /tmp/upstream/docs vendor/dsh-superagent/docs
+diff /tmp/upstream/LICENSE vendor/dsh-superagent/LICENSE
 ```
 
 ## Deviations
 
-None. If one is ever unavoidable, list it here with the file, the upstream commit it was measured
-against, what changed and why, so that the next upstream fix can still be merged by hand.
+There are currently no local deviations. Record any future change here with the affected file, upstream
+revision and reason. Maintainers will need that history when they apply the next upstream fix.
 
-## Where this repository plugs in
+## Local adapters
 
-The engine is synchronous and does no I/O of its own. Everything that touches a process, the network or
-a model reaches it through an interface in `src/core/ports.ts`, and every binding of those interfaces
-lives in `src/pi/`:
+The engine is synchronous and does no I/O of its own. The interfaces in `src/core/ports.ts` connect it to storage, processes and
+models. Their implementations live in `src/pi/`.
 
 | Port | Bound in | How |
 | --- | --- | --- |
 | `Repositories` | `store.ts` | synchronous `node:sqlite` in WAL mode with `synchronous=FULL`, one transaction per engine command |
 | `Policy` | `router.ts` (`policyOf`) | admits a trigger only from a person who is not on the bot list |
-| `SourceScope` | `extension.ts` | every thread is listened to |
+| `SourceScope` | `router.ts` (`scopeOf`) | filters incoming authors by GitHub association or the configured login list |
 | `Assessor` | `assessor.ts`, `judge.ts` | candidates go one at a time to a headless pi judge, which answers with `ticket_decide` |
 | `Executor` | `executor.ts`, `herdr-workers.ts` | one pi session per assignment, in its own herdr tab, reached through files that outlive the router |
 | `Outbox` | `outbox.ts` | GitHub comments, queued once per id and marked sent only once GitHub accepts them |
 
-Sources are not a port upstream; the engine simply receives Triggers. `source-github.ts` produces them
-from issues, comments and reviews, with read positions kept in the same SQLite file as the engine's state.
+The engine accepts triggers directly. `source-github.ts` converts issues, comments and reviews
+into triggers and saves its read positions in the engine’s SQLite database. Upstream also ships a
+Feishu source, an executor, a panel and a store. This project supplies its own GitHub integration,
+herdr workers, panel (`server.ts`) and storage adapter (`store.ts`).
 
-Upstream ships its own executor, Feishu and GitHub sources, panel and SQLite store. None of them are
-vendored: this repository replaces them with pi sessions in herdr, the GitHub source above, the panel in
-`server.ts`, and the store in `store.ts`.
-
-Two of upstream's rules carry through every binding:
-
-- **A report is a tool call, not prose.** A worker's `ticket_report` call sets the state of its
-  assignment; a question in a *blocked* report becomes the ticket's request for a person.
-- **Only the engine writes a ticket.** A worker that could edit its own ticket could mark its own work
-  done.
+Only the engine writes a ticket. The worker submits its assignment outcome through
+`ticket_report`. A *blocked* report carries the question that the router posts for the requester.
 
 ## Tests
 
-`test/core-engine.spec.ts` is upstream's engine suite, unchanged. `test/sqlite-engine.spec.ts` runs the
-same 113 cases against the SQLite store, with one line changed, because durability can only be tested
-against a store that survives the process.
+`test/core-engine.spec.ts` is the upstream engine suite. `test/sqlite-engine.spec.ts` runs the
+same 113 cases against the local SQLite adapter, exercising the same transitions with persistent storage.
 
 ## Taking an upstream change
 
-Copy upstream's `src/core/`, `tests/core-engine.spec.ts` and `docs/` over their counterparts here, update
-`UPSTREAM_SHA`, and run `npm run check` and `scripts/check-formal`. If a ticket transition changed,
-change `formal/Ticket.tla` to match before trusting the result.
+Copy the files listed in the baseline table to their corresponding local paths and update
+`vendor/dsh-superagent/UPSTREAM_SHA`. If a ticket transition changed, update `formal/Ticket.tla`.
+Run `npm run check` and `scripts/check-formal` against the new baseline.
