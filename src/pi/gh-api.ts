@@ -19,12 +19,13 @@ export interface GithubApiOptions extends GhOptions {
    */
   followed: () => Array<{ repo: string; number: number }>
   /**
-   * Read reviews as this account. A router watches one repository and opens its pull requests in others, and
-   * an organization repository is invisible to an account that is not in the org: measured live 2026-11-07,
-   * six followed pull requests answered 404 to the watched token while the account that opened them read them
-   * in one call. Unset, reviews are read as the account `gh` is signed in as — the one that opens them.
+   * Read reviews as another account, the one that opens the pull requests. A router watches one repository and
+   * opens its pull requests in others, and an organization repository is invisible to an account outside the
+   * org: measured live 2026-11-07, six followed pull requests answered 404 to the watched token, and the
+   * account that opened them read a review request in one call. The pulls account usually has no token file —
+   * it is the account `gh` is signed in as — so this is an account, not a second token.
    */
-  reviewsTokenFile?: string
+  reviewsAccount?: GhOptions
   /**
    * Called when a followed pull request's reviews go unreadable (a string) or readable again (null). A 404
    * is permanent — the pull is deleted, moved, or private to this account — and a ticket that follows it
@@ -73,9 +74,7 @@ type CommentRow = { user?: { login: string }; author_association?: string; creat
 
 export function ghApi(options: GithubApiOptions): GithubApi {
   const call = ghCall(options)
-  const reviewCall = options.reviewsTokenFile
-    ? ghCall({ ...(options.bin ? { bin: options.bin } : {}), tokenFile: options.reviewsTokenFile })
-    : call
+  const reviewCall = options.reviewsAccount ? ghCall(options.reviewsAccount) : call
   const deadPulls = new Set<string>()
   const openPulls = async (): Promise<Array<{ number: number }>> => {
     const open: Array<{ number: number }> = []

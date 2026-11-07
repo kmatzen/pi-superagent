@@ -53,11 +53,30 @@ case "$1 $2" in
 esac
 `)
     chmodSync(bin, 0o755)
-    const api = ghApi({ bin, repo: 'o/r', tokenFile: watched, reviewsTokenFile: opener, followed: () => [{ repo: 'o/r', number: 9 }] })
+    const api = ghApi({ bin, repo: 'o/r', tokenFile: watched, reviewsAccount: { bin, tokenFile: opener }, followed: () => [{ repo: 'o/r', number: 9 }] })
     await api.comments?.(undefined)
     await api.reviews?.(0)
     expect(readFileSync(join(dir, 'watched.log'), 'utf8').trim()).toBe('watched-secret')
     expect(readFileSync(join(dir, 'reviews.log'), 'utf8').trim()).toBe('opener-secret')
+  })
+
+  it('reads reviews as the signed-in account when the pulls account has no token file', async () => {
+    // The shape production actually has: the pulls account is `gh`'s own sign-in, so it carries no token.
+    const dir = tmp()
+    const watched = join(dir, 'watched-token')
+    writeFileSync(watched, 'watched-secret\n')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+case "$1 $2" in
+  "api repos/o/r/issues/comments"*)   echo "\${GH_TOKEN:-none}" >> "$(dirname "$0")/watched.log"; echo '[]' ;;
+  "api repos/"*"/pulls/"*"/reviews"*) echo "\${GH_TOKEN:-none}" >> "$(dirname "$0")/reviews.log"; echo '[]' ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const api = ghApi({ bin, repo: 'o/r', tokenFile: watched, reviewsAccount: { bin }, followed: () => [{ repo: 'o/r', number: 9 }] })
+    await api.reviews?.(0)
+    expect(readFileSync(join(dir, 'reviews.log'), 'utf8').trim(), 'the watched token must not reach the reviews read').not.toBe('watched-secret')
   })
 
   it('reads the reviews of the pull requests tickets follow, in their own repositories, and a dead pull does not stop the poll', async () => {

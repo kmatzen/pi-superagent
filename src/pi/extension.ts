@@ -126,7 +126,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({
     // Reviews are read as the account that opens the pull requests: the watched account is not in the
     // organization that hosts them, and a pull request it cannot see is a review the ticket never gets.
-    repo: cfg.githubRepo, ...accounts.watched, ...(accounts.pulls.tokenFile ? { reviewsTokenFile: accounts.pulls.tokenFile } : {}),
+    repo: cfg.githubRepo, ...accounts.watched, reviewsAccount: accounts.pulls,
     // The reviews a ticket waits on are the ones on the pull requests it follows.
     onPullUnreadable: (ref, problem) => log.line('warn', 'pull.reviews_readability', { ref, problem: problem ?? 'readable again' }),
     followed: () => followedPulls(repos.tickets.open(), cfg.githubRepo ?? ''),
