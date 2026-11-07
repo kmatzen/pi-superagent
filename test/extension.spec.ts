@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import superagent, { activationRefusal, createRouterExtension, configFrom, panelToken, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import superagent, { activationRefusal, createRouterExtension, configFrom, panelToken, sweepHomes, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
@@ -892,13 +892,16 @@ describe('the state a router start leaves behind', () => {
         writeFileSync(join(root, name, 'f'), 'x')
         utimesSync(join(root, name), new Date(Date.now() - age * day), new Date(Date.now() - age * day))
       }
-      expect(sweepWorktrees(root, new Set(['tk-open']), 2)).toBe(1)
+      const report = sweepWorktrees(root, new Set(['tk-open']), 2)
+      expect(report.removed).toBe(1)
+      expect(report.keptWork).toBe(0)
       expect(readdirSync(root).sort()).toEqual(['mid', 'new', 'tk-open'])
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
   it('says nothing when there are no checkouts yet', () => {
-    expect(sweepWorktrees(join(tmpdir(), 'sa-sweep-absent'), new Set(), 20)).toBe(0)
+    expect(sweepWorktrees(join(tmpdir(), 'sa-sweep-absent'), new Set(), 20))
+      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0 })
   })
 
   it('makes one panel secret per state directory, readable only by its owner', () => {
@@ -915,5 +918,74 @@ describe('the state a router start leaves behind', () => {
     const base = { PI_SUPERAGENT_ROLE: 'router', PI_SUPERAGENT_GITHUB_REPO: 'o/r', PI_SUPERAGENT_STATE: '/s', PI_SUPERAGENT_WORKTREES: '/w' }
     expect(configFrom({ ...base, PI_SUPERAGENT_KEEP_WORKTREES: '7' })?.keepWorktrees).toBe(7)
     expect(configFrom(base)?.keepWorktrees).toBeUndefined()
+  })
+})
+
+describe('the sweep of settled checkouts', () => {
+  const git = (dir: string, ...args: string[]) =>
+    spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-C', dir, ...args], { encoding: 'utf8' })
+
+  // A checkout whose branch is pushed has a remote; one whose branch is local is the only copy of the work.
+  // The origin lives outside the swept root, so a bare repository is never a sweep candidate.
+  const seed = (root: string, name: string, pushed: boolean) => {
+    const bare = join(root, '..', `${name}.bare`)
+    mkdirSync(bare, { recursive: true })
+    git(bare, 'init', '-q', '--bare', '.')
+    const dir = join(root, name)
+    spawnSync('git', ['clone', '-q', bare, dir], { encoding: 'utf8' })
+    mkdirSync(join(dir, 'repo'))
+    writeFileSync(join(dir, 'repo', 'f'), 'x')
+    git(dir, 'add', '-A')
+    git(dir, 'commit', '-q', '-m', 'work')
+    if (pushed) git(dir, 'push', '-q', 'origin', 'HEAD')
+    return dir
+  }
+
+  const aged = (dir: string, days: number) =>
+    utimesSync(dir, new Date(Date.now() - days * 86_400_000), new Date(Date.now() - days * 86_400_000))
+
+  it('deletes a settled checkout whose work is on a remote', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-git-'))
+    try {
+      seed(root, 'pushed', true)
+      seed(root, 'keepme', false)
+      aged(join(root, 'pushed'), 9)
+      expect(sweepWorktrees(root, new Set(), 1)).toMatchObject({ removed: 1, keptWork: 0 })
+      expect(readdirSync(root)).toContain('keepme')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('keeps a settled checkout whose commits exist on no remote, and says so', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-dirty-'))
+    try {
+      seed(root, 'unpushed', false)
+      aged(join(root, 'unpushed'), 9)
+      expect(sweepWorktrees(root, new Set(), 0)).toMatchObject({ removed: 0, keptWork: 1 })
+      expect(existsSync(join(root, 'unpushed', 'repo', 'f'))).toBe(true)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('deletes a workspace that never cloned, and counts the split it deleted', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-bare-'))
+    try {
+      mkdirSync(join(root, 'notes'))
+      writeFileSync(join(root, 'notes', 'report.md'), 'x')
+      mkdirSync(join(root, 'unused'))
+      aged(join(root, 'notes'), 9)
+      aged(join(root, 'unused'), 8)
+      expect(sweepWorktrees(root, new Set(), 0)).toMatchObject({ removed: 2, bare: 1, empty: 1 })
+      expect(readdirSync(root)).toEqual([])
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('sweeps worker homes, and leaves an open ticket home alone', () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-homes-'))
+    try {
+      mkdirSync(join(root, 'tk-open'), { recursive: true })
+      mkdirSync(join(root, 'tk-done'), { recursive: true })
+      writeFileSync(join(root, 'tk-done', '.gitconfig'), '')
+      expect(sweepHomes(root, new Set(['tk-open']))).toBe(1)
+      expect(readdirSync(root)).toEqual(['tk-open'])
+    } finally { rmSync(root, { recursive: true, force: true }) }
   })
 })
