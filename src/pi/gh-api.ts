@@ -19,6 +19,13 @@ export interface GithubApiOptions extends GhOptions {
    */
   followed: () => Array<{ repo: string; number: number }>
   /**
+   * Read reviews as this account. A router watches one repository and opens its pull requests in others, and
+   * an organization repository is invisible to an account that is not in the org: measured live 2026-11-07,
+   * six followed pull requests answered 404 to the watched token while the account that opened them read them
+   * in one call. Unset, reviews are read as the account `gh` is signed in as — the one that opens them.
+   */
+  reviewsTokenFile?: string
+  /**
    * Called when a followed pull request's reviews go unreadable (a string) or readable again (null). A 404
    * is permanent — the pull is deleted, moved, or private to this account — and a ticket that follows it
    * waits for a review nobody will ever read. Silence is the defect: measured 2026-11-07 with a ghost pull
@@ -66,6 +73,9 @@ type CommentRow = { user?: { login: string }; author_association?: string; creat
 
 export function ghApi(options: GithubApiOptions): GithubApi {
   const call = ghCall(options)
+  const reviewCall = options.reviewsTokenFile
+    ? ghCall({ ...(options.bin ? { bin: options.bin } : {}), tokenFile: options.reviewsTokenFile })
+    : call
   const deadPulls = new Set<string>()
   const openPulls = async (): Promise<Array<{ number: number }>> => {
     const open: Array<{ number: number }> = []
@@ -116,7 +126,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       for (const pr of targets) {
         let rows: ReviewRow[]
         try {
-          rows = JSON.parse((await call(['api', `repos/${pr.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
+          rows = JSON.parse((await reviewCall(['api', `repos/${pr.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
         } catch (error) {
           // GitHub answers 404 for a pull request that is gone, moved, or private to this account, and that is
           // a fact about one pull, not an outage. Measured live 2026-11-07: a followed pull answering 404 threw
