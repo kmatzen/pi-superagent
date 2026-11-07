@@ -1,4 +1,5 @@
 /** Panel and management API over the engine's own store: the panel can show no count the API denies. */
+import { readFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import type { Engine, Ticket } from '../core/index.ts'
 import type { SqliteRepositories } from './store.ts'
@@ -16,6 +17,8 @@ export interface PanelSource {
   workers(): Array<{ ticketId: string; sessionId: string; workspace: string; lastEventAt: string; events: number; quietSeconds: number; watch?: string; busy?: boolean }>
   /** The panel shares the router's event loop, so a slow request is evidence of starvation, not noise. */
   log(level: 'info' | 'warn' | 'error', event: string, fields?: Record<string, unknown>): void
+  /** The same document `superagent status` reads, so the panel and the exit code cannot disagree. */
+  health(): Record<string, unknown>
   isPaused(): boolean
   setPaused(v: boolean): void
   now(): string
@@ -45,7 +48,9 @@ const waitingOn = (t: Ticket): string => {
 export function readModel(src: PanelSource) {
   const now = src.now()
   const tickets = src.repos.tickets.list()
-  const open = tickets.filter(t => !t.ended)
+  // Newest first: list() is insertion order, and the operator opens this panel for the ticket that just
+  // landed. The ended list below says the same thing about its own order.
+  const open = tickets.filter(t => !t.ended).reverse()
   const threads = src.repos.threads.list()
   const decisions = threads.flatMap(t => src.repos.decisions.byThread(t.key))
   const filtered = threads.flatMap(t => src.repos.triggersOfThread(t.ref))
@@ -54,13 +59,15 @@ export function readModel(src: PanelSource) {
   return {
     now,
     paused: src.isPaused(),
+    health: src.health(),
     load: src.load(),
     needsPerson: open.filter(t => t.attention).map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', question: (t.attention as { question?: string }).question ?? '', at: t.assignments.at(-1)?.report?.at ?? '', url: issueUrl(t, src.config.githubRepo) })),
     open: open.map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', state: t.assignments.at(-1)?.state ?? 'queued', waitsFor: waitingOn(t),
       issue: t.channels[0]?.source === 'github' ? t.channels[0].thread : '', url: issueUrl(t, src.config.githubRepo),
       worker: (() => { const w = src.workers().find(w => w.ticketId === t.id); return w ? `${w.busy === false ? 'parked · ' : ''}watch ${w.watch || w.workspace} · ${w.events} events · quiet ${w.quietSeconds}s` : '' })() })),
     workers: src.workers(),
-    ended: tickets.filter(t => t.ended).slice(0, 50).map(t => ({ id: t.id, title: t.title, outcome: t.ended!.outcome, at: t.ended!.at })),
+    // Newest first: list() is insertion order, so the panel reverses rather than the store lying about it.
+    ended: tickets.filter(t => t.ended).reverse().slice(0, 50).map(t => ({ id: t.id, title: t.title, outcome: t.ended!.outcome, at: t.ended!.at })),
     counts: {
       triggers24h: recent.length,
       filtered24h: recent.filter(f => f.disposition?.filtered).length,
@@ -132,7 +139,7 @@ export function createPanelServer(src: PanelSource): { server: Server; url(port:
     if (!/^127\.0\.0\.1:\d+$|^localhost:\d+$/.test(host)) { json(res, 403, { error: 'host must be 127.0.0.1 or localhost' }); return }
     if (url.pathname.startsWith('/api/') && req.headers['x-superagent-request'] !== '1') { json(res, 403, { error: 'missing x-superagent-request: 1' }); return }
     const m = readModel(src)
-    if (url.pathname === '/api/state') return json(res, 200, { paused: m.paused, load: m.load, counts: m.counts, health: {}, workers: m.workers })
+    if (url.pathname === '/api/state') return json(res, 200, { paused: m.paused, load: m.load, counts: m.counts, health: m.health, workers: m.workers })
     if (url.pathname === '/api/settings') return json(res, 200, { policyVersion: m.policy.version, paused: m.paused, revision: 1 })
     if (url.pathname === '/api/sources') return json(res, 200, [{ id: 'github', state: m.source.repo ? 'ready' : 'off', stats: { triggers24h: m.counts.triggers24h, filtered24h: m.counts.filtered24h } }])
     if (url.pathname === '/api/tickets') return json(res, 200, m.open)
@@ -141,7 +148,10 @@ export function createPanelServer(src: PanelSource): { server: Server; url(port:
       let body = ''
       req.on('data', c => { body += c })
       req.on('end', () => {
-        const paused = Boolean(JSON.parse(body || '{}').paused)
+        // An unparseable body is the caller's mistake, not the router's: this handler runs outside the
+        // request's try, so a throw here is an uncaught exception and the process dies with the panel's workers.
+        let paused: boolean
+        try { paused = Boolean(JSON.parse(body || '{}').paused) } catch { return json(res, 400, { error: 'body must be JSON, e.g. {"paused":true}' }) }
         src.setPaused(paused)
         json(res, 200, { paused })
       })

@@ -30,6 +30,35 @@ afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true 
 
 // Each run starts several processes (bash, node for herdr's JSON, the fake herdr): seconds under a full suite.
 describe('scripts/superagent', { timeout: 30_000 }, () => {
+  it('refuses to kill a process on the panel port that is not this router', async () => {
+    // The scheduled health check runs `start`, and `start` frees the panel's port. A dev server that owns
+    // 8799 is the operator's work, not a stale panel, so killing it is the defect this guards.
+    const { spawn } = await import('node:child_process')
+    const squatter = spawn(process.execPath, ['-e', "require('http').createServer((_q,r)=>r.end('mine')).listen(8799)"], { stdio: 'ignore' })
+    await new Promise(r => setTimeout(r, 700))
+    const out = run(['start'])
+    expect(out.status, out.stderr).not.toBe(0)
+    expect(out.stderr).toMatch(/not this router/)
+    const alive = spawnSync(process.execPath, ['-e', "fetch('http://127.0.0.1:8799').then(r=>r.text()).then(t=>process.exit(t==='mine'?0:1))"], { encoding: 'utf8' })
+    expect(alive.status, 'the squatter stayed alive and answered').toBe(0)
+    squatter.kill()
+  })
+
+  it('treats a ready-wait of 0 as one second, not as a start that always fails', () => {
+    // 0 reads as "do not wait"; without a floor the loop never runs, the ready check fires, and a scheduled
+    // health check restarts a healthy router forever.
+    const out = run(['start'], { PI_SUPERAGENT_READY_WAIT: '0', FAKE_HERDR_READY: state })
+    expect(out.stderr).toMatch(/did not report ready within 1s/)
+    expect(out.status).toBe(1)
+  })
+
+  it('exits 1 when the router never reports ready, because 0 promises healthy', () => {
+    // The ready path is a directory here, so the fake herdr cannot write it and startup never completes.
+    const out = run(['start'], { PI_SUPERAGENT_READY_WAIT: '1', FAKE_HERDR_READY: state })
+    expect(out.status, out.stderr).toBe(1)
+    expect(out.stderr).toMatch(/did not report ready/)
+  })
+
   it('init validates access and keeps existing settings on repeat or conflict', () => {
     for (const [bin, body] of [['gh', 'echo "$PERMISSION"'], ['pi', 'exit 0']] as const) {
       writeFileSync(join(herdrDir, bin), `#!/bin/sh\n${body}\n`, { mode: 0o755 })

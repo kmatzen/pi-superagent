@@ -39,6 +39,8 @@ export interface GithubApi {
 
 export interface PrReview {
   pr: number
+  /** The repository the review lives in: a ticket follows pull requests beyond the watched one. */
+  repo: string
   id: number
   author: string
   association: string
@@ -56,6 +58,9 @@ export interface GithubSourceOptions {
 }
 
 const sinceKey = (repo: string) => `source:github:${repo}:since`
+/** Group rows by a key, keeping the order in which the keys first appear. */
+const groupRows = <T,>(rows: readonly T[], key: (row: T) => string): Map<string, T[]> =>
+  rows.reduce((map, row) => map.set(key(row), [...map.get(key(row)) ?? [], row]), new Map<string, T[]>())
 const issuesKey = (repo: string) => `source:github:${repo}:issues`
 const reviewsKey = (repo: string) => `source:github:${repo}:reviews`
 /** Where a source persists its read positions (the SQLite kv table in practice). */
@@ -151,38 +156,66 @@ export class GithubSource {
         })
       }
     }
+    // The cap is a decision, not an accident: past 4000 open issues the oldest key is forgotten, and an issue
+    // still open that far back fires once more as a request. The watched repository has tens, not thousands.
     this.staged.push([issuesKey(this.options.repo), [...seen].slice(-4000)])
     return out
   }
 
-  /** A submitted review is a person speaking about delivered work: "request changes" must not be invisible. */
+  /** The thread key of a pull request: bare `#n` in the watched repository, `owner/repo#n` anywhere else. */
+  private pullKey(repo: string, pr: number): string {
+    return repo === this.options.repo ? `#${pr}` : `${repo}#${pr}`
+  }
+
+  /**
+   * A submitted review is a person speaking about delivered work: "request changes" must not be invisible.
+   * Every repository gets its own cursor, because review ids rise per deployment and a pull request joined
+   * later brings reviews with LOWER ids than the watched repository has already seen: one shared cursor
+   * filed a foreign review as history it had never read.
+   */
   private async reviewTriggers(): Promise<Trigger[]> {
     if (!this.api.reviews) return []
-    const seen = this.store.get<number>(reviewsKey(this.options.repo))
-    const incoming = await this.api.reviews(seen ?? 0)
-    // A first look seeds the cursor silent — even with nothing to seed, the seed lands: a cursor that
-    // stays undefined would make the repo's first real review "history".
-    if (seen === undefined) {
-      this.store.set(reviewsKey(this.options.repo), incoming.length ? Math.max(...incoming.map(r => r.id)) : 0)
-      return []
-    }
-    if (incoming.length) this.staged.push([reviewsKey(this.options.repo), Math.max(...incoming.map(r => r.id))])
+    const incoming = await this.api.reviews(0)
     const out: Trigger[] = []
-    for (const r of incoming) {
-      if (r.author === this.options.self || r.body.includes(this.options.selfMarker ?? REPLY_MARKER)) continue
-      if (!this.isHuman(r.author)) continue
-      const state = r.state.toLowerCase().replace(/_/g, ' ')
-      out.push({
-        id: `github:#${r.pr}:review:${r.id}`,
-        source: 'github',
-        threads: [{ source: 'github', id: `#${r.pr}` }],
-        actor: { source: 'github', id: r.author },
-        human: true,
-        at: r.at,
-        text: `PR #${r.pr}: ${r.author} ${state}${r.body ? `\n\n${r.body.slice(0, 4000)}` : ''}`,
-        channel: { source: 'github', thread: `#${r.pr}`, address: { issue: String(r.pr) } },
-        meta: { via: 'review', state: r.state, association: r.association, author: r.author },
-      })
+    if (!incoming.length) {
+      // Nothing to seed from, and the watched repository's cursor still seeds once: a cursor that
+      // stays undefined makes its first real review history nobody asked to skip.
+      if (this.store.get<number>(reviewsKey(this.options.repo)) === undefined) this.store.set(reviewsKey(this.options.repo), 0)
+      return out
+    }
+    for (const [repo, rows] of groupRows(incoming, r => r.repo)) {
+      const newest = Math.max(...rows.map(r => r.id))
+      const seen = this.store.get<number>(reviewsKey(repo))
+      // A first look seeds the cursor silent — even with nothing to seed, the seed lands: a cursor that
+      // stays undefined would make the repo's first real review "history".
+      if (seen === undefined) {
+        this.store.set(reviewsKey(repo), newest)
+        continue
+      }
+      this.staged.push([reviewsKey(repo), Math.max(seen, newest)])
+      for (const r of rows.filter(row => row.id > seen)) {
+        if (r.author === this.options.self || r.body.includes(this.options.selfMarker ?? REPLY_MARKER)) continue
+        if (!this.isHuman(r.author)) continue
+        const key = this.pullKey(repo, r.pr)
+        const state = r.state.toLowerCase().replace(/_/g, ' ')
+        out.push({
+          id: `github:${key}:review:${r.id}`,
+          source: 'github',
+          threads: [{ source: 'github', id: key }],
+          actor: { source: 'github', id: r.author },
+          human: true,
+          at: r.at,
+          text: `PR ${key}: ${r.author} ${state}${r.body ? `\n\n${r.body.slice(0, 4000)}` : ''}`,
+          // The address carries the repository, or the reply posts the number into the watched one:
+          // measured 2026-11-07, 12 HTTP 404s, and any watched issue with that number would have taken it.
+          channel: {
+            source: 'github',
+            thread: key,
+            address: repo === this.options.repo ? { issue: String(r.pr) } : { repo, issue: String(r.pr) },
+          },
+          meta: { via: 'review', state: r.state, association: r.association, author: r.author },
+        })
+      }
     }
     return out
   }
@@ -200,7 +233,8 @@ export class GithubSource {
       actor: { source: 'github', id: c.author },
       human,
       at: c.at,
-      text: c.body,
+      // Bounded like an issue body: one pasted CI log would otherwise buy its own judge prompt and worker brief.
+      text: c.body.slice(0, 4000),
       channel: { source: 'github', thread: `#${c.issue}`, address: { issue: String(c.issue) } },
       // The scope sees a trigger's source and meta only, so who wrote it travels in meta as well.
       meta: { association: c.association, author: c.author },

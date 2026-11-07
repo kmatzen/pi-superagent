@@ -12,6 +12,27 @@ export interface GhOptions {
 
 export interface GithubApiOptions extends GhOptions {
   repo: string
+  /**
+   * The pull requests whose reviews matter. Reviews have no repository-wide feed, so a read costs one call
+   * per pull request: asking for every open one made the tick grow with the repository (50 open pull requests
+   * was 51 round trips per poll), while the tickets only ever wait on the ones they follow.
+   */
+  followed: () => Array<{ repo: string; number: number }>
+  /**
+   * Read reviews as another account, the one that opens the pull requests. A router watches one repository and
+   * opens its pull requests in others, and an organization repository is invisible to an account outside the
+   * org: measured live 2026-11-07, six followed pull requests answered 404 to the watched token, and the
+   * account that opened them read a review request in one call. The pulls account usually has no token file —
+   * it is the account `gh` is signed in as — so this is an account, not a second token.
+   */
+  reviewsAccount?: GhOptions
+  /**
+   * Called when a followed pull request's reviews go unreadable (a string) or readable again (null). A 404
+   * is permanent — the pull is deleted, moved, or private to this account — and a ticket that follows it
+   * waits for a review nobody will ever read. Silence is the defect: measured 2026-11-07 with a ghost pull
+   * that stalled a ticket with no reason a person could see.
+   */
+  onPullUnreadable?: (ref: string, problem: string | null) => void
 }
 
 // A pull request's conversation comments arrive with an /issues/N url too (a pull request is issue N);
@@ -53,6 +74,8 @@ type CommentRow = { user?: { login: string }; author_association?: string; creat
 
 export function ghApi(options: GithubApiOptions): GithubApi {
   const call = ghCall(options)
+  const reviewCall = options.reviewsAccount ? ghCall(options.reviewsAccount) : call
+  const deadPulls = new Set<string>()
   const openPulls = async (): Promise<Array<{ number: number }>> => {
     const open: Array<{ number: number }> = []
     for (let page = 1; ; page += 1) {
@@ -96,13 +119,31 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     },
 
     async reviews(sinceId) {
-      // Reviews have no repo-level feed: read the open PRs and pull each one's reviews above the cursor.
-      const open = await openPulls()
+      // Reported once per pull, not once per poll: 2880 polls a day is not a log.
+      const targets = options.followed()
       const out: PrReview[] = []
-      for (const pr of open) {
-        const rows = JSON.parse((await call(['api', `repos/${options.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
+      for (const pr of targets) {
+        let rows: ReviewRow[]
+        try {
+          rows = JSON.parse((await reviewCall(['api', `repos/${pr.repo}/pulls/${pr.number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
+        } catch (error) {
+          // GitHub answers 404 for a pull request that is gone, moved, or private to this account, and that is
+          // a fact about one pull, not an outage. Measured live 2026-11-07: a followed pull answering 404 threw
+          // out of the whole read, so no review reached any ticket, and once it was the only pull in the batch
+          // every poll reported the source down. Skipping it loses nothing — the cursor is per source, so a
+          // pull that becomes readable again is read from where it left off.
+          const problem = String(error)
+          if (!/HTTP 404/.test(problem)) throw error
+          const ref = `${pr.repo}#${pr.number}`
+          if (!deadPulls.has(ref)) {
+            deadPulls.add(ref)
+            options.onPullUnreadable?.(ref, problem.slice(0, 200))
+          }
+          continue
+        }
+        if (deadPulls.delete(`${pr.repo}#${pr.number}`)) options.onPullUnreadable?.(`${pr.repo}#${pr.number}`, null)
         for (const r of rows) if (r.id > sinceId && r.submitted_at) {
-          out.push({ pr: pr.number, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at, body: r.body ?? '' })
+          out.push({ pr: pr.number, repo: pr.repo, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at, body: r.body ?? '' })
         }
       }
       return out.sort((a, b) => a.id - b.id)
@@ -138,7 +179,7 @@ export function ghPulls(options: GhOptions = {}): PullApi {
     async reviews(repo, number) {
       const rows = JSON.parse((await call(['api', `repos/${repo}/pulls/${number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
       return rows.filter(r => r.submitted_at).map(r => ({
-        pr: number, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at!, body: r.body ?? '',
+        pr: number, repo, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at!, body: r.body ?? '',
       }))
     },
   }

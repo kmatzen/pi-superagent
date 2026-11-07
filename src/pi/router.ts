@@ -66,7 +66,7 @@ export async function loadSdk(config: RouterConfig): Promise<SdkSurface> {
 
 export const briefFor = (ticket: Ticket, worktree: string): string => [
   `You are a worker on ${ticket.channels[0]?.thread ?? ticket.id}: ${ticket.title}.`,
-  `Mandate: ${ticket.mandate ?? '(the ticket text)'}`,
+  `Mandate: ${ticket.mandate?.scope ?? '(the ticket text)'}`,
   `Worktree: ${worktree}. Work there; do not touch the primary checkout.`,
   `Finish with the ticket_report tool: state one of ready, blocked, failed, cancelled; summary = what a`,
   `reviewer needs; question = the single yes/no the operator must answer, and only for state=blocked.`,

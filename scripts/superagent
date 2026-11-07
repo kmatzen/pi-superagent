@@ -46,6 +46,10 @@ WORKTREES="${PI_SUPERAGENT_WORKTREES:-$STATE/work}"
 STOP_MARKER="$STATE/stopped"
 ROUTER_PLACE="$STATE/router.herdr"
 GRACE="${PI_SUPERAGENT_GRACE:-30}"
+# How long start waits for the router to write its ready file. A router that never got there is not healthy.
+READY_WAIT="${PI_SUPERAGENT_READY_WAIT:-60}"
+# 0 reads as "do not wait" and would make every start report failure, so the floor is one second.
+[ "$READY_WAIT" -lt 1 ] 2>/dev/null && READY_WAIT=1
 # The panel is the operator's view of the engine (upstream's docs/005-panel.md: does anything need me, is
 # it healthy, what is the history of one piece of work). Loopback only; the API refuses a caller that does
 # not say what it is, and any non-local Host.
@@ -114,6 +118,13 @@ start() {
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     nc -z 127.0.0.1 "$PANEL_PORT" 2>/dev/null || break
     for pid in $(lsof -ti "tcp:${PANEL_PORT}" 2>/dev/null); do
+      # Only our own router's panel may be killed here. A dev server, a database, or a second tool that
+      # picked 8788 is somebody's work, and the nightly health check must not terminate it. The environment
+      # names the owner: a superagent router carries the state directory it serves.
+      if ! ps eww -p "$pid" -o command= 2>/dev/null | grep -qF "PI_SUPERAGENT_STATE=$STATE"; then
+        echo "superagent: port $PANEL_PORT belongs to a process that is not this router (pid $pid: $(ps -p "$pid" -o command= 2>/dev/null | cut -c1-60)); move it, or set PI_SUPERAGENT_PANEL_PORT" >&2
+        return 1
+      fi
       kill "$pid" 2>/dev/null || true
       [ "${_}" -gt 10 ] && kill -9 "$pid" 2>/dev/null || true
     done
@@ -162,11 +173,17 @@ start() {
     return 1
   done
   local waited=0
-  while [ "$waited" -lt 60 ]; do
+  while [ "$waited" -lt "$READY_WAIT" ]; do
     running || { echo "the router left its herdr tab during startup ($tab_id)" >&2; return 1; }
     [ -f "$STATE/ready" ] && break
     sleep 1; waited=$((waited+1))
   done
+  # 0 means running AND healthy, and the scheduled check acts on that: a session that exists and never
+  # reported ready is code 1, so the check restarts it instead of admiring a herdr tab forever.
+  if [ ! -f "$STATE/ready" ]; then
+    echo "the router did not report ready within ${waited}s (herdr tab $tab_id)" >&2
+    return 1
+  fi
   status
 }
 

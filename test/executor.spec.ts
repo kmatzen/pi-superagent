@@ -56,6 +56,10 @@ function fixture(extra: { maxConcurrent?: number; slotPollMs?: number; follow?: 
   return { executor, calls, sessions, calls_of }
 }
 
+/** A ticket whose end carries `outcome`, as the domain writes it just before it stops the worker. */
+const ended = (outcome: string, base: Ticket = ticket()): Ticket =>
+  ({ ...base, ended: { at: 'now', by: 'executor', outcome } } as Ticket)
+
 const input = (id: string, kind: 'text' | 'trigger', extra: Record<string, unknown> = {}): TicketInput =>
   ({ id, kind, ...(kind === 'text' ? { text: `input ${id}` } : { triggerId: id, at: '2026-09-23T00:00:00Z' }), ...extra }) as TicketInput
 
@@ -200,10 +204,53 @@ describe('PiExecutor', () => {
     f.executor.start(ticket(), assignment())
     await f.executor.idle()
     const s = f.sessions[0]!
-    f.executor.stop(ticket(), assignment(), 'ticket ended')
+    f.executor.stop(ended('stopped'), assignment(), 'a person stopped it')
     s.report('ready', 'finished after the ticket closed')
     expect(f.calls_of('report')).toEqual([])
     expect([s.aborted, s.disposed]).toEqual([1, 1])
+  })
+
+  it('a ticket that ended because its worker finished does not cut that worker off mid-sentence', async () => {
+    // Escape is a cancellation: pi aborts the run and puts anything queued for it back in the human's input box.
+    // A worker that just reported ready is finishing its own turn, and the messages waiting for it are its next work.
+    const f = fixture()
+    f.executor.start(ticket(), assignment())
+    await f.executor.idle()
+    const done = ticket({ assignments: [{ id: 'A1', report: { state: 'ready', summary: 'merged the fix', at: 'now' } } as unknown as Assignment] })
+    f.executor.stop(done, done.assignments[0]!, 'ready')
+    expect(f.sessions[0]!.aborted, 'no Escape: the run ends by itself').toBe(0)
+    expect(f.sessions[0]!.disposed, 'its session is still released').toBe(1)
+  })
+
+  it('a pull request merging does not cut off a worker whose report call is still in flight', async () => {
+    // Measured 2026-11-07T02:33:07Z: a watched pull request merged, ending the ticket, and the
+    // Escape that stop() sent killed the worker's ticket_report mid-call, so its result never landed.
+    // A merged pull request is finished work, the same class as a ready report, and the report call in
+    // flight has not been recorded yet, so the ready report alone cannot prove it.
+    const f = fixture()
+    f.executor.start(ticket(), assignment())
+    await f.executor.idle()
+    expect(f.sessions[0]!.aborted, 'no Escape: the work merged, so nothing is being cancelled').toBe(0)
+    f.executor.stop(ended('merged'), assignment(), 'pull request merged')
+    expect(f.sessions[0]!.aborted).toBe(0)
+    expect(f.sessions[0]!.disposed, 'its session is still released').toBe(1)
+  })
+
+  it('a ticket dropped with nothing to do does not cut off a worker mid-turn', async () => {
+    const f = fixture()
+    f.executor.start(ticket(), assignment())
+    await f.executor.idle()
+    f.executor.stop(ended('dropped'), assignment(), 'no work requested')
+    expect(f.sessions[0]!.aborted).toBe(0)
+  })
+
+  it('a ticket cancelled while its worker works does cut that worker off', async () => {
+    const f = fixture()
+    f.executor.start(ticket(), assignment())
+    await f.executor.idle()
+    const running = ticket({ assignments: [{ id: 'A1', report: { state: 'progress', summary: 'halfway', at: 'now' } } as unknown as Assignment] })
+    f.executor.stop(ended('stopped', running), running.assignments[0]!, 'a person stopped it')
+    expect(f.sessions[0]!.aborted).toBe(1)
   })
 
   it('tells the deployment who ended each run: the worker, a run with no report, a crash, a failed launch', async () => {
