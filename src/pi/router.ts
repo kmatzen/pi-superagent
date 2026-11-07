@@ -19,6 +19,8 @@ export interface RouterConfig {
    * that token instead of as the operator. Unset, the brief tells the worker it cannot push.
    */
   workerTokenFile?: string
+  /** Report a worker that has run this long without finishing. Reports; never kills. */
+  workerDeadlineHours?: number
   judgeThinking?: string
   /** 'herdr': each worker is its own pi session in a herdr tab. Unset, workers run in-process (tests only). */
   workers?: 'herdr'

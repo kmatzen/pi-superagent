@@ -65,6 +65,7 @@ interface Live {
   events: number
   workspace: string
   quietReported: boolean
+  deadlineReported: boolean
   assignmentId: string
 }
 
@@ -76,6 +77,7 @@ export interface WorkerView {
   lastEventAt: string
   events: number
   quietSeconds: number
+  ageSeconds: number
   watch: string
   busy: boolean
 }
@@ -157,7 +159,7 @@ export class PiExecutor {
     const live: Live = {
       session, unsubscribe: () => {}, pendingRead: [], busy: true,
       startedAt: born, lastEventAt: born, events: 0, workspace: session.workspace ?? this.options.worktreeFor(ticket),
-      quietReported: false, assignmentId: assignment.id,
+      quietReported: false, deadlineReported: false, assignmentId: assignment.id,
     }
     live.unsubscribe = session.subscribe(event => {
       live.lastEventAt = Date.now()
@@ -228,6 +230,7 @@ export class PiExecutor {
       lastEventAt: new Date(live.lastEventAt).toISOString(),
       events: live.events,
       quietSeconds: Math.round((Date.now() - live.lastEventAt) / 1000),
+      ageSeconds: Math.round((Date.now() - live.startedAt) / 1000),
       watch: live.session.watch ?? '',
       busy: live.busy,
     }))
@@ -239,6 +242,13 @@ export class PiExecutor {
     // Once per silent stretch, and only on a run: a parked worker is quiet by design.
     const due = this.workers().filter(w => w.busy && w.quietSeconds >= minutes * 60 && !this.live.get(w.ticketId)?.quietReported)
     for (const w of due) this.live.get(w.ticketId)!.quietReported = true
+    return due
+  }
+
+  /** Workers past their deadline, once each: the deadline is a prompt for a person, not a killer. */
+  overdue(hours: number): WorkerView[] {
+    const due = this.workers().filter(w => w.busy && w.ageSeconds >= hours * 3600 && !this.live.get(w.ticketId)?.deadlineReported)
+    for (const w of due) this.live.get(w.ticketId)!.deadlineReported = true
     return due
   }
 

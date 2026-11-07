@@ -546,6 +546,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         question: 'steer it, stop it, or accept the work it has done',
       } as never)
     }
+    // The operator's deadline, not the router's: report and let a person decide. A worker mid-legitimate
+    // work must never be terminated by a clock the router owns, so this speaks and does not kill.
+    for (const late of executor.overdue(cfg.workerDeadlineHours ?? 6)) {
+      engine.report(late.ticketId, {
+        state: 'blocked',
+        summary: `the worker has run ${Math.round(late.ageSeconds / 3600)} hours in ${late.workspace} without finishing`,
+        question: 'accept the work, steer it, or stop it on the panel',
+      } as never)
+    }
     // Replies go out before the wait on worker capacity: with every slot busy, idle() resolves only when a
     // worker ends, and an acknowledgement must not wait an hour behind it.
     outbox.flush()
@@ -788,6 +797,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const keepWorktrees = positiveNumber('PI_SUPERAGENT_KEEP_WORKTREES', env.PI_SUPERAGENT_KEEP_WORKTREES)
   const workerTokenFile = env.PI_SUPERAGENT_WORKER_TOKEN_FILE?.trim()
   const workerQuietMinutes = positiveNumber('PI_SUPERAGENT_WORKER_QUIET_MINUTES', env.PI_SUPERAGENT_WORKER_QUIET_MINUTES)
+  const deadlineHours = positiveNumber('PI_SUPERAGENT_WORKER_DEADLINE_HOURS', env.PI_SUPERAGENT_WORKER_DEADLINE_HOURS)
   return {
     dataDir, worktreeRoot: env.PI_SUPERAGENT_WORKTREES ?? `${dataDir}/work`,
     self: env.PI_SUPERAGENT_SELF ?? 'pi-superagent',
@@ -797,6 +807,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(keepWorktrees === undefined ? {} : { keepWorktrees: Math.floor(keepWorktrees) }),
     ...(workerTokenFile ? { workerTokenFile } : {}),
     ...(workerQuietMinutes === undefined ? {} : { workerQuietMinutes }),
+    ...(deadlineHours === undefined ? {} : { workerDeadlineHours: deadlineHours }),
     bots: new Set((env.PI_SUPERAGENT_BOTS ?? 'pi-*,fleet-*').split(',').map(s => s.trim()).filter(Boolean)),
     ...(env.PI_SUPERAGENT_PREPARE ? { prepare: env.PI_SUPERAGENT_PREPARE } : {}),
     ...(env.PI_SUPERAGENT_BLOCKED ? { blockedCommands: env.PI_SUPERAGENT_BLOCKED.split(',').map(s => s.trim()).filter(Boolean) } : {}),
