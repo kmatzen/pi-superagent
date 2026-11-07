@@ -80,7 +80,9 @@ a crash. The router stores the ticket on disk, so after a restart it can find th
 up the conversation. [Architecture](docs/architecture.md) · [Design decisions](docs/design-decisions.md)
 
 The ticket engine comes from DeepSeek’s dsh-superagent-prototype. Three TLA+ models check how
-tickets, incoming messages and worker tabs behave when events arrive in different orders.
+tickets, incoming messages and worker tabs behave when events arrive in different orders. The models check
+the design: `scripts/check-formal` reads `formal/`, never `src/`, so a code change that leaves the design is
+caught by `npx vitest run` (492 tests) and not by TLC.
 [Upstream project](https://github.com/deepseek-ai/dsh-superagent-prototype) ·
 [Adaptation ledger](ADAPTATION.md) · [Formal verification](docs/formal-verification.md)
 
