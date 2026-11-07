@@ -749,6 +749,25 @@ describe('a pull request per ticket', () => {
     expect(f.receipts('491')).toMatch(/closed without merging[\s\S]*A comment here starts the work again/)
   })
 
+  it('a ticket with two pull requests ends only when both are done, and each is named by what it did', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '493')
+    pulls.open('o/r', 81)
+    pulls.open('o/r', 82)
+    f.workers[0]!.report!({ state: 'ready', summary: 'two changes', pullRequests: ['https://github.com/o/r/pull/81', 'https://github.com/o/r/pull/82'] })
+    await f.running.tick()
+    pulls.end('o/r', 81, true, '2026-11-07T01:00:00Z')
+    await f.running.tick()
+    expect(ticket().ended, 'the second pull request is still open, so the ticket stays open').toBeUndefined()
+    pulls.end('o/r', 82, false, '2026-11-07T02:00:00Z')
+    await f.running.tick()
+    expect(ticket().ended).toMatchObject({ outcome: 'closed', by: 'executor' })
+    const receipt = f.receipts('493')
+    expect(receipt, 'the merged pull request is not reported as a close').toMatch(/github\.com\/o\/r\/pull\/81 merged/)
+    expect(receipt).toMatch(/github\.com\/o\/r\/pull\/82 closed without merging/)
+  })
+
   it('a merge that closes the issue is not a stop: the ticket ends merged once its work finishes', async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
