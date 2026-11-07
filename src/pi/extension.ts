@@ -2,7 +2,10 @@
  *  worker, and inert everywhere else. */
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
+import { promisify } from 'node:util'
+
+const runGit = promisify(execFile)
 import { join } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
@@ -583,13 +586,16 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const recovered = (async () => {
     for (const ticket of repos.tickets.open()) await recover(ticket)
     const openIds = new Set(repos.tickets.open().map(t => t.id))
+    const beganSweep = Date.now()
     // Ninety days: the ticket row is the engine's working set, and the issue on GitHub is the record.
     const pruned = repos.pruneClosedTickets(new Date(Date.now() - 90 * 86_400_000).toISOString())
     if (pruned) log.line('info', 'tickets.pruned', { removed: pruned, olderThanDays: 90 })
-    const swept = sweepWorktrees(cfg.worktreeRoot, openIds, cfg.keepWorktrees ?? 20)
+    const swept = await sweepWorktrees(cfg.worktreeRoot, openIds, cfg.keepWorktrees ?? 20)
     const homes = sweepHomes(join(cfg.dataDir, 'worker-homes'), openIds)
     if (swept.removed || swept.keptWork || homes) {
-      log.line('info', 'worktree.swept', { ...swept, kept: cfg.keepWorktrees ?? 20, homes,
+      log.line('info', 'worktree.swept', {
+        ...swept, keptWorkIds: swept.keptWorkIds.slice(0, 8), seconds: Math.round((Date.now() - beganSweep) / 1000),
+        kept: cfg.keepWorktrees ?? 20, homes,
         note: swept.keptWork ? 'settled checkouts with commits on no remote are never deleted' : undefined })
     }
     if (!herdrWorkers) return
@@ -684,20 +690,25 @@ export interface SweepReport {
   /** Settled workspaces with files and no checkout, and empty ones: the 43 GB is not all code. */
   bare: number
   empty: number
+  /** The settled checkouts kept because their work is on no remote: named, so the operator can push them. */
+  keptWorkIds: string[]
 }
 
 /** A ticket's checkout is the ticket directory itself, or `repo` inside it: both layouts are live. */
 const checkoutOf = (dir: string): string | undefined =>
   existsSync(join(dir, '.git')) ? dir : existsSync(join(dir, 'repo', '.git')) ? join(dir, 'repo') : undefined
 
-/** Commits on this checkout that exist on no remote. An unreadable checkout reads as unpushed and is kept:
- *  the sweep frees disk, it never frees work it could not read. */
-function unpushedCommits(dir: string): number {
+/**
+ * Commits on this checkout that exist on no remote. An unreadable checkout reads as unpushed and is kept:
+ * the sweep frees disk, it never frees work it could not read. Asynchronous because the synchronous version
+ * held the router's event loop for 47 s on a live start (47 checkouts, measured), and the first tick waited.
+ */
+async function unpushedCommits(dir: string): Promise<number> {
   try {
     // An unborn HEAD (a clone of an empty repository, a checkout mid-clone) reads as unpushed and is kept.
-    execFileSync('git', ['-C', dir, 'rev-parse', '--verify', '-q', 'HEAD'], { stdio: 'ignore', timeout: 10_000 })
-    return Number(execFileSync('git', ['-C', dir, 'rev-list', '--count', 'HEAD', '--not', '--remotes'],
-      { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim())
+    await runGit('git', ['-C', dir, 'rev-parse', '--verify', '-q', 'HEAD'], { timeout: 10_000 })
+    const { stdout } = await runGit('git', ['-C', dir, 'rev-list', '--count', 'HEAD', '--not', '--remotes'], { timeout: 10_000 })
+    return Number(stdout.trim())
   } catch { return 1 }
 }
 
@@ -705,8 +716,8 @@ function unpushedCommits(dir: string): number {
  * Measured live: a ticket checkout is about 570 MB, 75 of them, 43 GB, and nothing ever deleted one. Keep
  * the newest settled ones for the audit trail; delete older ones only when the work inside is on a remote.
  */
-export function sweepWorktrees(root: string, open: ReadonlySet<string>, keep: number): SweepReport {
-  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0 }
+export async function sweepWorktrees(root: string, open: ReadonlySet<string>, keep: number): Promise<SweepReport> {
+  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, keptWorkIds: [] }
   let names: string[]
   try { names = readdirSync(root) } catch { return report }
   const settled = names
@@ -714,16 +725,16 @@ export function sweepWorktrees(root: string, open: ReadonlySet<string>, keep: nu
     .map(name => { try { return { name, at: statSync(join(root, name)).mtimeMs } } catch { return null } })
     .filter((e): e is { name: string; at: number } => e !== null)
     .sort((a, b) => b.at - a.at)
-  settled.forEach((entry, index) => {
+  for (const [index, entry] of settled.entries()) {
     const dir = join(root, entry.name)
     const checkout = checkoutOf(dir)
-    if (index < keep) { if (checkout) report.checkouts++; return }
+    if (index < keep) { if (checkout) report.checkouts++; continue }
     if (!checkout) {
       if (readdirSync(dir).length === 0) report.empty++; else report.bare++
     }
-    if (checkout && unpushedCommits(checkout) > 0) { report.keptWork++; return }
+    if (checkout && await unpushedCommits(checkout) > 0) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
     try { rmSync(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
-  })
+  }
   return report
 }
 
