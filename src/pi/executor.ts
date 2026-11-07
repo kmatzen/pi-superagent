@@ -88,6 +88,26 @@ export interface WorkerView {
   busy: boolean
 }
 
+/**
+ * Whether the ticket ended with work that is finished: the worker reported its result, the pull request it
+ * opened merged, or the ticket closed with nothing to do. Escape cancels a run, and a cancel thrown at finished
+ * work kills whatever the worker is doing at that moment — measured 2026-11-07T02:33:07Z, where a merge landing
+ * while the worker called ticket_report destroyed the report, and the run then posted as stopped without a
+ * result. A person stopping the ticket, a pull request closed without merging, and a retry are real
+ * cancellations, and they still get Escape.
+ */
+/**
+ * Whether the ticket that ended did so with finished work: the worker reported its result, the pull request it
+ * opened merged, or the ticket closed with nothing to do. Escape cancels a run, and a cancel thrown at finished
+ * work kills whatever the worker is doing at that moment — measured 2026-11-07T02:33:07Z, where a merge landing
+ * while the worker called ticket_report destroyed the report, and the run then posted as stopped without a
+ * result. A person stopping the ticket, a pull request closed without merging, and a retry are real
+ * cancellations, and they still get Escape. The end is recorded on the ticket before this runs, so a stop that
+ * carries no end at all (a retry, a delayed stop for a crashed run) reads as a cancellation.
+ */
+export const finishedWork = (ticket: Ticket): boolean =>
+  ticket.ended?.outcome === 'completed' || ticket.ended?.outcome === 'merged' || ticket.ended?.outcome === 'dropped'
+
 export class PiExecutor {
   private readonly live = new Map<string, Live>()
   private readonly queue: Array<() => void> = []
@@ -214,7 +234,7 @@ export class PiExecutor {
     // Not when the ticket ended because this worker said it was done: Escape is a cancellation, it cuts the
     // worker's last turn, and pi hands the run's queued messages back to the human's input box, where a review
     // sits unprocessed and the ticket's next step never happens.
-    if (assignment.report?.state !== 'ready') live.session.abort()
+    if (!finishedWork(ticket) && assignment.report?.state !== 'ready') live.session.abort()
     live.session.dispose()
     void reason
   }
