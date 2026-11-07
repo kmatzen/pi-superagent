@@ -1,68 +1,78 @@
 # Operator guide
 
-Everything you need to ask for work, watch it happen, and set it right when it goes wrong.
+Use the GitHub thread to request work and answer the worker. Open its herdr tab when you need to
+inspect the session or intervene directly.
 
 ## Asking for work
 
-Open an issue on the watched repository (`PI_SUPERAGENT_GITHUB_REPO`) and say plainly what you want
-done:
+Open an issue on the watched repository (`PI_SUPERAGENT_GITHUB_REPO`) and describe the change you want. Include anything the worker should preserve.
 
 ```
 Title: Rename the Export button to "Ship"
 Body:  The primary button in the header should say Ship instead of Export. Keep the keyboard shortcut.
 ```
 
-Within about a minute the judge's acknowledgement appears on the issue, and a tab named for the issue
-opens in the `superagent` herdr workspace with the worker inside. When the worker finishes, its report
-arrives on the issue as a reply.
+When the judge accepts the request, the router replies on the issue and opens a worker tab in the
+`superagent` herdr workspace. Look for the issue number in the tab title. The worker’s report
+appears on the same thread.
 
 The judge accepts a concrete action someone asks the agent to take, even one that calls itself a test.
 It ignores chatter, notes addressed to other people, and new requests on a thread that already has an
 open ticket. An ignore posts nothing on the issue; the reason is in the engine log.
 
-- **Who can ask.** People with write access to the repository: its owner, members of the organization
-  that owns it, and collaborators. Anyone else's issues, comments and reviews are dropped before the judge
-  sees them, and the panel counts them as filtered. To hear someone else, add them as a collaborator. To
-  hear fewer people, list the logins in `PI_SUPERAGENT_ALLOWED`; the list then replaces the rule.
-- **Follow-ups.** Comment on the same issue. While its ticket is open, your comments go straight to its
-  worker.
-- **Pull requests.** When the work changes a repository, the worker opens a pull request and names it in
-  its report, and the receipt on the issue links it. The ticket then waits for review, shown on the panel
-  as `review of #N`: your comments and reviews on the pull request go to the same worker. Merge it, and
-  the ticket ends and the issue says it is done. Close it unmerged, and the ticket ends too; a comment on
-  the issue starts the work again. A pull request in another repository works the same way, checked every
-  two minutes. A request that changes no repository, such as a question, an investigation or an
-  operation, ends with its report.
-- **Who opens the pull request.** The worker, with the `gh` on this machine, so the pull request's author
-  is whoever `gh` is signed in as. Blocking `gh` for workers (`PI_SUPERAGENT_BLOCKED`) turns pull requests
-  off: workers then report without one.
-- **The agent's own account.** By default the router reads and replies as the account `gh` is signed in
-  as, so its comments look like yours apart from a hidden marker. To give it an account of its own, put a
-  token for that account in a file only you can read, set `PI_SUPERAGENT_GITHUB_TOKEN_FILE` to the file
-  and `PI_SUPERAGENT_GITHUB_SELF` to the account's login, give the account access to the watched
-  repository, and restart. The engine log's `router.start` line then says `githubAs="token file"`.
-  Workers still act as `gh`'s account, so their pull requests are yours, and the router reads those pull
-  requests as that account too.
-- **Pull requests no ticket opened.** A comment or a submitted review on one reaches the judge like any
-  other request, and the answer lands in the pull request's conversation.
-- **Questions from a worker.** A worker that needs you reports *blocked* with one question. The question
-  is posted on the issue (and listed on the panel under *Needs a person*); answer it with a comment.
-- **Stopping.** Close the issue. Within one poll the ticket stops and says so on the thread. A ticket
-  waiting on its own pull request ends with that pull request instead, as above. Reopen the issue to run the request again. Without GitHub, the panel
-  API stops a ticket too:
-  `curl -X POST -H 'x-superagent-request: 1' http://127.0.0.1:8788/api/tickets/<id>/stop`.
+### Who can start work
 
-## Watching
+By default the router accepts authors whose GitHub association is `OWNER`, `MEMBER` or
+`COLLABORATOR`. The panel counts requests from other authors as filtered. To choose the permitted
+accounts yourself, set `PI_SUPERAGENT_ALLOWED` to their logins. This list replaces the default rule.
+
+### Follow up and review changes
+
+Comment on the issue to steer an active worker. If it needs a decision, it posts a question on
+the thread and the panel lists it under *Needs a person*. Reply there to continue.
+
+For a code change, the worker opens a pull request and the router links it on the issue. The panel
+shows `review of #N` while the PR is open. Comments and reviews on that PR reach the same worker.
+Merging ends the ticket as merged. Closing the PR unmerged also ends the ticket, and you can
+comment on the issue to ask for another attempt. The router checks PRs in other repositories every
+two minutes. An answer, investigation or operation can finish with the worker’s ready report.
+
+A comment or submitted review on a PR without a ticket goes to the judge. The router replies in
+that PR’s conversation.
+
+### Choose the GitHub accounts
+
+Workers open PRs as the account signed in through the local `gh` CLI. Blocking `gh` with
+`PI_SUPERAGENT_BLOCKED` disables that workflow. By default the router uses the same account and
+adds a hidden marker to its comments so it can distinguish them from yours.
+
+To have the router reply under its own name, give that account access to the watched repository.
+Save its token in a file only you can read, set `PI_SUPERAGENT_GITHUB_TOKEN_FILE` to the path and
+`PI_SUPERAGENT_GITHUB_SELF` to the login, then restart. Look for `githubAs="token file"` in the
+`router.start` log entry. Workers still use the local CLI account, which the router also uses to
+read their PRs.
+
+### Stop a ticket
+
+Close the issue to stop its ticket on the next poll. When a ticket is waiting for its own PR,
+merge or close that PR to record the review outcome. Reopen the issue to request work again.
+You can also stop a ticket through the local panel API.
+
+```sh
+curl -X POST -H 'x-superagent-request: 1' "http://127.0.0.1:8788/api/tickets/<id>/stop"
+```
+
+## Watch a worker
 
 - **The herdr workspace `superagent`.** The `engine log` tab streams every poll, judgement, launch and
   receipt. Each worker has its own tab, labelled `#<issue> · <title>`; it is an ordinary pi session, so
   you can read along, type into it, or press Esc to interrupt it.
 - **The panel** at <http://127.0.0.1:8788/>. It shows what needs a person, what is running and queued,
   and what the judge decided.
-- **The log itself:** `tail -F ~/.pi/superagent/engine.log`. Each line is one event with its fields, so
+- **Engine log.** `tail -F ~/.pi/superagent/engine.log`. Each line is one event with its fields, so
   `grep eval.decided` lists every judgement with its reason.
 
-## Running it
+## Manage the router
 
 ```sh
 superagent status    # 0 healthy · 1 down · 2 a part is failing · 3 waiting for setup
@@ -104,34 +114,34 @@ long build, let it be; the flag clears when the worker reports.
 
 ## When something goes wrong
 
-**No acknowledgement after a few minutes.** Run `status` first. Then
-`grep eval.decided ~/.pi/superagent/engine.log | tail`: `kind=ignore` comes with the judge's reason, and a
-clearer comment or a reopened issue asks again. A `judge.prompt` line with no `eval.decided` after it
-means the judge is wedged; `restart` fixes it.
+**No acknowledgement after a few minutes.** Run `superagent status`, then inspect the most recent
+decisions with `grep eval.decided ~/.pi/superagent/engine.log | tail`. For `kind=ignore`, read the
+reason before posting a clearer request. If the log stays at `judge.prompt` without a decision,
+restart the router with `superagent restart`.
 
-**Someone else's issue gets no acknowledgement.** Check that they can write to the repository, or that
-their login is in `PI_SUPERAGENT_ALLOWED` when that is set. The panel's count of filtered triggers rises
+**Someone else's issue gets no acknowledgement.** Check their GitHub author association, or look for
+their login in `PI_SUPERAGENT_ALLOWED` if you configured a list. The panel's count of filtered triggers rises
 by one for each request it dropped this way.
 
-**A ticket stays open after its worker reported ready.** It is waiting for its pull request: the panel
-shows `review of #N`. Merge or close the pull request; the ticket ends within one poll, or within two
-minutes for a pull request in another repository.
+**A ticket stays open after a ready report.** Look for `review of #N` on the panel. Merge or close
+that PR to finish the ticket. The router checks the watched repository on each poll and other
+repositories every two minutes.
 
-**`status` exits 2.** Read `~/.pi/superagent/health.json`. A failing `source` means the router cannot
-reach GitHub; check `gh auth status`. The error clears on the next good poll.
+**Status exits 2.** Read `~/.pi/superagent/health.json` to identify the failing component. For a
+GitHub source error, check `gh auth status`. The next successful poll clears the error.
 
-**`status` exits 3.** Read `~/.pi/superagent/setup.json`: it names what is missing and where to fix it.
+**Status exits 3.** Read `~/.pi/superagent/setup.json` for the missing prerequisite and its location.
 
-**A worker looks stuck.** Open its tab and read it. Type into it to steer, or press Esc to interrupt.
+**A worker looks stuck.** Open its herdr tab to inspect the current command. Type a message to steer
+the worker or press Esc to interrupt it.
 
-**The issue says the worker stopped without reporting a result.** It ended a run without calling
-`ticket_report`, so whatever it concluded is still in its tab. The worker is still open: a reply on the
-issue steers it, and closing the issue drops the ticket.
+**A run ended without a report.** Inspect the worker’s tab for its last output. The session stays
+open. Reply on the issue to continue or close the issue to drop the ticket.
 
-**The issue says the worker crashed.** The router has already started a fresh worker on it, once, and the
-new worker's brief says what happened. If the issue says the fresh worker crashed too, nothing runs the
-ticket until `superagent restart`, and closing the issue drops it.
+**A worker crashed.** The router retries the first crash automatically and tells the replacement
+what happened. After a second crash, inspect the failure and run `superagent restart` to retry,
+or close the issue to stop.
 
-**The issue says a worker could not start.** The notice quotes the error, usually from the setup script
-(`PI_SUPERAGENT_PREPARE`). The router retries on every poll, without posting again, until the cause is
-fixed or the issue is closed.
+**A worker could not start.** Read the error on the issue. Check repository access if the clone
+failed, or inspect `PI_SUPERAGENT_PREPARE` if you use a custom setup command. The router retries
+on each poll and posts the launch failure once.

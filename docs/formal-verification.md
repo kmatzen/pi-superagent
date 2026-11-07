@@ -1,7 +1,8 @@
 # Formal verification
 
-Three parts of pi-superagent, the places where a bad ordering would quietly lose or duplicate work, are
-specified in TLA+ and checked exhaustively by TLC, the TLA+ model checker:
+TLC, the TLA+ model checker, explores every reachable state within the bounds of three models.
+Together they cover the order in which the engine handles tickets, the source reads GitHub events
+and the router cleans up worker tabs.
 
 | Specification | Models | States explored (distinct) | Claims |
 | --- | --- | --- | --- |
@@ -9,12 +10,10 @@ specified in TLA+ and checked exhaustively by TLC, the TLA+ model checker:
 | [`Intake.tla`](../formal/Intake.tla) | the GitHub source (`source-github.ts`) | 565,551 (113,281) | 6 |
 | [`Workers.tla`](../formal/Workers.tla) | worker records, tabs and agents (`herdr-workers.ts`) | 347 (94) | 5 |
 
-Every claim holds in every reachable state. The specifications have already paid for themselves: the
-intake model found a bug in shipped code, a read position saved before the engine held its triggers, so
-that a crash at the wrong moment lost a request for good. TLC printed the exact interleaving, and the fix
-shipped with that interleaving as a regression test. Along the way TLC also caught two mistakes in the
-models themselves (a dropped evaluation batch, and a stopped ticket brought back to life), which is
-exactly what a checker is for.
+All listed properties hold under the configurations checked. The intake model exposed a bug in
+shipped code. The router could save a cursor, crash before delivering its comment, then restart
+past the missing request. TLC’s sequence of events became a regression test. The checker also
+caught two modeling errors involving a dropped evaluation batch and a transition that revived a stopped ticket.
 
 ## Running the checks
 
@@ -23,17 +22,16 @@ scripts/check-formal    # all three specifications, about five minutes
 ```
 
 The script needs a JDK (`brew install openjdk`, or point `JAVA` at one) and downloads `tla2tools.jar` to
-`~/.cache/tla2tools/` on first use. It exits 0 only when every specification is checked to completion. A
-missing JDK, a parse error, a violated claim or a truncated run each exits 1 with a short reason: a check
-that stays silent is treated as a failed one.
+`~/.cache/tla2tools/` on first use. It exits 0 only when every specification is checked to completion.
+It exits 1 and prints the reason if Java is missing, a specification fails to parse, TLC finds a
+violation or a run ends early.
 
 ## What each specification proves
 
 ### `Ticket.tla`: the ticket lifecycle
 
 - **I1 StopAbsorbing.** A ticket a person stopped is never live again.
-- **I2 DoneFromReady.** A completed ticket always has a *ready* report, so completing without one is
-  unreachable, not merely untested.
+- **I2 DoneFromReady.** Every completed ticket has a recorded *ready* report.
 - **I3 OneRunning.** A ticket has at most one running assignment.
 - **I4 NoSecondTicket.** No ticket is created for a thread that a live ticket already follows, in any
   interleaving, including a follow-up that arrives in the middle of an evaluation.
@@ -65,42 +63,33 @@ that stays silent is treated as a failed one.
 - **W5 ZombieTabsGone.** After any finite number of launches, every dead agent's tab is eventually closed:
   the workspace cannot fill up with abandoned tabs.
 
-## Why the results mean something
+## Interpreting the results
 
-**Each action mirrors real code.** Every action in a specification names the function whose guards it
-copies. When that function changes, the action must change with it, and the check must run again.
+Each action names the function whose guards it mirrors. A change to that function may change which
+states the implementation can reach. Update the model and rerun the check when a transition changes.
+For example, I1 depends on every path that might resume a ticket checking `ended.by === 'human'`.
 
-**Each header says what the model leaves out.** Leaving behavior out narrows what a claim covers. A claim
-holds for the behaviors the model includes, and for a left-out feature only as far as that feature's code
-passes through the same guards. For example, every path that could resume a ticket checks the same
-`ended.by === 'human'` guard that I1 relies on. The headers list what is missing so that a reader can
-check this for themselves.
+The ticket model has two threads, two ticket slots and four messages. The intake model has two
+issues, two comments and one crash. The worker model has two workers and three launches. These
+bounds let TLC explore every ordering in minutes. Each model header records its exclusions.
 
-**The bounds are small on purpose.** Two threads, two ticket slots and four messages; two issues, two
-comments and one crash; two workers and three launches. Small bounds let TLC visit every state in
-minutes, and ordering bugs almost always show up at small sizes. They are still bounds, not a proof for
-every size, and each header states its own.
+The eventual-delivery and cleanup properties (LT_Delivered, C6 and W5) also depend on fairness.
+An action that stays enabled must eventually run. The bounds on crashes and launches give the
+system a chance to finish delivery or cleanup.
 
-**Liveness rests on stated fairness.** The "eventually" claims (LT_Delivered, C6, W5) assume that an
-action which stays enabled eventually happens. Each specification writes its fairness assumptions down,
-next to the claims, so they can be argued with. Crashes and launches are bounded, so "eventually" always
-has an end.
+## Maintaining the models
 
-**Lessons from TLC, so you can skip them.** A property with primed variables (`[][...]_vars`) goes under
-`PROPERTY`, never `INVARIANT`. `UNCHANGED` takes a tuple `<<...>>`, not a set. An action that assigns
-`x'` must not also list `x` in its `UNCHANGED`: the contradiction silently disables the action, and only
-`-coverage 1` will show it. A specification whose runs can finish needs an explicit stuttering step
-(`Terminate == UNCHANGED vars`), or TLC reports every finished run as a deadlock; stuck work is then
-caught by the liveness claims. And naming a state `open` broke the parse, which is why the intake model
-says `opened`.
+- Put temporal formulas such as `[][A]_vars` under `PROPERTY`. Use `INVARIANT` for state predicates.
+- Pass a tuple such as `<<x, y>>` to `UNCHANGED`. If an action assigns `x'`, omit `x` from that
+  tuple unless the assignment really must preserve its value. Use `-coverage 1` to spot disabled actions.
+- Give a model with a valid terminal state an explicit stuttering step (`Terminate == UNCHANGED vars`).
+  This lets TLC distinguish normal termination from a deadlock. Liveness checks still detect stuck work.
+- The intake model uses the state name `opened` because `open` caused a parse error.
 
-## What the proofs do not say
+## Scope
 
-A model proves things about the model. These cover the control flow described above, not the judge's
-decisions, GitHub's behavior (status codes, rate limits, pagination), SQLite, herdr, or the network.
-Newer behavior is tested but not modeled: reviews, the stop on a closed conversation, the outbox's check
-before a retry, and how each way a worker's run ends reaches the thread.
-
-What the specifications do guarantee: no implementation that follows these transitions can reach a
-forbidden state, and the liveness claims hold under the stated fairness. When the code a specification
-mirrors changes, upstream's ticket transitions included, the specification must change with it.
+The models describe control flow. The judge’s decisions, GitHub API behavior, SQLite, herdr and network
+failures have their own behavior outside these bounds. Integration tests cover review routing,
+closing a conversation, checking for a previous post before retrying, and notifying the thread
+when a worker’s run ends. Consult the test suite for those cases and the model headers for the
+assumptions behind each property.
