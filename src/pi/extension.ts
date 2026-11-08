@@ -9,7 +9,7 @@ const runGit = promisify(execFile)
 import { join } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
-import { GithubSource, REPLY_MARKER, type GithubApi } from './source-github.ts'
+import {GithubSource, REPLY_MARKER, type GithubApi, REQUEST_LABEL} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi } from './pulls.ts'
 import { CommentOutbox } from './outbox.ts'
@@ -137,7 +137,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     followed: () => followedPulls(repos.tickets.open(), cfg.githubRepo ?? ''),
   }) : undefined)
   const github = githubApi
-    ? new GithubSource(githubApi, { repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots }, repos.kv)
+    ? new GithubSource(githubApi, { repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, requestLabel: REQUEST_LABEL }, repos.kv)
     : undefined
   github?.bootstrap()
   let paused = false

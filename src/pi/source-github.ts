@@ -55,7 +55,11 @@ export interface GithubSourceOptions {
   bots?: ReadonlySet<string>
   people?: ReadonlySet<string>
   selfMarker?: string
+  /** Label that turns an already-seen issue into a request; `superagent intake` puts it there. */
+  requestLabel?: string
 }
+
+export const REQUEST_LABEL = 'agent-requested'
 
 const sinceKey = (repo: string) => `source:github:${repo}:since`
 /** Group rows by a key, keeping the order in which the keys first appear. */
@@ -141,25 +145,36 @@ export class GithubSource {
         seen.add(key)
         if (issue.author === this.options.self || !this.isHuman(issue.author)
           || (issue.body ?? '').includes(this.options.selfMarker ?? REPLY_MARKER)) continue
-        out.push({
-          // updatedAt joins the hash so a reopen (a new open interval) is a new trigger id:
-          // the engine dedups ids forever, and title-only ids made reopening a dead signal.
-          id: `github:#${issue.issue}:issue:${createHash('sha1').update(`${issue.title}\u0000${issue.updatedAt}`).digest('hex').slice(0, 8)}`,
-          source: 'github',
-          threads: [{ source: 'github', id: key }],
-          actor: { source: 'github', id: issue.author },
-          human: true,
-          at: issue.createdAt,
-          text: `${issue.title}${issue.body ? `\n\n${issue.body.slice(0, 4000)}` : ''}`,
-          channel: { source: 'github', thread: key, address: { issue: String(issue.issue) } },
-          meta: { labels: issue.labels, via: 'issue', association: issue.association, author: issue.author },
-        })
+        out.push(this.requestTrigger(issue, 'issue', key))
+      } else if (this.options.requestLabel && issue.labels.includes(this.options.requestLabel)) {
+        // The label is the request for an issue the seed already recorded. Measured 2026-11-08: 64 real
+        // requests (issues 205-268) opened hours before the router's first look, so the seed wrote them down as
+        // history and no worker ever took them. `superagent intake` labels them using the operator's
+        // credentials, so the label carries the authorization and the author guard must not: every one of those
+        // issues is authored by the engine's own account, and labelling needs write access to the repository.
+        out.push(this.requestTrigger(issue, 'label', key))
       }
     }
     // The cap is a decision, not an accident: past 4000 open issues the oldest key is forgotten, and an issue
     // still open that far back fires once more as a request. The watched repository has tens, not thousands.
     this.staged.push([issuesKey(this.options.repo), [...seen].slice(-4000)])
     return out
+  }
+
+  /** A request that comes from an issue itself. The id carries `via` and the issue's update time, so a reopen,
+   *  an edit, or a relabel is a new request: the engine dedups trigger ids forever. */
+  private requestTrigger(issue: IssueState, via: 'issue' | 'label', key: string): Trigger {
+    return {
+      id: `github:#${issue.issue}:${via}:${createHash('sha1').update(`${issue.title}\u0000${issue.updatedAt}`).digest('hex').slice(0, 8)}`,
+      source: 'github',
+      threads: [{ source: 'github', id: key }],
+      actor: { source: 'github', id: issue.author },
+      human: true,
+      at: issue.createdAt,
+      text: `${issue.title}${issue.body ? `\n\n${issue.body.slice(0, 4000)}` : ''}`,
+      channel: { source: 'github', thread: key, address: { issue: String(issue.issue) } },
+      meta: { labels: issue.labels, via, association: issue.association, author: issue.author },
+    }
   }
 
   /** The thread key of a pull request: bare `#n` in the watched repository, `owner/repo#n` anywhere else. */
