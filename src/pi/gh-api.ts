@@ -136,8 +136,15 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     },
 
     async postComment(issue, body, repo) {
-      await call(['api', '-X', 'POST', `repos/${repo ?? options.repo}/issues/${issue}/comments`, '--input', '-'],
-                 JSON.stringify({ body: `${body}\n\n${REPLY_MARKER}` }))
+      const args = ['api', '-X', 'POST', `repos/${repo ?? options.repo}/issues/${issue}/comments`, '--input', '-']
+      const payload = JSON.stringify({ body: `${body}\n\n${REPLY_MARKER}` })
+      try {
+        await call(args, payload)
+      } catch (error) {
+        // Measured 2026-11-08: an organization issue answers the watched account 404, so "Picked up" notes on two caramel issues never reached anyone.
+        if (reviewCall === call || !/Not Found|HTTP 404|HTTP 403/i.test(String(error))) throw error
+        await reviewCall(args, payload)
+      }
     },
 
     async pullsOpen() {
