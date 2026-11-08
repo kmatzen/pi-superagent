@@ -217,7 +217,13 @@ function withRateLimitFallback(call: (args: string[], stdin?: string) => Promise
       return await call(args, stdin)
     } catch (error) {
       if (!rateLimited(error)) throw error
-      return second(args, stdin)
+      try {
+        return await second(args, stdin)
+      } catch (secondError) {
+        // Measured 2026-11-08: the backup account is not in the organization and answers its pulls 404, and the caller read that as "this pull request is gone" and ended a ticket seven hours before the real merge.
+        if (/Not Found|HTTP 404/i.test(String(secondError))) throw new Error(`rate_limit_account_cannot_read: ${args[1]}`)
+        throw secondError
+      }
     }
   }
 }
