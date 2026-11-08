@@ -319,6 +319,30 @@ esac
     expect(await api.pull('x/y', 11), 'a rate-limited login must not freeze the merge a ticket waits on')
       .toEqual({ open: true, merged: false, createdAt: '2026-11-08T00:00:00Z' })
   })
+
+  it("refuses to read the backup account's 404 as a pull request that does not exist", async () => {
+    const dir = tmp()
+    const first = join(dir, 'pulls-token')
+    const second = join(dir, 'second-token')
+    writeFileSync(first, 'pulls-secret\n')
+    writeFileSync(second, 'second-secret\n')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+case "$1 $2" in
+  "api repos/x/y/pulls/"*)
+    case "$GH_TOKEN" in
+      pulls-secret) echo "gh: API rate limit exceeded for user ID 42 (HTTP 403)" >&2 ;;
+      *) echo "gh: Not Found (HTTP 404)" >&2 ;;
+    esac
+    exit 1 ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const api = ghPulls({ bin, tokenFile: first, rateLimitTokenFile: second })
+    await expect(api.pull('x/y', 11), 'an absent pull is a fact; the backup account cannot seeing it is not')
+      .rejects.toThrow(/rate_limit_account_cannot_read/)
+  })
 })
 
 describe("the agent's own account", () => {
