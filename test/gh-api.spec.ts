@@ -81,6 +81,26 @@ esac
     expect(readFileSync(join(dir, 'posts.log'), 'utf8')).toContain('picked up')
   })
 
+  it('reads a thread with the account that can see the repository when the watched one is turned away', async () => {
+    const dir = tmp()
+    const watched = join(dir, 'watched-token')
+    const opener = join(dir, 'opener-token')
+    writeFileSync(watched, 'watched-secret\n')
+    writeFileSync(opener, 'opener-secret\n')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+case "$1 $2" in
+  "api repos/org/x/issues/9/comments"*)
+    [ "$GH_TOKEN" = "watched-secret" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    echo '[{"user":{"login":"reviewer"},"author_association":"MEMBER","created_at":"2026-11-08T05:00:00Z","body":"merge it"}]' ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const api = ghApi({ bin, repo: 'o/r', tokenFile: watched, reviewsAccount: { bin, tokenFile: opener }, followed: () => [] })
+    expect(await api.commentsFor!(9, 'org/x')).toEqual([{ issue: 9, author: 'reviewer', association: 'MEMBER', at: '2026-11-08T05:00:00Z', body: 'merge it' }])
+  })
+
   it('reads reviews as the signed-in account when the pulls account has no token file', async () => {
     // The shape production actually has: the pulls account is `gh`'s own sign-in, so it carries no token.
     const dir = tmp()
