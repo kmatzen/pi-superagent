@@ -45,7 +45,7 @@ function fakePi(): FakePi {
   }
 }
 
-interface Spy { prompts: string[]; report: ((args: Record<string, unknown>) => unknown) | undefined }
+interface Spy { prompts: string[]; report: ((args: Record<string, unknown>) => unknown) | undefined; disposed: boolean }
 
 const settle = () => new Promise<void>(resolve => setTimeout(resolve, 15))
 const until = async (ok: () => boolean, ms = 5000) => {
@@ -99,7 +99,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     ...(options.workerTokenFile ? { workerTokenFile: options.workerTokenFile } : {}),
   }
   const workers: Spy[] = []
-  const judge: Spy = { prompts: [], report: undefined }
+  const judge: Spy = { prompts: [], report: undefined, disposed: false }
   const judgeSessions: string[] = []
   const loaders: Array<Record<string, unknown>> = []
   const judgeListeners: Array<(event: { type: string }) => void> = []
@@ -114,9 +114,9 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
         judge.report = args => tool.execute('judge-1', args as never)
         return { session: { sessionId: 'judge', prompt: async (t: string) => { judge.prompts.push(t) }, subscribe: (l: (event: { type: string }) => void) => { judgeListeners.push(l); return () => {} }, abort: () => {}, dispose: () => {} } }
       }
-      const spy: Spy = { prompts: [], report: args => tool.execute('call-1', args as never) }
+      const spy: Spy = { prompts: [], report: args => tool.execute('call-1', args as never), disposed: false }
       workers.push(spy)
-      return { session: { sessionId: `w${workers.length}`, prompt: async (t: string) => { spy.prompts.push(t) }, subscribe: () => () => {}, abort: () => {}, dispose: () => {} } }
+      return { session: { sessionId: `w${workers.length}`, prompt: async (t: string) => { spy.prompts.push(t) }, subscribe: () => () => {}, abort: () => {}, dispose: () => { spy.disposed = true } } }
     },
     SessionManager: { inMemory: () => ({}) },
     DefaultResourceLoader: class { constructor(options: Record<string, unknown>) { loaders.push(options) } async reload() {} },
@@ -164,7 +164,10 @@ describe('the router extension', () => {
     expect(posted[0]!.issue).toBe(150)
   })
 
-  it("a worker's question is asked on the issue, and the answer goes back to the worker", async () => {
+  it("a worker's question frees its agent, and the answer starts a fresh worker", async () => {
+    // The operator's rule 2026-11-08: a worker that asks gives up its agent, its tab and its slot, because nobody
+    // knows how long the answer takes and 13 tickets were queueing behind 5 stopped workers. formal/Ticket.tla
+    // R1/R2/R3 are the claims this test pins in code: slot freed, answer gets a worker, only askers are freed.
     const f = fixture()
     f.addComment('482', 'octocat', 'pick the deploy window')
     await f.running.tick()
@@ -174,11 +177,18 @@ describe('the router extension', () => {
     f.workers[0]!.report!({ state: 'blocked', summary: 'two windows work', question: 'Tonight or tomorrow?' })
     await f.running.tick()
     expect(f.receipts('482')).toContain('**Question:** Tonight or tomorrow?')
+    expect(f.workers[0]!.disposed, 'the question posted, so the agent is freed').toBe(true)
+    expect(f.running.load().running, 'and the slot is free for the next ticket').toBe(0)
+    expect(f.running.load().parked, 'it is not counted as parked work either').toBe(0)
     f.addComment('482', 'octocat', 'tonight', '2026-11-05T09:30:00Z')
     await f.running.tick()
-    await until(() => f.workers[0]!.prompts.some(p => p.includes('octocat: tonight')))
-    expect(f.workers[0]!.prompts.join('\n')).toContain('octocat: tonight')
-    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8'), 'the trail says the worker was told').toMatch(/input\.delivered .*thread=#482/)
+    await settle()
+    expect(f.workers.length, 'the answer is a request for a fresh worker').toBe(2)
+    await until(() => f.workers[1]!.prompts.some(p => p.includes('octocat: tonight')))
+    expect(f.workers[1]!.prompts.join(' | '), 'and the fresh worker carries the answer').toContain('octocat: tonight')
+    const trail = readFileSync(join(f.dir, 'engine.log'), 'utf8')
+    expect(trail, 'the trail names the release').toMatch(/worker\.released/)
+    expect(trail, 'the trail says the worker was told').toMatch(/input\.delivered/)
   })
 
   it('a launch that fails on every poll says so on the issue once', async () => {
@@ -812,7 +822,12 @@ describe('a pull request per ticket', () => {
     await f.running.tick()
     expect(ticket().ended, 'still open: its work has not finished').toBeUndefined()
     expect(f.receipts('492')).not.toContain('Stopped: this conversation closed')
-    f.workers[0]!.report!({ state: 'ready', summary: 'kept the alias' })
+    // The blocked report freed its worker, so the operator's answer starts the worker that finishes the job.
+    f.addComment('492', 'octocat', 'keep the alias', '2026-11-05T09:30:00Z')
+    await f.running.tick()
+    await settle()
+    expect(f.workers.length, 'the answer started a fresh worker').toBe(2)
+    f.workers[1]!.report!({ state: 'ready', summary: 'kept the alias' })
     await f.running.tick()
     expect(ticket().ended).toMatchObject({ outcome: 'merged', by: 'executor' })
     expect(f.receipts('492')).toContain('#492 merged: https://github.com/o/r/pull/79. This ticket is done.')

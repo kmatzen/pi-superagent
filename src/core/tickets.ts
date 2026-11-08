@@ -244,6 +244,21 @@ export class Tickets extends EnginePart {
     else if (latest?.state === 'pending' && !waitsForPerson(ticket)) this.options.executor.start(ticket, latest)
   }
   /**
+   * Free the worker of a live ticket that asked a person and waits: its Assignment ends as `released`, the
+   * ticket stays open, and the answer that arrives starts a fresh worker (`wake` accepts a released ticket).
+   * The operator's rule 2026-11-08 — 5 stopped workers held tabs, agents and slots for hours while 13 tickets
+   * queueed — and formal/Ticket.tla is why the release ships with the door: R1 proves the slot is freed, R2
+   * proves an answer that waits eventually gets a worker, R3 proves only a worker that asked is ever freed.
+   */
+  release(ticketId: string, assignmentId: string): void {
+    const ticket = this.require(ticketId)
+    const running = runningAssignment(ticket)
+    if (!running || running.id !== assignmentId) return
+    this.endAssignment(ticket, running, 'released')
+    this.repo.tickets.save(ticket)
+  }
+
+  /**
    * Resume an ended ticket under its unchanged Mandate when a person's message on one of its Threads waits for it: no Eval
    * and no Decision, since nothing new is authorized. One whose Mandate the current Policy no longer holds stays ended and
    * takes nothing (see `refuse`). While processing is paused the message waits, and the first pass after the pause resumes
@@ -251,7 +266,11 @@ export class Tickets extends EnginePart {
    */
   wake(ticketId: string): void {
     const ticket = this.repo.tickets.get(ticketId)
-    if (!ticket || liveTicket(ticket) || ticket.ended?.by === 'human' || !ticket.undelivered.length) return
+    if (!ticket || ticket.ended?.by === 'human' || !ticket.undelivered.length) return
+    // A live ticket whose worker was freed (`release`) is wakeable like an ended one: the person's answer is the
+    // request that starts the next worker, and nothing else is listening for it.
+    const last = latestAssignment(ticket)
+    if (liveTicket(ticket) && !(last?.state === 'ended' && last.endedReason === 'released')) return
     const policy = this.policy()
     if (policy.paused) return
     if (!policy.revalidate(ticket.mandate)) { this.refuse(ticket); return }

@@ -201,6 +201,20 @@ export class PiExecutor {
     live.pendingRead.push(...visible.map(i => i.id))
   }
 
+  /**
+   * Free the worker's slot and its tab, leaving the ticket and its checkout alone, and post nothing.
+   * The operator's rule 2026-11-08: a worker that has spoken and waits for an answer holds a herdr tab and a
+   * busy slot for hours while a person reads, and tickets queue behind it. `stop` is not this: it cancels the
+   * turn with Escape and pi hands queued messages back to a human input box nobody watches.
+   */
+  release(ticket: Ticket): void {
+    const live = this.live.get(ticket.id)
+    if (!live) return
+    live.unsubscribe()
+    this.live.delete(ticket.id)
+    live.session.dispose()
+  }
+
   /** The router is going away, not the workers: stop listening without stopping them, so a reloaded router in
    *  this process takes them over and the old one stops acting on their reports. */
   detach(): void {

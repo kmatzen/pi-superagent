@@ -242,6 +242,18 @@ export class Engine {
    * `waiting`, `ready`, `blocked`, or `failed` and no Input reached its worker after that report, in which case it keeps its
    * Session and state and gets the Inputs that wait for it.
    */
+  /**
+   * Free a worker that asked a person and waits (TicketsDomain.release): the ticket stays open, its Assignment
+   * ends as `released`, and the answer that arrives starts the next worker (`wake`).
+   */
+  release(ticketId: string, assignmentId: string): void {
+    this.repo.atomic(() => { this.tickets.release(ticketId, assignmentId) })
+  }
+  /** Resume a ticket whose worker was freed, on the message that answers it (TicketsDomain.wake). */
+  wake(ticketId: string): void {
+    this.repo.atomic(() => { this.tickets.wake(ticketId) })
+  }
+
   assignmentInterrupted(ticketId: string, assignmentId: string): void {
     this.repo.atomic(() => { this.assignments.interrupted(ticketId, assignmentId) })
   }
