@@ -2,11 +2,15 @@
 import { randomUUID } from 'node:crypto'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Ticket } from '../core/index.ts'
 import type { WorkerEvent, WorkerSession } from './executor.ts'
 import { HerdrError, type AgentInfo, type Herdr } from './herdr.ts'
 import type { EngineLog } from './log.ts'
 import type { Reporter } from './report-tool.ts'
+
+// The pane runs this package's own entry, which activates the worker role from PI_SUPERAGENT_ROLE.
+export const roleModule = fileURLToPath(new URL('./worker-extension.ts', import.meta.url))
 
 export interface WorkerRecord {
   ticketId: string
@@ -97,7 +101,7 @@ export class HerdrWorkers {
           // --no-extensions: the harness in ~/.pi/agent is the operator's, and a worker session that loads
           // it runs the operator's watchers with the operator's credentials.
           name, kind: 'pi', pane, timeoutMs: this.options.startTimeoutMs ?? 120_000,
-          args: ['--session-id', sessionId, '--no-extensions'],
+          args: ['--session-id', sessionId, '--no-extensions', '--extension', roleModule],
         })
       } catch (error) {
         if (!(error instanceof HerdrError && error.code === 'agent_pane_busy') || attempt >= 30) throw error
