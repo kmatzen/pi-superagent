@@ -126,10 +126,32 @@ describe('PiExecutor', () => {
     const f = fixture()
     const session = new FakeSession('kept')
     f.executor.adopt(ticket(), assignment(), report => { session.report = report as never; return session })
-    expect(f.executor.running).toBe(1)
     expect(session.prompts).toEqual([])
     session.report('ready', 'done after the restart')
     expect(f.calls_of('report')).toHaveLength(1)
+  })
+
+  it('an adopted worker sits idle until it speaks, so an idle pane costs no worker slot', () => {
+    const f = fixture({ maxConcurrent: 1 })
+    const session = new FakeSession('kept')
+    f.executor.adopt(ticket(), assignment(), report => { session.report = report as never; return session })
+    expect(f.executor.running, 'the pane waits at its prompt: the router restarted mid-nothing').toBe(0)
+    expect(f.executor.quiet(0), 'and a silent idle pane is not a worker the operator must be asked about').toEqual([])
+    session.emit({ type: 'activity' })
+    expect(f.executor.running, 'a pane that speaks has a run in flight, turnStarted or not').toBe(1)
+    session.emit({ type: 'settled' })
+    expect(f.executor.running).toBe(0)
+  })
+
+  it('input to an idle worker enters at once, and input to a running worker waits its turn', () => {
+    const f = fixture()
+    const session = new FakeSession('kept')
+    f.executor.adopt(ticket(), assignment(), report => { session.report = report as never; return session })
+    f.executor.deliver(ticket({ inputs: [input('i1', 'text')], undelivered: ['i1'] }), assignment())
+    expect(session.prompts, 'an idle session queues a mode-tagged message and never starts it').toEqual([{ text: 'input i1', mode: 'steer' }])
+    session.emit({ type: 'activity' })
+    f.executor.deliver(ticket({ inputs: [input('i2', 'text')], undelivered: ['i2'] }), assignment())
+    expect(session.prompts.at(-1), 'a running worker must not be interrupted mid-step').toEqual({ text: 'input i2', mode: 'followUp' })
   })
 
   it('a busy worker is not quiet, and a quiet stretch is reported once', async () => {
