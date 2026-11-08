@@ -101,6 +101,16 @@ type CommentRow = { user?: { login: string }; author_association?: string; creat
 export function ghApi(options: GithubApiOptions): GithubApi {
   const call = ghCall(options)
   const reviewCall = options.reviewsAccount ? ghCall(options.reviewsAccount) : call
+  const turnedAway = (error: unknown): boolean => /Not Found|HTTP 404|HTTP 403/i.test(String(error))
+  // Measured 2026-11-08: an organization thread answers the watched account 404, so replies there were unread.
+  const readCall = async (args: string[]): Promise<string> => {
+    try {
+      return await call(args)
+    } catch (error) {
+      if (reviewCall === call || !turnedAway(error)) throw error
+      return reviewCall(args)
+    }
+  }
   const deadPulls = new Set<string>()
   const openPulls = async (): Promise<Array<{ number: number }>> => {
     const open: Array<{ number: number }> = []
@@ -142,7 +152,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
         await call(args, payload)
       } catch (error) {
         // Measured 2026-11-08: an organization issue answers the watched account 404, so "Picked up" notes on two caramel issues never reached anyone.
-        if (reviewCall === call || !/Not Found|HTTP 404|HTTP 403/i.test(String(error))) throw error
+        if (reviewCall === call || !turnedAway(error)) throw error
         await reviewCall(args, payload)
       }
     },
@@ -184,7 +194,8 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     },
 
     async commentsFor(issue, repo) {
-      const rows = JSON.parse((await call(['api', `repos/${repo ?? options.repo}/issues/${issue}/comments?per_page=100&sort=created&direction=desc`])) || '[]') as CommentRow[]
+      const args = ['api', `repos/${repo ?? options.repo}/issues/${issue}/comments?per_page=100&sort=created&direction=desc`]
+      const rows = JSON.parse((await readCall(args)) || '[]') as CommentRow[]
       return rows.map(r => ({ issue, author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
     },
   }
