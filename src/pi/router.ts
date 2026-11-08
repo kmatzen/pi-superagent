@@ -110,7 +110,8 @@ export const pullBrief = (closes?: string, canPush = true): string => canPush ? 
 
 export function policyOf(config: RouterConfig): Policy {
   return {
-    version: 'v1',
+    // v2 marks the judge brief that treats a bare artifact link as the request it implies.
+    version: 'v2',
     paused: false,
     // Longer than the router needs to answer one eval under load: a deadline it cannot meet turns every
     // pending judgement into a requeue, and the requeues are what pin the session at full CPU.

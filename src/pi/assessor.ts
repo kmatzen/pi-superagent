@@ -31,7 +31,12 @@ export const renderCandidateFor = (repo?: string) => (c: Candidate): string => {
   return `${base.replace(`Thread ${c.thread.key}`, `Thread ${c.thread.key} (${url})`)}
 `
     + 'This is GitHub: a person writing to the agent. accept is the answer for a concrete action '
-    + 'the person asks the agent to take, including a request that calls itself a test. ignore is the answer for '
+    + 'the person asks the agent to take, including a request that calls itself a test. '
+    + 'An artifact on its own — an alert, a sentry or monitoring link, a log, a screenshot, an issue or pull '
+    + 'request number — IS the request: the person wants it diagnosed and resolved, so answer accept with that '
+    + 'as the scope, name the rules you inferred (rules: ["artifact-implies-request"]) so the policy admits an '
+    + 'inferred accept, and title the ticket after the thing to fix. '
+    + 'ignore is the answer for '
     + 'chatter, for messages addressed to a person, and for a request whose ticket is already open.'
 }
 
