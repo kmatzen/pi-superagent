@@ -201,3 +201,23 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(run(['--deply', 'status']).status).toBe(2)
   })
 })
+
+  it('intake labels the issues it is asked for, in ranges and lists, and refuses a bad spec', () => {
+    const bin = join(state, 'bin'); mkdirSync(bin, { recursive: true })
+    const calls = join(state, 'curl.calls')
+    writeFileSync(join(state, 'token'), 'secret-token\n')
+    writeFileSync(join(bin, 'curl'), '#!/bin/bash\nprintf "%s\\n" "$*" >> "$CURL_LOG"\n[ "$1" = "-s" ] && echo 200\nexit 0\n')
+    chmodSync(join(bin, 'curl'), 0o755)
+    const env = {
+      PATH: `${bin}:${process.env.PATH ?? ''}`, CURL_LOG: calls,
+      PI_SUPERAGENT_GITHUB_REPO: 'o/r', PI_SUPERAGENT_GITHUB_TOKEN_FILE: join(state, 'token'),
+    }
+    const ok = spawnSync(SCRIPT, ['intake', '3-5,7'], { encoding: 'utf8', env: { ...process.env, PI_SUPERAGENT_STATE: state, ...env } })
+    expect(ok.stdout, ok.stderr).toContain('labelled 4 issue(s) as requests, 0 failed')
+    const body = readFileSync(calls, 'utf8')
+    expect(body.match(/issues\/[3-57]\/labels/g)?.sort(), 'every number, ranges expanded')
+      .toEqual(['issues/3/labels', 'issues/4/labels', 'issues/5/labels', 'issues/7/labels'])
+    expect(body).toContain('agent-requested')
+    const bad = spawnSync(SCRIPT, ['intake', 'banana'], { encoding: 'utf8', env: { ...process.env, PI_SUPERAGENT_STATE: state, ...env } })
+    expect(bad.status, 'a typo is not a request for 0 issues').toBe(2)
+  })
