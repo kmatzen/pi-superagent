@@ -54,6 +54,36 @@ describe('GithubSource', () => {
       .toEqual(['DO: ship the panel'])
   })
 
+  it('a label on an issue the seed recorded as history is the request the operator meant', async () => {
+    // Measured 2026-11-08: issues 205-268 opened before the router's first look, so the seed wrote them down as
+    // history and no worker took them for three days. `superagent intake` labels them; the label fires once.
+    const seed = fixture([], [issue({ issue: 205, title: 'DO: rotate the deploy keys' })])
+    seed.source.bootstrap()
+    expect(await seed.source.poll(), 'the first look stays history').toHaveLength(0)
+
+    // Every imported issue in that backlog is authored by the engine's own account, which the author guard
+    // rejects: the label is what makes it a request.
+    const f = fixture([], [issue({ issue: 205, title: 'DO: rotate the deploy keys', author: 'superagent[bot]',
+                                   labels: ['agent-requested'] })])
+    f.store.set('source:github:o/r:issues', ['#205'])
+    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested' }, f.store)
+    const fired = await f.source.poll()
+    expect(fired.map(t => t.text), 'the labelled issue enters the queue')
+      .toEqual(['DO: rotate the deploy keys'])
+    expect(fired[0]!.meta).toMatchObject({ via: 'label', author: 'superagent[bot]' })
+
+    const again = await f.source.poll()
+    expect(again.map(t => t.id), 'the label fires one request, not one per poll — the engine dedups the id')
+      .toEqual(fired.map(t => t.id))
+  })
+
+  it('an issue the seed recorded stays silent without the label', async () => {
+    const f = fixture([], [issue({ issue: 206, title: 'DO: rotate the deploy keys', labels: ['agent-ready'] })])
+    f.store.set('source:github:o/r:issues', ['#206'])
+    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested' }, f.store)
+    expect(await f.source.poll(), 'a label the engine does not grant is not a request').toHaveLength(0)
+  })
+
   it('a crash before the next poll rewinds the cursor: the request replays, same id — never lost', async () => {
     // Intake.tla C3/C6 in code: poll 1 emits and STAGES the cursor; the process dies
     // before poll 2 commits it. The fresh source must re-emit the very same trigger
