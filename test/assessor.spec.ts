@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Engine, MemoryRepositories, type Candidate, type OutboundMessage, type Policy } from '../src/core/index.ts'
-import { SessionAssessor, renderCandidate, type SessionPilot } from '../src/pi/assessor.ts'
+import { SessionAssessor, renderCandidate, renderCandidateFor, type SessionPilot } from '../src/pi/assessor.ts'
 import type { Trigger } from '../src/core/index.ts'
 
 function fixture(evalTimeoutMs = 60_000) {
@@ -122,5 +122,22 @@ describe('SessionAssessor', () => {
     expect(text).toContain('ci-bot (not human)')
     expect(text).toContain('github:#2')
     expect(text).toContain('Fix the build (open)')
+  })
+
+  it('a bare artifact reaches the judge as the request itself, not as chatter', () => {
+    const candidate = {
+      evalId: 'e1', key: 'github:#191', id: '#191', strength: 'explicit', policyVersion: 'v1',
+      thread: { key: 'github:#191' } as never,
+      triggers: [{
+        id: 't1', actor: { source: 'github', id: 'kblackburn' }, human: true, at: '2026-11-07T01:09:00Z',
+        text: 'https://example.sentry.io/issues/7829822666/?project=4511909839699968',
+      } as never],
+      tickets: [],
+    } as unknown as Candidate
+    const text = renderCandidateFor('o/r')(candidate)
+    expect(text, 'an alert link is the ask; the judge must not file it as chatter')
+      .toMatch(/An artifact on its own[\s\S]*IS the request/)
+    expect(text, 'an inferred accept needs named rules, or the policy refuses it')
+      .toContain('artifact-implies-request')
   })
 })
