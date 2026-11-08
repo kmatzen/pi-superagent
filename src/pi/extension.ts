@@ -272,7 +272,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, pulls) })
   }
   const follower = new PullFollower({
-    home, api: deps.pullApi ?? ghPulls(accounts.pulls), openThreads: () => github?.openThreads(), positions: repos.kv,
+    home, api: deps.pullApi ?? ghPulls({ ...accounts.pulls, ...(cfg.workerTokenFile ? { rateLimitTokenFile: cfg.workerTokenFile } : {}) }),
+    openThreads: () => github?.openThreads(), positions: repos.kv,
     self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, now: () => Date.now(),
     receive: trigger => { engine.receive(trigger) },
     warn: (event, fields) => log.line('warn', event, fields),
