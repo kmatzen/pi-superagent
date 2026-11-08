@@ -60,6 +60,27 @@ esac
     expect(readFileSync(join(dir, 'reviews.log'), 'utf8').trim()).toBe('opener-secret')
   })
 
+  it('posts a comment with the account that can see the repository when the watched one is turned away', async () => {
+    const dir = tmp()
+    const watched = join(dir, 'watched-token')
+    const opener = join(dir, 'opener-token')
+    writeFileSync(watched, 'watched-secret\n')
+    writeFileSync(opener, 'opener-secret\n')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+case "$1 $2" in
+  "api -X")
+    if [ "$GH_TOKEN" = "watched-secret" ]; then echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi
+    cat - >> "$(dirname "$0")/posts.log" ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const api = ghApi({ bin, repo: 'o/r', tokenFile: watched, reviewsAccount: { bin, tokenFile: opener }, followed: () => [] })
+    await api.postComment(9, 'picked up', 'org/x')
+    expect(readFileSync(join(dir, 'posts.log'), 'utf8')).toContain('picked up')
+  })
+
   it('reads reviews as the signed-in account when the pulls account has no token file', async () => {
     // The shape production actually has: the pulls account is `gh`'s own sign-in, so it carries no token.
     const dir = tmp()
