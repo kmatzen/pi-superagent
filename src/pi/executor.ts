@@ -135,7 +135,7 @@ export class PiExecutor {
     if (this.live.has(ticket.id)) return
     let own: WorkerSession | undefined
     own = attach(this.reporter(ticket, () => own))
-    this.bind(ticket, assignment, own)
+    this.bind(ticket, assignment, own, false)
   }
 
   // Bound to the session that owns the ticket: a report from a worker the domain has already replaced or
@@ -154,10 +154,10 @@ export class PiExecutor {
     this.options.reported?.(ticket, assignmentId, origin, followed.length ? { ...filed, pullRequests: followed } : filed)
   }
 
-  private bind(ticket: Ticket, assignment: Assignment, session: WorkerSession): void {
+  private bind(ticket: Ticket, assignment: Assignment, session: WorkerSession, busy = true): void {
     const born = Date.now()
     const live: Live = {
-      session, unsubscribe: () => {}, pendingRead: [], busy: true,
+      session, unsubscribe: () => {}, pendingRead: [], busy,
       startedAt: born, lastEventAt: born, events: 0, workspace: session.workspace ?? this.options.worktreeFor(ticket),
       quietReported: false, deadlineReported: false, assignmentId: assignment.id,
     }
@@ -165,12 +165,11 @@ export class PiExecutor {
       live.lastEventAt = Date.now()
       live.events += 1
       live.quietReported = false
+      // An adopted worker's turn began before this process subscribed, so no turnStarted ever marks it busy.
+      live.busy = event.type !== 'settled'
       if (event.type === 'turnStarted') {
-        live.busy = true
         const ids = live.pendingRead.splice(0)
         if (ids.length) this.engine.inputsRead(ticket.id, ids)
-      } else if (event.type === 'settled') {
-        live.busy = false
       } else if (event.type === 'failed') {
         this.file(ticket, assignment.id, 'crash', report('failed', `the worker crashed: ${event.error}`))
         // A dead session does no work: free its slot now, or every crash costs a worker until the next restart.

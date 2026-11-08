@@ -126,10 +126,21 @@ describe('PiExecutor', () => {
     const f = fixture()
     const session = new FakeSession('kept')
     f.executor.adopt(ticket(), assignment(), report => { session.report = report as never; return session })
-    expect(f.executor.running).toBe(1)
     expect(session.prompts).toEqual([])
     session.report('ready', 'done after the restart')
     expect(f.calls_of('report')).toHaveLength(1)
+  })
+
+  it('an adopted worker sits idle until it speaks, so an idle pane costs no worker slot', () => {
+    const f = fixture({ maxConcurrent: 1 })
+    const session = new FakeSession('kept')
+    f.executor.adopt(ticket(), assignment(), report => { session.report = report as never; return session })
+    expect(f.executor.running, 'the pane waits at its prompt: the router restarted mid-nothing').toBe(0)
+    expect(f.executor.quiet(0), 'and a silent idle pane is not a worker the operator must be asked about').toEqual([])
+    session.emit({ type: 'activity' })
+    expect(f.executor.running, 'a pane that speaks has a run in flight, turnStarted or not').toBe(1)
+    session.emit({ type: 'settled' })
+    expect(f.executor.running).toBe(0)
   })
 
   it('a busy worker is not quiet, and a quiet stretch is reported once', async () => {
