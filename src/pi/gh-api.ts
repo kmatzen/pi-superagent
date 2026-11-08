@@ -101,15 +101,25 @@ type CommentRow = { user?: { login: string }; author_association?: string; creat
 export function ghApi(options: GithubApiOptions): GithubApi {
   const call = ghCall(options)
   const reviewCall = options.reviewsAccount ? ghCall(options.reviewsAccount) : call
-  const turnedAway = (error: unknown): boolean => /Not Found|HTTP 404|HTTP 403/i.test(String(error))
-  // Measured 2026-11-08: an organization thread answers the watched account 404, so replies there were unread.
-  const readCall = async (args: string[]): Promise<string> => {
-    try {
-      return await call(args)
-    } catch (error) {
-      if (reviewCall === call || !turnedAway(error)) throw error
-      return reviewCall(args)
+  const extraCall = options.rateLimitTokenFile
+    ? ghCall({ ...(options.bin ? { bin: options.bin } : {}), tokenFile: options.rateLimitTokenFile })
+    : undefined
+  const retryable = (error: unknown): boolean => /Not Found|HTTP 404|HTTP 403/i.test(String(error)) || rateLimited(error)
+  const accounts = reviewCall === call
+    ? [call, ...(extraCall ? [extraCall] : [])]
+    : [call, reviewCall, ...(extraCall ? [extraCall] : [])]
+  // Measured 2026-11-08: an organization thread answers the watched account 404, and the account that can see it hit GitHub's hourly cap the same hour.
+  const through = async (args: string[], payload?: string): Promise<string> => {
+    let last: unknown
+    for (const ask of accounts) {
+      try {
+        return await ask(args, payload)
+      } catch (error) {
+        if (!retryable(error)) throw error
+        last = error
+      }
     }
+    throw last
   }
   const deadPulls = new Set<string>()
   const openPulls = async (): Promise<Array<{ number: number }>> => {
@@ -146,15 +156,8 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     },
 
     async postComment(issue, body, repo) {
-      const args = ['api', '-X', 'POST', `repos/${repo ?? options.repo}/issues/${issue}/comments`, '--input', '-']
       const payload = JSON.stringify({ body: `${body}\n\n${REPLY_MARKER}` })
-      try {
-        await call(args, payload)
-      } catch (error) {
-        // Measured 2026-11-08: an organization issue answers the watched account 404, so "Picked up" notes on two caramel issues never reached anyone.
-        if (reviewCall === call || !turnedAway(error)) throw error
-        await reviewCall(args, payload)
-      }
+      await through(['api', '-X', 'POST', `repos/${repo ?? options.repo}/issues/${issue}/comments`, '--input', '-'], payload)
     },
 
     async pullsOpen() {
@@ -194,8 +197,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     },
 
     async commentsFor(issue, repo) {
-      const args = ['api', `repos/${repo ?? options.repo}/issues/${issue}/comments?per_page=100&sort=created&direction=desc`]
-      const rows = JSON.parse((await readCall(args)) || '[]') as CommentRow[]
+      const rows = JSON.parse((await through(['api', `repos/${repo ?? options.repo}/issues/${issue}/comments?per_page=100&sort=created&direction=desc`])) || '[]') as CommentRow[]
       return rows.map(r => ({ issue, author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
     },
   }
