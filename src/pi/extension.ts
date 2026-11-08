@@ -131,8 +131,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({
     // Reviews are read as the account that opens the pull requests: the watched account is not in the
     // organization that hosts them, and a pull request it cannot see is a review the ticket never gets.
-    repo: cfg.githubRepo, ...accounts.watched, reviewsAccount: accounts.pulls,
-    ...(cfg.workerTokenFile ? { rateLimitTokenFile: cfg.workerTokenFile } : {}),
+    repo: cfg.githubRepo, ...accounts.watched,
     // The reviews a ticket waits on are the ones on the pull requests it follows.
     onPullUnreadable: (ref, problem) => log.line('warn', 'pull.reviews_readability', { ref, problem: problem ?? 'readable again' }),
     followed: () => followedPulls(repos.tickets.open(), cfg.githubRepo ?? ''),
@@ -273,7 +272,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, pulls) })
   }
   const follower = new PullFollower({
-    home, api: deps.pullApi ?? ghPulls({ ...accounts.pulls, ...(cfg.workerTokenFile ? { rateLimitTokenFile: cfg.workerTokenFile } : {}) }),
+    home, api: deps.pullApi ?? ghPulls(accounts.pulls),
     openThreads: () => github?.openThreads(), positions: repos.kv,
     self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, now: () => Date.now(),
     receive: trigger => { engine.receive(trigger) },

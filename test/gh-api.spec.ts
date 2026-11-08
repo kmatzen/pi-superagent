@@ -38,117 +38,10 @@ describe('ghApi', () => {
   const row = (id: number) => ({ id, user: { login: 'octocat' }, author_association: 'OWNER', state: 'APPROVED',
     submitted_at: '2026-11-06T10:00:00Z', body: 'approved' })
 
-  it('reads reviews as the account that opened the pull request, not the watched one', async () => {
-    const dir = tmp()
-    const watched = join(dir, 'watched-token')
-    const opener = join(dir, 'opener-token')
-    writeFileSync(watched, 'watched-secret\n')
-    writeFileSync(opener, 'opener-secret\n')
-    const bin = join(dir, 'gh')
-    writeFileSync(bin, `#!/bin/bash
-case "$1 $2" in
-  "api repos/o/r/issues/comments"*)   echo "$GH_TOKEN" >> "$(dirname "$0")/watched.log"; echo '[]' ;;
-  "api repos/"*"/pulls/"*"/reviews"*) echo "$GH_TOKEN" >> "$(dirname "$0")/reviews.log"; echo '[]' ;;
-  *) echo "unexpected: $*" >&2; exit 1 ;;
-esac
-`)
-    chmodSync(bin, 0o755)
-    const api = ghApi({ bin, repo: 'o/r', tokenFile: watched, reviewsAccount: { bin, tokenFile: opener }, followed: () => [{ repo: 'o/r', number: 9 }] })
-    await api.comments?.(undefined)
-    await api.reviews?.(0)
-    expect(readFileSync(join(dir, 'watched.log'), 'utf8').trim()).toBe('watched-secret')
-    expect(readFileSync(join(dir, 'reviews.log'), 'utf8').trim()).toBe('opener-secret')
-  })
 
-  it('posts a comment with the account that can see the repository when the watched one is turned away', async () => {
-    const dir = tmp()
-    const watched = join(dir, 'watched-token')
-    const opener = join(dir, 'opener-token')
-    writeFileSync(watched, 'watched-secret\n')
-    writeFileSync(opener, 'opener-secret\n')
-    const bin = join(dir, 'gh')
-    writeFileSync(bin, `#!/bin/bash
-case "$1 $2" in
-  "api -X")
-    if [ "$GH_TOKEN" = "watched-secret" ]; then echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi
-    cat - >> "$(dirname "$0")/posts.log" ;;
-  *) echo "unexpected: $*" >&2; exit 1 ;;
-esac
-`)
-    chmodSync(bin, 0o755)
-    const api = ghApi({ bin, repo: 'o/r', tokenFile: watched, reviewsAccount: { bin, tokenFile: opener }, followed: () => [] })
-    await api.postComment(9, 'picked up', 'org/x')
-    expect(readFileSync(join(dir, 'posts.log'), 'utf8')).toContain('picked up')
-  })
 
-  it('reads a thread with the account that can see the repository when the watched one is turned away', async () => {
-    const dir = tmp()
-    const watched = join(dir, 'watched-token')
-    const opener = join(dir, 'opener-token')
-    writeFileSync(watched, 'watched-secret\n')
-    writeFileSync(opener, 'opener-secret\n')
-    const bin = join(dir, 'gh')
-    writeFileSync(bin, `#!/bin/bash
-case "$1 $2" in
-  "api repos/org/x/issues/9/comments"*)
-    [ "$GH_TOKEN" = "watched-secret" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-    echo '[{"user":{"login":"reviewer"},"author_association":"MEMBER","created_at":"2026-11-08T05:00:00Z","body":"merge it"}]' ;;
-  *) echo "unexpected: $*" >&2; exit 1 ;;
-esac
-`)
-    chmodSync(bin, 0o755)
-    const api = ghApi({ bin, repo: 'o/r', tokenFile: watched, reviewsAccount: { bin, tokenFile: opener }, followed: () => [] })
-    expect(await api.commentsFor!(9, 'org/x')).toEqual([{ issue: 9, author: 'reviewer', association: 'MEMBER', at: '2026-11-08T05:00:00Z', body: 'merge it' }])
-  })
 
-  it('posts with the third account when the organization turns the second away for asking too often', async () => {
-    const dir = tmp()
-    const watched = join(dir, 'watched-token')
-    const opener = join(dir, 'opener-token')
-    const third = join(dir, 'third-token')
-    writeFileSync(watched, 'watched-secret\n')
-    writeFileSync(opener, 'opener-secret\n')
-    writeFileSync(third, 'third-secret\n')
-    const bin = join(dir, 'gh')
-    writeFileSync(bin, `#!/bin/bash
-case "$1 $2" in
-  "api -X")
-    case "$GH_TOKEN" in
-      watched-secret) echo "gh: Not Found (HTTP 404)" >&2 ;;
-      opener-secret) echo "gh: API rate limit exceeded for user ID 42 (HTTP 403)" >&2 ;;
-      *) cat - >> "$(dirname "$0")/posts.log"; exit 0 ;;
-    esac
-    exit 1 ;;
-  *) echo "unexpected: $*" >&2; exit 1 ;;
-esac
-`)
-    chmodSync(bin, 0o755)
-    const api = ghApi({
-      bin, repo: 'o/r', tokenFile: watched, reviewsAccount: { bin, tokenFile: opener },
-      rateLimitTokenFile: third, followed: () => [],
-    })
-    await api.postComment(9, 'addressed', 'org/x')
-    expect(readFileSync(join(dir, 'posts.log'), 'utf8')).toContain('addressed')
-  })
 
-  it('reads reviews as the signed-in account when the pulls account has no token file', async () => {
-    // The shape production actually has: the pulls account is `gh`'s own sign-in, so it carries no token.
-    const dir = tmp()
-    const watched = join(dir, 'watched-token')
-    writeFileSync(watched, 'watched-secret\n')
-    const bin = join(dir, 'gh')
-    writeFileSync(bin, `#!/bin/bash
-case "$1 $2" in
-  "api repos/o/r/issues/comments"*)   echo "\${GH_TOKEN:-none}" >> "$(dirname "$0")/watched.log"; echo '[]' ;;
-  "api repos/"*"/pulls/"*"/reviews"*) echo "\${GH_TOKEN:-none}" >> "$(dirname "$0")/reviews.log"; echo '[]' ;;
-  *) echo "unexpected: $*" >&2; exit 1 ;;
-esac
-`)
-    chmodSync(bin, 0o755)
-    const api = ghApi({ bin, repo: 'o/r', tokenFile: watched, reviewsAccount: { bin }, followed: () => [{ repo: 'o/r', number: 9 }] })
-    await api.reviews?.(0)
-    expect(readFileSync(join(dir, 'reviews.log'), 'utf8').trim(), 'the watched token must not reach the reviews read').not.toBe('watched-secret')
-  })
 
   it('reads the reviews of the watched repository\'s pull requests that tickets follow, and a dead pull does not stop the poll', async () => {
     // The old read walked every open pull request in one repository (50 open was 51 calls per poll).
@@ -299,25 +192,51 @@ describe('ghPulls', () => {
     expect(gh.posted().body).toContain('addressed')
   })
 
-  it('reads a pull request with the second account when GitHub rate-limits the first', async () => {
+  it('asks GitHub with the configured account on every call site', async () => {
+    // The operator's rule 2026-11-08: the specified token is GitHub. A second account answered 404 for a
+    // repository it cannot see, and the reader of a followed pull request took that as "the pull is gone".
     const dir = tmp()
-    const first = join(dir, 'pulls-token')
-    const second = join(dir, 'second-token')
-    writeFileSync(first, 'pulls-secret\n')
-    writeFileSync(second, 'second-secret\n')
+    const token = join(dir, 'token')
+    writeFileSync(token, 'one-secret\n')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+echo "$GH_TOKEN" >> "$(dirname "$0")/used.log"
+case "$1 $2" in
+  "api repos/o/r/issues/comments"*) echo '[]' ;;
+  "api repos/o/r/pulls/7/reviews"*) echo '[]' ;;
+  "api -X") cat - > /dev/null ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const api = ghApi({ bin, repo: 'o/r', tokenFile: token, followed: () => [{ repo: 'o/r', number: 7 }] })
+    await api.comments()
+    await api.reviews!(0)
+    await api.postComment(7, 'noted')
+    const used = readFileSync(join(dir, 'used.log'), 'utf8').trim().split('\n')
+    expect(used, 'every GitHub call carries the configured token').toEqual(['one-secret', 'one-secret', 'one-secret'])
+  })
+
+  it('reads a pull request with the configured account, and no other', async () => {
+    // The operator's rule 2026-11-08: every call to GitHub is the specified token. A backup account answered
+    // 404 for a repository it cannot see, and a live ticket ended as "closed without merging".
+    const dir = tmp()
+    const token = join(dir, 'pulls-token')
+    writeFileSync(token, 'pulls-secret\n')
     const bin = join(dir, 'gh')
     writeFileSync(bin, `#!/bin/bash
 case "$1 $2" in
   "api repos/x/y/pulls/"*)
-    [ "$GH_TOKEN" = "pulls-secret" ] && { echo "gh: API rate limit exceeded for user ID 42 (HTTP 403)" >&2; exit 1; }
+    [ "$GH_TOKEN" = "pulls-secret" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    echo "$GH_TOKEN" > "$(dirname "$0")/used.log"
     echo '{"state":"open","created_at":"2026-11-08T00:00:00Z"}' ;;
   *) echo "unexpected: $*" >&2; exit 1 ;;
 esac
 `)
     chmodSync(bin, 0o755)
-    const api = ghPulls({ bin, tokenFile: first, rateLimitTokenFile: second })
-    expect(await api.pull('x/y', 11), 'a rate-limited login must not freeze the merge a ticket waits on')
-      .toEqual({ open: true, merged: false, createdAt: '2026-11-08T00:00:00Z' })
+    const api = ghPulls({ bin, tokenFile: token })
+    expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, createdAt: '2026-11-08T00:00:00Z' })
+    expect(readFileSync(join(dir, 'used.log'), 'utf8').trim()).toBe('pulls-secret')
   })
 })
 

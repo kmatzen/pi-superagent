@@ -8,8 +8,6 @@ export interface GhOptions {
   bin?: string
   /** A file holding the token of the account to act as; unset, gh acts as the account it is signed in as. */
   tokenFile?: string
-  /** A second account's token file, asked once when GitHub turns the first away for asking too often. */
-  rateLimitTokenFile?: string
 }
 
 export interface GithubApiOptions extends GhOptions {
@@ -29,7 +27,7 @@ export interface GithubApiOptions extends GhOptions {
    * account that opened them read a review request in one call. The pulls account usually has no token file —
    * it is the account `gh` is signed in as — so this is an account, not a second token.
    */
-  reviewsAccount?: GhOptions
+
   /**
    * Called when a followed pull request's reviews go unreadable (a string) or readable again (null). A 404
    * is permanent — the pull is deleted, moved, or private to this account — and a ticket that follows it
@@ -100,27 +98,8 @@ type CommentRow = { user?: { login: string }; author_association?: string; creat
 
 export function ghApi(options: GithubApiOptions): GithubApi {
   const call = ghCall(options)
-  const reviewCall = options.reviewsAccount ? ghCall(options.reviewsAccount) : call
-  const extraCall = options.rateLimitTokenFile
-    ? ghCall({ ...(options.bin ? { bin: options.bin } : {}), tokenFile: options.rateLimitTokenFile })
-    : undefined
-  const retryable = (error: unknown): boolean => /Not Found|HTTP 404|HTTP 403/i.test(String(error)) || rateLimited(error)
-  const accounts = reviewCall === call
-    ? [call, ...(extraCall ? [extraCall] : [])]
-    : [call, reviewCall, ...(extraCall ? [extraCall] : [])]
-  // Measured 2026-11-08: an organization thread answers the watched account 404, and the account that can see it hit GitHub's hourly cap the same hour.
-  const through = async (args: string[], payload?: string): Promise<string> => {
-    let last: unknown
-    for (const ask of accounts) {
-      try {
-        return await ask(args, payload)
-      } catch (error) {
-        if (!retryable(error)) throw error
-        last = error
-      }
-    }
-    throw last
-  }
+  // One account, the configured token file: the operator's rule 2026-11-08. A second account's 404 on a
+  // repository it cannot see ended a live ticket (caramel#1983 at 09:36, merged 16:45), so no call asks one.
   const deadPulls = new Set<string>()
   const openPulls = async (): Promise<Array<{ number: number }>> => {
     const open: Array<{ number: number }> = []
@@ -157,7 +136,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
 
     async postComment(issue, body, repo) {
       const payload = JSON.stringify({ body: `${body}\n\n${REPLY_MARKER}` })
-      await through(['api', '-X', 'POST', `repos/${repo ?? options.repo}/issues/${issue}/comments`, '--input', '-'], payload)
+      await call(['api', '-X', 'POST', `repos/${repo ?? options.repo}/issues/${issue}/comments`, '--input', '-'], payload)
     },
 
     async pullsOpen() {
@@ -172,7 +151,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       for (const pr of targets) {
         let rows: ReviewRow[]
         try {
-          rows = await paged<ReviewRow>(reviewCall, page => `repos/${pr.repo}/pulls/${pr.number}/reviews?page=${page}`, r => r)
+          rows = await paged<ReviewRow>(call, page => `repos/${pr.repo}/pulls/${pr.number}/reviews?page=${page}`, r => r)
         } catch (error) {
           // GitHub answers 404 for a pull request that is gone, moved, or private to this account, and that is
           // a fact about one pull, not an outage. Measured live 2026-11-07: a followed pull answering 404 threw
@@ -197,33 +176,15 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     },
 
     async commentsFor(issue, repo) {
-      const rows = JSON.parse((await through(['api', `repos/${repo ?? options.repo}/issues/${issue}/comments?per_page=100&sort=created&direction=desc`])) || '[]') as CommentRow[]
+      const rows = JSON.parse((await call(['api', `repos/${repo ?? options.repo}/issues/${issue}/comments?per_page=100&sort=created&direction=desc`])) || '[]') as CommentRow[]
       return rows.map(r => ({ issue, author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
     },
   }
 }
 
 /** Pull requests in any repository the operator's gh can read, by number: the ones tickets follow. */
-const rateLimited = (error: unknown): boolean => /rate limit|exceeded your secondary|HTTP 403|HTTP 429/i.test(String(error))
-
-/** Measured 2026-11-08: the gh login hit GitHub's 5000/hour cap and tickets waiting on merges read "nothing changed". */
-function withRateLimitFallback(call: (args: string[], stdin?: string) => Promise<string>,
-                               options: GhOptions): (args: string[], stdin?: string) => Promise<string> {
-  const { rateLimitTokenFile, ...base } = options
-  const second = rateLimitTokenFile ? ghCall({ ...base, tokenFile: rateLimitTokenFile }) : undefined
-  if (!second) return call
-  return async (args, stdin) => {
-    try {
-      return await call(args, stdin)
-    } catch (error) {
-      if (!rateLimited(error)) throw error
-      return second(args, stdin)
-    }
-  }
-}
-
 export function ghPulls(options: GhOptions = {}): PullApi {
-  const call = withRateLimitFallback(ghCall(options), options)
+  const call = ghCall(options)
   return {
     async pull(repo, number) {
       try {
