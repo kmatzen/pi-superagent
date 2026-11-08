@@ -7,7 +7,7 @@ import { promisify } from 'node:util'
 
 const runGit = promisify(execFile)
 import { join } from 'node:path'
-import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
 import {GithubSource, REPLY_MARKER, type GithubApi, REQUEST_LABEL} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
@@ -233,6 +233,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     now: deps.now ?? (() => new Date().toISOString()),
   })
 
+  const renderInput = (input: TicketInput): string | undefined => input.kind === 'trigger'
+    ? (repos.triggers.get(input.triggerId) ? `${repos.triggers.get(input.triggerId)!.actor.id}: ${repos.triggers.get(input.triggerId)!.text}` : undefined)
+    // A text Input is the operator's own words: rendering it as `[text]` would deliver the literal
+    // string to the worker and mark the answer read.
+    : input.kind === 'text' ? input.text : `[${input.kind}]`
+
   // One message per assignment, ending and text; a failed launch drops the text, since it retries every poll.
   const announce = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun, relaunched: boolean): void => {
     const channel = ticket.channels[0]
@@ -244,6 +250,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
   // One fresh worker per crash, per ticket per process; the engine's retry requeues comments the dead one never read.
   const relaunched = new Set<string>()
+  // A worker that has asked and waits for a person is not work in progress: 5 of them held tabs and slots for
+  // hours while 13 tickets queued (measured 2026-11-08). Free the agent when it posts the question; a reply starts
+  // a fresh one, and the issue is its memory. `ready` is excluded: that report ends the ticket, and ending it
+  // needs the worker's own turn-end bookkeeping (measured: releasing on ready left the ticket unended).
+  const awaitsAHuman = (state: string): boolean => state === 'blocked' || state === 'waiting'
+
   const reported = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun): void => {
     let fresh = false
     if (origin === 'crash' && !relaunched.has(ticket.id)) {
@@ -257,6 +269,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       }
     }
     announce(ticket, assignmentId, origin, run, fresh)
+    if (origin === 'worker' && awaitsAHuman(run.state)) {
+      engine.release(ticket.id, assignmentId)
+      executorRef?.release(ticket)
+      log.line('info', 'worker.released', { ticket: ticket.id, assignment: assignmentId, state: run.state })
+    }
     pullEnded(ticket.id)
   }
   const home = cfg.githubRepo ?? ''
@@ -398,11 +415,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       return `${brief}\nThe request is GitHub issue ${repo}#${issue}: read it with \`gh issue view ${issue} --repo ${repo} --comments\`. `
         + clone + 'Do not comment on the issue yourself; ticket_report is how your result reaches it.' + pulls
     },
-    renderInput: input => input.kind === 'trigger'
-      ? (repos.triggers.get(input.triggerId) ? `${repos.triggers.get(input.triggerId)!.actor.id}: ${repos.triggers.get(input.triggerId)!.text}` : undefined)
-      // A text Input is the operator's own words: rendering it as `[text]` would deliver the literal
-      // string to the worker and mark the answer read.
-      : input.kind === 'text' ? input.text : `[${input.kind}]`,
+    renderInput,
     reported,
     follow,
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
@@ -545,6 +558,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     for (const ticket of repos.tickets.open()) {
       const assignment = ticket.assignments.at(-1)
       if (assignment && assignment.state === 'pending') executor.start(ticket, assignment)
+      // The answer to a released worker is the request that starts the next one (formal/Ticket.tla R2): wake
+      // appends the fresh Assignment and the resumed marker, and the next poll launches it.
+      else if (assignment && assignment.state === 'ended' && assignment.endedReason === 'released'
+        && ticket.undelivered.length && !executor.workers().some(w => w.ticketId === ticket.id)) engine.wake(ticket.id)
     }
     // A worker quiet for 15 minutes gets a question on the panel, not the issue: a long build is not news.
     for (const quiet of executor.quiet(cfg.workerQuietMinutes ?? 15)) {

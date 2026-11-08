@@ -28,9 +28,13 @@ Reports    == {"none", "progress", "waiting", "ready", "blocked", "failed", "dro
 MaxAsg     == 3   (* bound on assignments per ticket: the cap makes the state space finite *)
 
 (* ---- state ---- *)
+(* `released[k]`: the worker of a live ticket was freed after it asked a person (the operator's rule
+   2026-11-08, measured: 5 stopped workers held tabs and slots while 13 tickets queued). The ticket stays
+   live; its Assignment ends with reason "released"; a fresh worker starts on the person's answer. *)
 (* tickets: per slot — lifecycle state, assignment states (newest last), latest report,
    subscribed threads, undelivered human messages (ticket.inputs/undelivered, model.ts). *)
 VARIABLES
+  released,       \* tickets whose asking worker was freed, awaiting the answer that restarts one
   batch,          \* the Evaluation's queued triggers: accept attaches every one of them (Tickets.create loops evaluation.triggerIds)
   tickets,
   delivered,      \* messages the source has emitted (ids are content hashes: intake.ts dedups)
@@ -38,9 +42,10 @@ VARIABLES
   evaluating,     \* threads with an open Evaluation — one per thread by construction (model.ts `evaluating?`)
   ackPend, ackSent  \* outbox halves for acknowledgements (ports.ts ReplyStatus)
 
-vars == <<batch, tickets, delivered, evalQ, evaluating, ackPend, ackSent>>
+vars == <<released, batch, tickets, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 Init ==
+  /\ released = [k \in TicketIds |-> FALSE]
   /\ tickets = [k \in TicketIds |-> [state |-> "free", asg |-> <<>>, lastReport |-> "none",
                                      subs |-> {}, humanIn |-> {}]]
   /\ batch = {} /\ delivered = {} /\ evalQ = {} /\ evaluating = {}
@@ -62,7 +67,7 @@ Deliver(m) ==
         THEN [tickets[k] EXCEPT !.humanIn = IF Human(m) THEN @ \cup {m} ELSE @]
         ELSE tickets[k]]
   /\ delivered' = delivered \cup {m}
-  /\ UNCHANGED <<batch, evaluating, ackPend, ackSent>>
+  /\ UNCHANGED <<released, batch, evaluating, ackPend, ackSent>>
 
 (* ------------------------------------------------------------------- evals ----
   Evals start per thread with queued triggers (evals.ts); accept creates the ticket
@@ -75,7 +80,7 @@ StartEval(th) ==
   /\ evaluating' = evaluating \cup {th}
   /\ evalQ' = evalQ \ {m \in evalQ : ThreadOf(m) = th}
   /\ batch' = batch \cup {m \in evalQ : ThreadOf(m) = th}
-  /\ UNCHANGED <<tickets, delivered, ackPend, ackSent>>
+  /\ UNCHANGED <<released, tickets, delivered, ackPend, ackSent>>
 
 (* The one-ticket rule as the accept guard: an accept on a thread that a live ticket
    already follows becomes an ignore. The router enforces it in code (its ticket_decide
@@ -93,14 +98,14 @@ VerdictAccept(th, k) ==
         ELSE \E m0 \in cand : ackPend' = ackPend \cup {m0}
      /\ batch' = batch \ b
   /\ evaluating' = evaluating \ {th}
-  /\ UNCHANGED <<evalQ, delivered, ackSent>>
+  /\ UNCHANGED <<released, evalQ, delivered, ackSent>>
 
 (* ignore: the Evaluation ends, nothing is authorized. *)
 VerdictIgnore(th) ==
   /\ th \in evaluating
   /\ evaluating' = evaluating \ {th}
   /\ batch' = batch \ {m \in batch : ThreadOf(m) = th}
-  /\ UNCHANGED <<tickets, evalQ, delivered, ackPend, ackSent>>
+  /\ UNCHANGED <<released, tickets, evalQ, delivered, ackPend, ackSent>>
 
 (* ---------------------------------------------------------------- execution ----
   The Executor starts the newest pending Assignment when none runs — its contract,
@@ -112,7 +117,7 @@ Launch(k) ==
      /\ asg[Len(asg)] = "pend"
      /\ \A i \in 1..Len(asg) : asg[i] # "run"
      /\ tickets' = [tickets EXCEPT ![k].asg = [asg EXCEPT ![Len(asg)] = "run"]]
-  /\ UNCHANGED <<batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+  /\ UNCHANGED <<released, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 (* Assignments.report (assignments.ts): only a live ticket with a running Assignment
   reports; a `ready` report ends the ticket completed (no followed threads here), a
@@ -127,18 +132,51 @@ Report(k, r) ==
      /\ tickets' = [tickets EXCEPT ![k].lastReport = r,
                                ![k].state = IF r = "ready" THEN "done" ELSE IF r = "dropped" THEN "dropped" ELSE @,
                                ![k].asg = IF r = "ready" \/ r = "dropped" THEN allEnd ELSE @]
-  /\ UNCHANGED <<batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+  /\ UNCHANGED <<released, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 (* Tickets.retry (tickets.ts): a blocked/failed latest report makes the ticket
   retryable; the stalled Assignment ends and a fresh pending one is appended. *)
 Retry(k) ==
   /\ tickets[k].state = "live"
+  (* Tickets.retry -> canRetry -> waitsForPerson: a person's message removes the stall a retry answers, and a
+     released ticket with no answer yet stays retryable from the panel — the new Assignment is then the latest,
+     which is exactly what clears `released` here (code: the flag is the latest Assignment's end reason). *)
+  /\ ~(released[k] /\ tickets[k].humanIn # {})
   /\ tickets[k].lastReport \in {"blocked", "failed"}
   /\ Len(tickets[k].asg) < MaxAsg
   /\ LET asg == tickets[k].asg IN
      /\ asg[Len(asg)] # "pend"
      /\ tickets' = [tickets EXCEPT ![k].asg = Append([asg EXCEPT ![Len(asg)] = "end"], "pend"),
                                ![k].lastReport = "none"]
+  /\ released' = [released EXCEPT ![k] = FALSE]
+  /\ UNCHANGED <<batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+
+(* PiExecutor.release + Tickets.release: the worker of a live ticket asked a person and its agent, tab and slot
+   are freed. Its Assignment ends with reason "released"; the ticket stays live, so a person's stop stays
+   absorbing (I1) and no second ticket can open on the thread (I4). Only a worker that asked may be released,
+   which is what R3 checks. *)
+Release(k) ==
+  /\ tickets[k].state = "live"
+  /\ ~released[k]
+  /\ tickets[k].lastReport \in {"blocked", "waiting"}
+  /\ LET asg == tickets[k].asg IN
+     /\ Len(asg) > 0
+     /\ asg[Len(asg)] = "run"
+     /\ tickets' = [tickets EXCEPT ![k].asg = [asg EXCEPT ![Len(asg)] = "end"]]
+  /\ released' = [released EXCEPT ![k] = TRUE]
+  /\ UNCHANGED <<batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+
+(* Tickets.wake widened for a released worker (the manager's door): the person's undelivered message starts a
+   fresh Assignment, exactly as it resumes an ended ticket. R2 is the claim this action exists to make true. *)
+Resurrect(k) ==
+  /\ released[k]
+  /\ tickets[k].state = "live"
+  /\ tickets[k].humanIn # {}
+  /\ Len(tickets[k].asg) < MaxAsg
+  /\ tickets' = [tickets EXCEPT ![k].asg = Append(tickets[k].asg, "pend"),
+                             ![k].lastReport = "none",
+                             ![k].humanIn = {}]
+  /\ released' = [released EXCEPT ![k] = FALSE]
   /\ UNCHANGED <<batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 (* Tickets.wake (tickets.ts): an ended ticket resumes under its unchanged Mandate on a
@@ -153,7 +191,7 @@ Wake(k) ==
                              ![k].asg = Append(tickets[k].asg, "pend"),
                              ![k].lastReport = "none",
                              ![k].humanIn = {}]
-  /\ UNCHANGED <<batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+  /\ UNCHANGED <<released, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 (* Tickets.stop (tickets.ts), from a stop Decision (engine.ts), the panel API, or a
   conversation closed on GitHub: end(by = 'human', outcome = 'stopped'); every
@@ -165,14 +203,14 @@ StopByHuman(th, k) ==
                              ![k].asg = [i \in 1..Len(tickets[k].asg) |-> "end"]]
   /\ evaluating' = evaluating \ {th}
   /\ batch' = batch \ {m \in batch : ThreadOf(m) = th}
-  /\ UNCHANGED <<delivered, evalQ, ackPend, ackSent>>
+  /\ UNCHANGED <<released, delivered, evalQ, ackPend, ackSent>>
 
 (* The outbox flushing a queued acknowledgement: pending -> sent, never back. *)
 SendAck(a) ==
   /\ a \in ackPend
   /\ ackPend' = ackPend \ {a}
   /\ ackSent' = ackSent \cup {a}
-  /\ UNCHANGED <<batch, tickets, delivered, evalQ, evaluating>>
+  /\ UNCHANGED <<released, batch, tickets, delivered, evalQ, evaluating>>
 
 (* A finished system has nothing left to do; this stuttering step makes stopping legal
    instead of a deadlock. It also means TLC's deadlock check finds nothing here:
@@ -187,6 +225,8 @@ Next ==
   \/ \E th \in Threads : VerdictIgnore(th)
   \/ \E k \in TicketIds : Launch(k)
   \/ \E k \in TicketIds, r \in Reports : Report(k, r)
+  \/ \E k \in TicketIds : Release(k)
+  \/ \E k \in TicketIds : Resurrect(k)
   \/ \E k \in TicketIds : Retry(k)
   \/ \E k \in TicketIds : Wake(k)
   \/ \E th \in Threads, k \in TicketIds : StopByHuman(th, k)
@@ -197,12 +237,14 @@ Fairness ==
   /\ \A th \in Threads : WF_vars(StartEval(th)) /\ WF_vars(VerdictIgnore(th))
   /\ \A th \in Threads, k \in TicketIds : WF_vars(VerdictAccept(th, k))
   /\ \A k \in TicketIds : WF_vars(Launch(k)) /\ WF_vars(Report(k, "ready")) /\ WF_vars(Wake(k))
+  /\ \A k \in TicketIds : WF_vars(Release(k)) /\ WF_vars(Resurrect(k))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 (* ------------------------------------------------------------ the claims ---- *)
 
 TypeOK ==
+  /\ released \in [TicketIds -> BOOLEAN]
   /\ batch \in SUBSET Msgs
   /\ tickets \in [TicketIds -> [state: States, asg: Seq(AsgStates), lastReport: Reports,
                                 subs: SUBSET Threads, humanIn: SUBSET Msgs]]
@@ -240,5 +282,33 @@ I6_SentMonotonic == [][ackSent \subseteq ackSent']_vars
 
 (* LT. Liveness: every incoming message eventually reaches intake. *)
 LT_Delivered == []<>(\A m \in Msgs : m \in delivered)
+
+(* R1. A released ticket holds no worker: the slot and the agent are truly freed, and no state has both a
+   released ticket and a running Assignment on it. *)
+R1_SlotFreed == \A k \in TicketIds :
+  released[k] => \A i \in 1..Len(tickets[k].asg) : tickets[k].asg[i] # "run"
+
+(* R2. A person's answer to a released worker is never stranded: while an answer waits on a released ticket, a
+   worker eventually runs there again — the one escape being the person's own stop, which withdraws the request
+   (the counter-example TLC produced for the stronger form, 2026-11-08: a stopped ticket keeps its answer
+   unanswered, which is what a stop means). This is the claim the release is only safe with. *)
+R2_AnswerGetsAWorker ==
+  []<>\A k \in TicketIds : (released[k] /\ tickets[k].humanIn # {}) =>
+    <>((\E i \in 1..Len(tickets[k].asg) : tickets[k].asg[i] = "run")
+        \/ tickets[k].state = "stopped"
+        \/ Len(tickets[k].asg) = MaxAsg)   (* the model's assignment bound, not a behavior: the real code appends without one *)
+
+(* R3. Only a worker that asked is freed: a release step implies the last report was a question or a wait, so a
+   working worker's agent is never taken from under it. *)
+R3_ReleaseNeedsAQuestion ==
+  [][\A k \in TicketIds : (released'[k] /\ ~released[k]) =>
+        tickets[k].lastReport \in {"blocked", "waiting"}]_vars
+
+(* R4. Resurrection appends, never reuses: a freed Assignment is never set back to running, so a released
+   worker's record cannot come back and two agents can never act on one ticket. *)
+R4_NoReusedAssignment ==
+  [][\A k \in TicketIds : \A i \in 1..Len(tickets[k].asg) :
+        tickets[k].asg[i] = "end" => \A j \in 1..Len(tickets'[k].asg) :
+          j <= Len(tickets[k].asg) => tickets'[k].asg[j] # "run" \/ j > i]_vars
 
 =====================
