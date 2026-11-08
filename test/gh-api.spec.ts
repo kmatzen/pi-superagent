@@ -227,6 +227,27 @@ describe('ghPulls', () => {
     expect(gh.calls()).toEqual(['api -X POST repos/x/y/issues/11/comments --input -'])
     expect(gh.posted().body).toContain('addressed')
   })
+
+  it('reads a pull request with the second account when GitHub rate-limits the first', async () => {
+    const dir = tmp()
+    const first = join(dir, 'pulls-token')
+    const second = join(dir, 'second-token')
+    writeFileSync(first, 'pulls-secret\n')
+    writeFileSync(second, 'second-secret\n')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+case "$1 $2" in
+  "api repos/x/y/pulls/"*)
+    [ "$GH_TOKEN" = "pulls-secret" ] && { echo "gh: API rate limit exceeded for user ID 42 (HTTP 403)" >&2; exit 1; }
+    echo '{"state":"open","created_at":"2026-11-08T00:00:00Z"}' ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const api = ghPulls({ bin, tokenFile: first, rateLimitTokenFile: second })
+    expect(await api.pull('x/y', 11), 'a rate-limited login must not freeze the merge a ticket waits on')
+      .toEqual({ open: true, merged: false, createdAt: '2026-11-08T00:00:00Z' })
+  })
 })
 
 describe("the agent's own account", () => {

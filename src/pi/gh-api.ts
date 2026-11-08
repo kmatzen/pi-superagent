@@ -8,6 +8,8 @@ export interface GhOptions {
   bin?: string
   /** A file holding the token of the account to act as; unset, gh acts as the account it is signed in as. */
   tokenFile?: string
+  /** A second account's token file, asked once when GitHub turns the first away for asking too often. */
+  rateLimitTokenFile?: string
 }
 
 export interface GithubApiOptions extends GhOptions {
@@ -182,8 +184,26 @@ export function ghApi(options: GithubApiOptions): GithubApi {
 }
 
 /** Pull requests in any repository the operator's gh can read, by number: the ones tickets follow. */
+const rateLimited = (error: unknown): boolean => /rate limit|exceeded your secondary|HTTP 403|HTTP 429/i.test(String(error))
+
+/** Measured 2026-11-08: the gh login hit GitHub's 5000/hour cap and tickets waiting on merges read "nothing changed". */
+function withRateLimitFallback(call: (args: string[], stdin?: string) => Promise<string>,
+                               options: GhOptions): (args: string[], stdin?: string) => Promise<string> {
+  const { rateLimitTokenFile, ...base } = options
+  const second = rateLimitTokenFile ? ghCall({ ...base, tokenFile: rateLimitTokenFile }) : undefined
+  if (!second) return call
+  return async (args, stdin) => {
+    try {
+      return await call(args, stdin)
+    } catch (error) {
+      if (!rateLimited(error)) throw error
+      return second(args, stdin)
+    }
+  }
+}
+
 export function ghPulls(options: GhOptions = {}): PullApi {
-  const call = ghCall(options)
+  const call = withRateLimitFallback(ghCall(options), options)
   return {
     async pull(repo, number) {
       try {
