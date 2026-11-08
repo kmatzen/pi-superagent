@@ -101,6 +101,36 @@ esac
     expect(await api.commentsFor!(9, 'org/x')).toEqual([{ issue: 9, author: 'reviewer', association: 'MEMBER', at: '2026-11-08T05:00:00Z', body: 'merge it' }])
   })
 
+  it('posts with the third account when the organization turns the second away for asking too often', async () => {
+    const dir = tmp()
+    const watched = join(dir, 'watched-token')
+    const opener = join(dir, 'opener-token')
+    const third = join(dir, 'third-token')
+    writeFileSync(watched, 'watched-secret\n')
+    writeFileSync(opener, 'opener-secret\n')
+    writeFileSync(third, 'third-secret\n')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+case "$1 $2" in
+  "api -X")
+    case "$GH_TOKEN" in
+      watched-secret) echo "gh: Not Found (HTTP 404)" >&2 ;;
+      opener-secret) echo "gh: API rate limit exceeded for user ID 42 (HTTP 403)" >&2 ;;
+      *) cat - >> "$(dirname "$0")/posts.log"; exit 0 ;;
+    esac
+    exit 1 ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const api = ghApi({
+      bin, repo: 'o/r', tokenFile: watched, reviewsAccount: { bin, tokenFile: opener },
+      rateLimitTokenFile: third, followed: () => [],
+    })
+    await api.postComment(9, 'addressed', 'org/x')
+    expect(readFileSync(join(dir, 'posts.log'), 'utf8')).toContain('addressed')
+  })
+
   it('reads reviews as the signed-in account when the pulls account has no token file', async () => {
     // The shape production actually has: the pulls account is `gh`'s own sign-in, so it carries no token.
     const dir = tmp()
