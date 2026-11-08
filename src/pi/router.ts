@@ -71,7 +71,9 @@ export interface SdkSurface {
  *  one would take it for closed and end its ticket. */
 export const ghAccounts = (config: RouterConfig): { watched: GhOptions; pulls: GhOptions } => {
   const bin = config.ghBin ? { bin: config.ghBin } : {}
-  return { watched: { ...bin, ...(config.githubTokenFile ? { tokenFile: config.githubTokenFile } : {}) }, pulls: bin }
+  const token = config.githubTokenFile ? { tokenFile: config.githubTokenFile } : {}
+  // One account for every call (the operator's rule 2026-11-08): the token file is GitHub, not the gh login.
+  return { watched: { ...bin, ...token }, pulls: { ...bin, ...token } }
 }
 
 export async function loadSdk(config: RouterConfig): Promise<SdkSurface> {

@@ -28,10 +28,12 @@ describe('bot patterns', () => {
 })
 
 describe('which account each GitHub client acts as', () => {
-  it("the watched repository as the agent's own account, pull requests as gh's login, which opened them", () => {
+  it('every client acts as the token file it was given, and no client defaults to the gh login', () => {
+    // The operator's rule 2026-11-08. The gh login made a second account real in practice: it was the one
+    // that read pull requests, and when reads fell back the other way, a 404 ended a live ticket.
     const accounts = ghAccounts({ ghBin: '/bin/gh', githubTokenFile: '/s/github-token' } as never)
     expect(accounts.watched).toEqual({ bin: '/bin/gh', tokenFile: '/s/github-token' })
-    expect(accounts.pulls).toEqual({ bin: '/bin/gh' })
+    expect(accounts.pulls).toEqual({ bin: '/bin/gh', tokenFile: '/s/github-token' })
     expect(ghAccounts({} as never)).toEqual({ watched: {}, pulls: {} })
   })
 })
