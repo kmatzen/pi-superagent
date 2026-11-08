@@ -194,7 +194,9 @@ export class PiExecutor {
       if (ticket.delivery?.error === NO_LIVE_WORKER) return
       return this.engine.deliveryFailed(ticket.id, assignment.id, NO_LIVE_WORKER)
     }
-    for (const input of visible) live.session.prompt(String(input.text), 'followUp')
+      // An idle session queues a mode-tagged message and never starts it: an operator reply sat as "3 awaiting input".
+    const mode = live.busy ? 'followUp' : 'steer'
+    for (const input of visible) live.session.prompt(String(input.text), mode)
     this.engine.inputsDelivered(ticket.id, assignment.id, visible.map(i => i.id))
     live.pendingRead.push(...visible.map(i => i.id))
   }
