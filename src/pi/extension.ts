@@ -633,6 +633,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   let ticking = false
   let again = false
   const runTick = (): void => {
+    // Measured 2026-11-08: a tick parked on worker capacity held nine replies for ten minutes, and the guard returned before this line.
+    outbox.flush()
     if (ticking) { again = true; return }
     ticking = true
     void tick().finally(() => {
