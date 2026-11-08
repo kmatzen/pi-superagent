@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import type { WorkerEvent } from '../src/pi/executor.ts'
 import { HerdrError, type AgentInfo, type Herdr } from '../src/pi/herdr.ts'
-import { agentName, HerdrWorkers } from '../src/pi/herdr-workers.ts'
+import { agentName, HerdrWorkers, roleModule } from '../src/pi/herdr-workers.ts'
 import { openLog } from '../src/pi/log.ts'
 
 const dirs: string[] = []
@@ -80,7 +80,8 @@ describe('herdr workers', () => {
     expect(m.calls[0]).toContain('"PI_SUPERAGENT_ROLE":"worker"')
     expect(m.calls[0]).toContain(`"PI_SUPERAGENT_WORKER_DIR":"${join(dir, 'workers', session.sessionId)}"`)
     // --no-extensions: a worker session must not load the operator's harness extensions with the operator's credentials.
-    expect(m.calls[1]).toBe(`agentStart ${agentName('#7', session.sessionId)} --session-id ${session.sessionId} --no-extensions`)
+    // It must load this package's own entry: measured 2026-11-08, three prompts sat undrained in a worker's inbox and the pane never reported, because nothing in the pane read them.
+    expect(m.calls[1]).toBe(`agentStart ${agentName('#7', session.sessionId)} --session-id ${session.sessionId} --no-extensions --extension ${roleModule}`)
     expect(session.watch).toContain('superagent')
   })
 
