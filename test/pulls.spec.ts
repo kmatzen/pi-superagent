@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { followedPulls, parsePull, parseThread, PullFollower, threadOfPull, threadUrl, type PullApi, type PullState } from '../src/pi/pulls.ts'
+import { unreadablePullError } from '../src/pi/gh-api.ts'
 import { REPLY_MARKER, type IssueComment, type PrReview } from '../src/pi/source-github.ts'
 import type { Ticket, Trigger } from '../src/core/index.ts'
 
@@ -56,6 +57,7 @@ function follower(api: Partial<PullApi>, open: string[] | null = [],
   const reopened: string[] = []
   const received: Trigger[] = []
   const warned: string[] = []
+  const blind: Array<{ id: string; repo: string; number: number; problem: string }> = []
   let seen: Ticket[] = []
   let clock = Date.now()
   const full: PullApi = {
@@ -77,6 +79,7 @@ function follower(api: Partial<PullApi>, open: string[] | null = [],
     },
     receive: t => received.push(t),
     warn: event => warned.push(event),
+    blind: (thread, pull, problem) => blind.push({ id: thread.id, repo: pull.repo, number: pull.number, problem }),
     now: () => clock, everyMs: 120_000,
     ...(limits.maxReads === undefined ? {} : { maxReads: limits.maxReads }),
     ...(limits.budgetMs === undefined ? {} : { budgetMs: limits.budgetMs }),
@@ -86,7 +89,7 @@ function follower(api: Partial<PullApi>, open: string[] | null = [],
   const recorded = (...threads: string[]) => [{ follows: threads.map(t => ({ thread: `github:${t}`, own: true, closed: { at: created, outcome: 'closed' as const } })) }] as unknown as Ticket[]
   // The fake `reopened` reads the tickets of the pass in hand, the way the router reads them out of its store.
   const reconcile = (tickets: Ticket[]) => { seen = tickets; return f.reconcile(tickets) }
-  return { f, kv, calls, closed, reopened, received, warned, following, recorded, reconcile, tick: (ms: number) => { clock += ms } }
+  return { f, kv, calls, closed, reopened, received, warned, blind, following, recorded, reconcile, tick: (ms: number) => { clock += ms } }
 }
 
 const openPull: PullState = { open: true, merged: false, createdAt: created }
@@ -117,7 +120,7 @@ describe('following a ticket\'s pull requests', () => {
     let broken = true
     const t = follower({
       pull: async () => {
-        if (broken) throw new Error('HTTP 404 reading pull request private/secret#31, and this account cannot read private/secret either')
+        if (broken) throw unreadablePullError('HTTP 404 reading pull request private/secret#31, and this account cannot read private/secret either')
         return openPull
       },
     })
@@ -134,6 +137,41 @@ describe('following a ticket\'s pull requests', () => {
     await t.f.reconcile(t.following('private/secret#31'))
     expect(t.warned, 'and it says when the read comes back').toEqual(['pull.read_failed', 'pull.read_readable'])
     expect(t.closed, 'the follow survived to be read').toEqual([])
+  })
+
+  it('names a pull request it can never read as a blind spot, on every pass that finds it', async () => {
+    // Measured 2026-11-09: the router's account cannot read `kmatzen/pi-superagent`, the repository its own workers
+    // push into, nor `matzen_adobe/fleet-board`. The read fails identically forever, and the only trace was a WARN
+    // in the router's log — board #227 sat "waiting on one click" through 146 receipts of that silence. The ticket
+    // is where the operator reads, so that is where a permanent 404 belongs.
+    const t = follower({ pull: async () => { throw unreadablePullError('HTTP 404 reading pull request private/secret#31, and this account cannot read private/secret either') } })
+    await t.reconcile(t.following('private/secret#31'))
+    expect(t.blind).toEqual([{ id: 'private/secret#31', repo: 'private/secret', number: 31, problem: expect.any(String) }])
+    expect(t.f.isBlind('private/secret#31'), 'the router knows this thread is a fact it cannot see').toBe(true)
+    t.tick(120_000)
+    await t.reconcile(t.following('private/secret#31'))
+    expect(t.blind, 'a ticket opened later is told too — the dedup is the caller\'s journal, not this call').toHaveLength(2)
+  })
+
+  it('does not call a rate limit a permanent blind spot, and clears the blind spot when the read comes back', async () => {
+    const transient = follower({ pull: async () => { throw new Error('gh api exited 1: rate limited') } })
+    await transient.reconcile(transient.following('other/lib#5'))
+    expect(transient.blind, 'a read that may succeed next pass is not a door to ask the operator to open').toEqual([])
+    expect(transient.f.isBlind('other/lib#5')).toBe(false)
+
+    let blind = true
+    const t = follower({
+      pull: async () => {
+        if (blind) throw unreadablePullError('HTTP 404 reading pull request private/secret#31, and this account cannot read private/secret either')
+        return openPull
+      },
+    })
+    await t.reconcile(t.following('private/secret#31'))
+    expect(t.f.isBlind('private/secret#31')).toBe(true)
+    blind = false
+    t.tick(120_000)
+    await t.reconcile(t.following('private/secret#31'))
+    expect(t.f.isBlind('private/secret#31'), 'the grant lands, and the terminal end is a fact again').toBe(false)
   })
 
   it('reopens a follow whose recorded close GitHub denies, and asks about it once per start', async () => {
@@ -163,7 +201,7 @@ describe('following a ticket\'s pull requests', () => {
   })
 
   it('says so, once, when the repair cannot be checked, and keeps the close as it was', async () => {
-    const t = follower({ pull: async () => { throw new Error('HTTP 404 reading pull request private/secret#31, and this account cannot read private/secret either') } })
+    const t = follower({ pull: async () => { throw unreadablePullError('HTTP 404 reading pull request private/secret#31, and this account cannot read private/secret either') } })
     await t.reconcile(t.recorded('private/secret#31'))
     t.tick(120_000)
     await t.reconcile(t.recorded('private/secret#31'))

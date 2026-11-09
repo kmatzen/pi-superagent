@@ -232,6 +232,21 @@ export function ghApi(options: GithubApiOptions): GithubApi {
   }
 }
 
+/**
+ * A pull request this account can never read: GitHub answers **404** for a private repository the token cannot
+ * see. The mark is the point — it separates "I will never know" from "the network failed this time". The first
+ * is a fact a person can act on (grant this account read on that repository) and a ticket must be told it; the
+ * second is a retry. Measured 2026-11-09: the router's account cannot see `kmatzen/pi-superagent` or
+ * `matzen_adobe/fleet-board`, the two repositories its workers push into, so every follow there is permanent
+ * blindness — 24 unreadable reads in a day, one of them ending a ticket by telling its board the merged pull
+ * request had "closed without merging".
+ */
+export interface UnreadablePullError extends Error { readonly unreadablePull: true }
+export const unreadablePullError = (message: string): UnreadablePullError =>
+  Object.assign(new Error(message), { unreadablePull: true as const })
+export const isUnreadablePull = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && (error as { unreadablePull?: unknown }).unreadablePull === true
+
 /** Pull requests in any repository the operator's gh can read, by number: the ones tickets follow. */
 export function ghPulls(options: GhOptions = {}): PullApi {
   const call = ghCall(options)
@@ -263,7 +278,7 @@ export function ghPulls(options: GhOptions = {}): PullApi {
       } catch (error) {
         if (!/HTTP 404|Not Found/i.test(String(error))) throw error
         if (await repoReadable(repo)) return undefined
-        throw new Error(`HTTP 404 reading pull request ${repo}#${number}, and this account cannot read ${repo} either: `
+        throw unreadablePullError(`HTTP 404 reading pull request ${repo}#${number}, and this account cannot read ${repo} either: `
           + 'GitHub answers 404 for a private repository it cannot see, so the pull request is unreadable, not absent')
       }
     },

@@ -9,6 +9,7 @@ import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from
 import { SqliteRepositories } from '../src/pi/store.ts'
 import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
 import type { PullApi, PullState } from '../src/pi/pulls.ts'
+import { unreadablePullError } from '../src/pi/gh-api.ts'
 import { paneKeysScrubbed, scrubPaneEnv } from './setup.ts'
 
 const dirs: string[] = []
@@ -823,6 +824,32 @@ describe('a pull request per ticket', () => {
     await f.running.tick()
     expect(ticket().ended).toMatchObject({ outcome: 'closed', by: 'executor' })
     expect(f.receipts('491')).toMatch(/closed without merging[\s\S]*A comment here starts the work again/)
+  })
+
+  it('a pull request this account can never read is said on the ticket, once, and names the door', async () => {
+    // Measured 2026-11-09: the router's GitHub account gets 404 from `kmatzen/pi-superagent` — the repository its
+    // own workers push into — and from `matzen_adobe/fleet-board`, where board #227 has been "waiting on one
+    // click" through 146 receipts. 24 reads failed that way in one day, each answer identical and permanent, and
+    // the only trace was a WARN in the router's own log. A ticket parked on such a pull request ends by nothing,
+    // so the ticket has to say what blocks it and what grant unblocks it.
+    const pulls = pullsFake()
+    const blind: PullApi = {
+      ...pulls.api,
+      pull: async (repo, n) => {
+        if (repo === 'private/secret') {
+          throw unreadablePullError(`HTTP 404 reading pull request ${repo}#${n}, and this account cannot read ${repo} either`)
+        }
+        return pulls.api.pull(repo, n)
+      },
+    }
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: blind })
+    const ticket = await working(f, '492')
+    f.workers[0]!.report!({ state: 'ready', summary: 'pushed it', pullRequests: ['https://github.com/private/secret/pull/5'] })
+    await f.running.tick()
+    expect(f.receipts('492')).toMatch(/I cannot follow https:\/\/github\.com\/private\/secret\/pull\/5[\s\S]*grant that account read access to `private\/secret`/)
+    expect(ticket().ended, 'an unreadable pull request ends nothing').toBeUndefined()
+    for (let pass = 0; pass < 3; pass++) await f.running.tick()
+    expect(f.receipts('492').split('I cannot follow'), 'once per ticket, not once per poll').toHaveLength(2)
   })
 
   it('a ticket with two pull requests ends only when both are done, and each is named by what it did', async () => {

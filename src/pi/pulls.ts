@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto'
 import { isListed } from './authors.ts'
 import { REPLY_MARKER, type IssueComment, type PositionStore, type PrReview } from './source-github.ts'
+import { isUnreadablePull } from './gh-api.ts'
 import type { Ticket, ThreadRef, Trigger } from '../core/index.ts'
 
 export interface PullRef { repo: string; number: number }
@@ -80,6 +81,19 @@ export interface FollowerOptions {
   reopened(thread: ThreadRef, pull: PullRef): number
   receive(trigger: Trigger): void
   warn(event: string, fields: Record<string, unknown>): void
+  /**
+   * A followed pull request this account can **never** read: GitHub answers 404 for a repository the token cannot
+   * see, so the read fails identically forever. Called on every pass that finds it, with the reason, so the router
+   * can say it on the tickets waiting there — a ticket parked on a pull request nobody can read stalls with no
+   * reason a person can act on, and the only trace was a WARN in the router's own log. Measured 2026-11-09: the
+   * router's account cannot read `kmatzen/pi-superagent` (where its own pull requests live) or
+   * `matzen_adobe/fleet-board` (where board #227 has been "waiting on one click" for 146 receipts), and 24 reads
+   * failed that way in a day without one word to a ticket.
+   *
+   * Fired per pass, not deduped here: the caller's journal is per ticket, so a ticket created after the first
+   * notice still learns it, and a restart does not say it twice.
+   */
+  blind?(thread: ThreadRef, pull: PullRef, problem: string): void
   now?: () => number
   /** How often a pull request outside the watched repository is read: three calls each time, against GitHub's hourly limit. */
   everyMs?: number
@@ -119,6 +133,13 @@ export class PullFollower {
   /** Threads whose state read has already been complained about: a follow in a repository the account cannot see
    *  fails every interval, and 720 identical lines a day is how the one real line gets buried. */
   private readonly unread = new Set<string>()
+  /** Threads whose state this account cannot read at all, for as long as the read keeps failing. A terminal end
+   *  that rests on one of them is a statement about a fact the router cannot see: `pullEnded` asks this before it
+   *  says "closed without merging". */
+  private readonly blindThreads = new Set<string>()
+
+  /** Whether the last state read of this thread failed as permanently unreadable (404 on an invisible repository). */
+  isBlind(threadId: string): boolean { return this.blindThreads.has(threadId) }
   /** Threads whose recorded close this process has already re-checked. A close is a fact about the past, so one
    *  look per start is enough to catch the ones a failed read wrote; re-checking them every poll would buy nothing. */
   private readonly probed = new Set<string>()
@@ -227,12 +248,17 @@ export class PullFollower {
       // Unknown is not closed. Ending the wait on a read that failed posts "closed without merging, so this ticket
       // ends" on a pull request that is open and ready — measured 2026-11-09, twice in one day, on the router's
       // own fix, because its account cannot see the private repository that pull lives in.
+      const permanent = isUnreadablePull(error)
+      if (permanent) this.blindThreads.add(id)
       if (!this.unread.has(id)) {
         this.unread.add(id)
-        this.options.warn('pull.read_failed', { thread: id, error: String(error).slice(0, 200) })
+        this.options.warn('pull.read_failed', { thread: id, permanent, error: String(error).slice(0, 200) })
       }
+      // Permanent blindness is the operator's to fix — a read access grant — so it is said where they read.
+      if (permanent) this.options.blind?.(threadOfPull(pull, this.options.home), pull, String(error).slice(0, 200))
       return
     }
+    this.blindThreads.delete(id)
     if (this.unread.delete(id)) this.options.warn('pull.read_readable', { thread: id })
     // A pull request GitHub no longer has cannot be merged, so the ticket's wait ends here. `undefined` is GitHub's
     // answer for one *to a reader that can see the repository*: a repository this account cannot read throws above

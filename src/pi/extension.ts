@@ -331,6 +331,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
    * a person saying go again, and both doors stay open.
    */
   const closedKey = 'closed-issues'
+  /** Which (ticket, pull request) pairs have already been told their pull request is unreadable — see `blind` below. */
+  const blindKey = 'pull-blind-notices'
   const closedHere = (): Record<string, string> => repos.kv.get<Record<string, string>>(closedKey) ?? {}
   const closing: string[] = []
   const finishIssue = (ticketId: string): void => {
@@ -453,8 +455,13 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const channel = ticket?.channels[0]
     if (!ticket || !channel || ticket.ended?.by !== 'executor' || (outcome !== 'merged' && outcome !== 'closed')) return
     const pulls = (ticket.follows ?? []).filter(f => f.own && f.closed)
-      .flatMap(f => { const pull = parseThread(f.thread.replace(/^github:/, ''), home)
-        return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome }] : [] })
+      .flatMap(f => {
+        const id = f.thread.replace(/^github:/, '')
+        const pull = parseThread(id, home)
+        // `confirmed`: the state of a pull request in a repository this account cannot read is not a fact the router
+        // observed, it is the last thing a read wrote down. A terminal end must not state an outcome it cannot see.
+        return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome, confirmed: !follower.isBlind(id) }] : []
+      })
     outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, pulls) })
     // The merge was the work landing: with the pull request done, the ticket has nothing left to wait on.
     finishIssue(ticket.id)
@@ -469,6 +476,35 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     ...(cfg.pullReadBudgetMs === undefined ? {} : { budgetMs: cfg.pullReadBudgetMs }),
     receive: trigger => { engine.receive(trigger) },
     warn: (event, fields) => log.line('warn', event, fields),
+    // A pull request this account can never read is the operator's to unblock, and the ticket is where they read.
+    // Once per ticket per pull request, for the life of the store: a router post is speech on a thread, and speech
+    // is what recruits a session (#309), so the journal, not the pass, is what keeps the quiet.
+    blind: (thread, pull, problem) => {
+      const key = `github:${thread.id}`
+      const journal = repos.kv.get<Record<string, string>>(blindKey) ?? {}
+      const at = deps.now?.() ?? new Date().toISOString()
+      let said = 0
+      for (const ticket of repos.tickets.open()) {
+        if (!ticket.follows?.some(f => f.thread === key && !f.closed)) continue
+        const channel = ticket.channels[0]
+        const mark = `${ticket.id}|${thread.id}`
+        if (!channel || journal[mark]) continue
+        outbox.send({
+          id: `pull-blind:${ticket.id}:${thread.id}`,
+          channel, kind: 'notice', ticketId: ticket.id,
+          text: `${channel.thread}: I cannot follow ${pullUrl(pull)}, so this ticket can never end on it. `
+            + `GitHub answers 404 for \`${pull.repo}\`, which is what it says of a repository the account I run as `
+            + `(${cfg.githubSelf ?? cfg.self}) cannot read — I cannot tell when this pull request merges, and I will `
+            + `not guess. Two doors: grant that account read access to \`${pull.repo}\`, or comment here when the work `
+            + `has landed and I will take your word for it.\n\n${problem}`,
+        })
+        journal[mark] = at
+        said++
+        log.line('warn', 'pull.blind_notice', { ticket: ticket.id, thread: thread.id, url: pullUrl(pull) })
+      }
+      if (said) repos.kv.set(blindKey, Object.fromEntries(Object.entries(journal)
+        .filter(([, when]) => Date.parse(when) > Date.parse(at) - 30 * 86_400_000)))
+    },
     closed: (thread, pull, outcome, at) => {
       const key = `github:${thread.id}`
       const waiting = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && !f.closed)).map(t => t.id)

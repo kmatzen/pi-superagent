@@ -111,7 +111,9 @@ closed and calls `threadClosed`. For another repository it checks every two minu
 comments and reviews through the qualified thread ID, `owner/repo#N`. A close GitHub denies — the
 pull request is open — is a close a failed read wrote down, so the follower re-binds it once per start
 for the tickets still waiting (`pull.reopened`); tickets that already ended stay ended, for the operator
-to reopen.
+to reopen. A 404 on a repository the account cannot see is permanent blindness, not a transient fault: the
+follower marks the thread blind, tells the tickets waiting on it once each (`pull.blind_notice`), and refuses to
+state a terminal outcome it cannot see, because a record written by a failed read is not an observation.
 
 `receipts.ts` formats reports, questions, crashes and launch failures for the GitHub thread.
 `outbox.ts` queues messages by ID. Failed posts remain pending, and a recurring launch failure

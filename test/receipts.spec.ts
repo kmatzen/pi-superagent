@@ -46,4 +46,24 @@ describe('what the thread reads when a run ends', () => {
     expect(mixed).toMatch(/pull\/9 merged and https:\/\/github.com\/o\/r\/pull\/12 closed without merging/)
     expect(mixed).toMatch(/ends with the work that landed/)
   })
+
+  it('an outcome the router cannot see is never stated as one', () => {
+    // Measured 2026-11-09 on board #309: the router's account cannot read the repository its own pull requests
+    // live in, so the close it held for `kmatzen/pi-superagent#31` came from a read that failed. The board was
+    // told "pull/31 closed without merging, so this ticket ends" about a pull request that merged, and the issue
+    // was closed on that sentence. A fact nobody observed is said as a fact, and a person acts on it.
+    const blind = { url: 'https://github.com/o/r/pull/9', outcome: 'closed' as const, confirmed: false }
+    const text = pullEndText('#400', [blind])
+    expect(text).not.toMatch(/closed without merging/)
+    expect(text).toMatch(/I cannot read https:\/\/github.com\/o\/r\/pull\/9/)
+    expect(text).toMatch(/say so here and I will record the merge/)
+    expect(text).toMatch(/grant my account read/)
+    // A ticket with one observed merge and one pull request it cannot see names the merge as a fact and the
+    // other as unverified — the merged work must not be dragged into the blind one's uncertainty.
+    const both = pullEndText('#400', [{ url: 'https://github.com/o/r/pull/9', outcome: 'merged' },
+      { url: 'https://github.com/o/r/pull/12', outcome: 'closed', confirmed: false }])
+    expect(both).toMatch(/merged: https:\/\/github\.com\/o\/r\/pull\/9\. This ticket is done\./)
+    expect(both).toMatch(/I cannot read https:\/\/github.com\/o\/r\/pull\/12/)
+    expect(both).not.toMatch(/pull\/12 closed without merging/)
+  })
 })

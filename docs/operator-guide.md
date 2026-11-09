@@ -300,3 +300,29 @@ The consequence to plan for: a worker can no longer run `gh` as you, so it canno
 with your login. It works in its checkout, commits to its branch, and reports; the router's receipts and
 reports carry the ticket. To hand a worker GitHub access, give it a fine-grained single-repository token
 in that home directory — do not restore the ambient login, which is the operator's whole account.
+
+## What the router cannot read (2026-11-10)
+
+A ticket that follows a pull request ends when the router reads that pull request land. When the router's GitHub
+account cannot see the repository, GitHub answers 404 — the same answer it gives for a pull request that does not
+exist — so the router keeps the ticket waiting (it will not end a ticket on a guess) and says so on the ticket:
+
+```
+#227: I cannot follow https://github.com/matzen_adobe/fleet-board/pull/69, so this ticket can never end on it.
+GitHub answers 404 for `matzen_adobe/fleet-board`, which is what it says of a repository the account I run as
+(matzenbot_adobe) cannot read … Two doors: grant that account read access to `matzen_adobe/fleet-board`, or
+comment here when the work has landed and I will take your word for it.
+```
+
+Check it with the token the router reads with, and never paste the token anywhere:
+
+```sh
+GH_TOKEN=$(cat ~/.pi/superagent/github-token) gh api repos/OWNER/REPO --jq .full_name
+```
+
+A 404 there is the whole cause: add that account as a read-only collaborator, or give the router a token scoped to
+the repository. In the log the lines are `pull.read_failed` (`permanent: true` on a 404 for a repository the account
+cannot see) and `pull.blind_notice`, said once per ticket per pull request, not once per poll. A terminal receipt
+refuses to state an outcome it never saw: where the ticket's record says a pull request closed and the router cannot
+read it, it says it cannot read it and asks, instead of claiming "closed without merging" — measured 2026-11-09 on
+board #309, where the sentence was false and the issue closed on it.

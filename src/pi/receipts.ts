@@ -47,13 +47,32 @@ export function receiptText(thread: string, origin: ReportOrigin, run: ReportedR
  * The engine ends a ticket with its pull requests without a word; this is the word, on the issue. Each pull
  * carries its own outcome, because a ticket can open several: the engine ends it on the LAST close, and
  * naming every pull by that one outcome told the person that a merged pull request had been closed.
+ *
+ * `confirmed: false` says the outcome is a record, not an observation: the state of a pull request in a repository
+ * this account cannot read (GitHub answers 404) is exactly the fact the router cannot see, and the record it holds
+ * was written by a read that failed. Measured 2026-11-09 on board #309: the router closed the ticket's issue with
+ * "pull/31 closed without merging, so this ticket ends" about a pull request that merged, in a repository it cannot
+ * read. An outcome nobody observed is stated as one, and the operator acts on it.
  */
-export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; outcome: 'merged' | 'closed' }>): string {
+export function pullEndText(thread: string,
+  pulls: ReadonlyArray<{ url: string; outcome: 'merged' | 'closed'; confirmed?: boolean }>): string {
   const urls = (list: string[]): string => list.join(', ') || 'its pull request'
   const merged = pulls.filter(p => p.outcome === 'merged').map(p => p.url)
-  const closed = pulls.filter(p => p.outcome === 'closed').map(p => p.url)
-  if (!closed.length) return `${thread} merged: ${urls(merged)}. This ticket is done.`
-  if (!merged.length) return `${thread}: ${urls(closed)} closed without merging, so this ticket ends. A comment here starts the work again.`
-  return `${thread}: ${urls(merged)} merged and ${urls(closed)} closed without merging, so this ticket ends with the work that landed. A comment here starts the work again.`
+  const closed = pulls.filter(p => p.outcome === 'closed' && p.confirmed !== false).map(p => p.url)
+  const unverified = pulls.filter(p => p.outcome === 'closed' && p.confirmed === false).map(p => p.url)
+  const seen = merged.length + closed.length
+  const blind = unverified.length
+    ? `I cannot read ${urls(unverified)}: the account I run as gets 404 from that repository, so the record that `
+      + 'it closed came from a read that failed, not from GitHub, and I have not seen it end. If it merged, say so '
+      + 'here and I will record the merge; grant my account read on that repository and I will read it myself.'
+    : ''
+  const head = !seen
+    ? `${thread}: this ticket ends.`
+    : !closed.length
+      ? `${thread} merged: ${urls(merged)}. This ticket is done.`
+      : !merged.length
+        ? `${thread}: ${urls(closed)} closed without merging, so this ticket ends. A comment here starts the work again.`
+        : `${thread}: ${urls(merged)} merged and ${urls(closed)} closed without merging, so this ticket ends with the work that landed. A comment here starts the work again.`
+  return unverified.length ? (seen ? `${head}\n\n${blind}` : `${head} ${blind}`) : head
 }
 

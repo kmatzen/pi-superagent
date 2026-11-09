@@ -81,6 +81,28 @@ unasked, and an end a person should undo is the operator’s door, not the route
 because the router writing on a thread is what recruits a session — the same reason its receipt is not
 inbound speech.
 
+**Name the pull requests the router can never read.** The two rules above keep a ticket waiting when a read
+is unreadable, which is right for a minute and wrong forever: a repository the account cannot see answers 404
+identically on every poll, so the ticket waits on a fact that will never arrive, and the only trace of the reason
+is one WARN line in a log no operator reads. Measured 2026-11-09 on this deployment: the router’s account reads
+the watched board and `Research-Adobe/*`, and gets 404 from `kmatzen/pi-superagent` — the repository its own
+workers push into — and from `matzen_adobe/fleet-board`, where a MERGE ticket has been “waiting on one click”
+through 146 receipts of its own story. 24 reads failed that way in one day. A permanent 404 is now marked as a
+blind spot (`pull.read_failed` carries `permanent: true`), the tickets waiting on it are told once each
+(`pull.blind_notice`), and the sentence names what unblocks it: grant *this* account read on *that* repository, or
+say here that the work landed. It is fired on every pass that finds the blind spot and deduped by the caller’s
+journal per (ticket, pull request), so a ticket that walks into it later is told and a ticket is never told twice.
+The transient failure — a rate limit, a network fault — is not blind: it may answer next pass, and a door a person
+cannot open is not worth an interruption.
+
+**Say an outcome only when it was seen.** A terminal end reads the ticket’s follow records, and a record written
+by a read that failed is not an observation. Measured 2026-11-09 on board #309: the ticket’s follow on
+`kmatzen/pi-superagent#31` held `closed` written by the pre-fix reader, the pull request merged in a repository the
+router cannot read, and the repair above could not repair it because the read that proves a merge *is* the read that
+is blind. The board was told “pull/31 closed without merging, so this ticket ends”, and the issue closed on that
+sentence. An unconfirmed close is now said as unconfirmed: what the router cannot read, what the record claims, and
+the two ways to settle it — say it here, or grant the read.
+
 **Say a report nobody received.** A worker's report travels: the pane appends it to
 `reports.jsonl`, the router reads the file and files it on the ticket. When the ticket has no
 live worker by then — it ended on the worker's own report, and a queued copy of its mandate
