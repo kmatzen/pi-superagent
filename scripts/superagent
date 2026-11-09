@@ -186,7 +186,9 @@ start() {
     sleep 0.5
   done
   if nc -z 127.0.0.1 "$PANEL_PORT" 2>/dev/null; then
-    echo "superagent: port $PANEL_PORT is still busy after 10s; refusing to start a session pi would crash on" >&2
+    # Name the port and the pid(s) holding it: "pid(s): 4242" reads as "something else on this box owns it",
+    # where "refusing to start" alone reads as "the commit broke the start script".
+    echo "superagent: port $PANEL_PORT is still busy after 10s (pid(s): $(lsof -ti "tcp:${PANEL_PORT}" 2>/dev/null | tr '\n' ' ')); refusing to start a session pi would crash on. Move it with PI_SUPERAGENT_PANEL_PORT." >&2
     lsof -nP -i "tcp:${PANEL_PORT}" >&2 || true
     return 1
   fi
