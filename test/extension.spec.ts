@@ -9,6 +9,7 @@ import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from
 import { SqliteRepositories } from '../src/pi/store.ts'
 import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
 import type { PullApi, PullState } from '../src/pi/pulls.ts'
+import { paneKeysScrubbed, scrubPaneEnv } from './setup.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ext-')); dirs.push(d); return d }
@@ -650,6 +651,19 @@ describe('startup and recovery', () => {
     const run = spawnSync('herdr', ['--version'], { encoding: 'utf8' })
     expect(run.status).not.toBe(0)
     expect(run.stderr).toContain('tests never call the real herdr')
+  })
+
+  it("the suite cannot reach the real herdr by path either: a worker pane's HERDR_* reaches every spawn", () => {
+    // The test above proves `herdr` *by name* is the stub. A pane's HERDR_BIN_PATH is an absolute path to the
+    // real binary, which walks past PATH, and the specs spread process.env into the script under test — so a
+    // leak is invisible to a PATH guard, and the live herdr's stale-tab sweep closes the running router's tabs.
+    const realBin = process.execPath   // a real executable, standing in for the pane's /opt/homebrew/bin/herdr
+    const scrubbed = scrubPaneEnv({ HERDR_BIN_PATH: realBin, HERDR_SOCKET_PATH: '/run/herdr.sock', PATH: '/bin' })
+    expect(scrubbed.sort(), 'a HERDR_BIN_PATH pointing at a real binary is scrubbed, not stubbed')
+      .toEqual(['HERDR_BIN_PATH', 'HERDR_SOCKET_PATH'])
+    const seen = spawnSync(process.execPath,
+      ['-e', 'console.log(Object.keys(process.env).filter(k=>k.startsWith("HERDR_")).join(" "))'], { encoding: 'utf8' })
+    expect(seen.stdout.trim(), `no pane environment survives into a spawned process (this run scrubbed ${paneKeysScrubbed.length})`).toBe('')
   })
 
   it('a herdr failure during the startup sweep does not stop the router from working', async () => {
