@@ -28,8 +28,15 @@ export interface CredentialFinding {
 
 /** `scheme://user:secret@host`. A bare `user@host` names an account; only the password half is a secret. */
 const USERINFO = /([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/\s@"]*):([^/\s@"]*)@/
-/** GitHub's own token shapes: a `credential.helper` line can carry one with no URL around it. */
-const TOKEN = /\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})\b/g
+/**
+ * GitHub's own token shapes: a `credential.helper` line can carry one with no URL around it. Deliberately
+ * not global: `.test()` on a global regex advances `lastIndex`, and the next call resumes there, so a value
+ * whose token sits before the previous match ends scans clean. Measured with two token-bearing remotes in
+ * one file — origin reported, backup dropped, deploy allowed. The guard does not get to miss the second one.
+ */
+const TOKEN = /\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})\b/
+/** The same shapes, global, for masking *every* occurrence inside one value. */
+const TOKENS = new RegExp(TOKEN.source, 'g')
 
 /** True when a config value carries a credential: userinfo in a URL, or a GitHub token in plain text. */
 export const holdsCredential = (value: string): boolean => USERINFO.test(value) || TOKEN.test(value)
@@ -37,7 +44,7 @@ export const holdsCredential = (value: string): boolean => USERINFO.test(value) 
 /** Replace the secret with `***`, keeping the scheme, the account name and the host so the finding is locatable. */
 export const maskSecret = (value: string): string => value
   .replace(USERINFO, (_all, scheme: string, user: string) => `${scheme}://${user}:***@`)
-  .replace(TOKEN, (token: string) => `${token.slice(0, 4)}***`)
+  .replace(TOKENS, (token: string) => `${token.slice(0, 4)}***`)
   .trim()
   .slice(0, 140)
 
@@ -123,7 +130,7 @@ export function findEmbeddedGitCredentials(dir: string): CredentialFinding[] {
   return findings
 }
 
-/** The directories under a worktree root, bounded: a live root held 75 ticket checkouts, and this runs at startup. */
+/** The directories under a worktree root, bounded: a live root held 84 ticket directories, and this runs at startup. */
 export function childDirs(root: string, limit = 300): string[] {
   if (!existsSync(root)) return []
   try {
@@ -134,6 +141,29 @@ export function childDirs(root: string, limit = 300): string[] {
   } catch {
     return []
   }
+}
+
+/** A directory holding a checkout: `.git` as a directory, or as the file a linked worktree or submodule leaves. */
+const isCheckout = (dir: string): boolean => existsSync(join(dir, '.git'))
+
+/**
+ * The checkouts under a worktree root, one level past the ticket directory.
+ *
+ * `prepareWorkspace` makes `<root>/<ticket>/` and the product's own clone lands there. A worker told "clone the
+ * repository into your workspace" lands in `<root>/<ticket>/repo/` — measured on the deployment box: 26 of the
+ * 29 live ticket checkouts are that shape, and the one holding the exposed `repo`-scoped token was one of them.
+ * A scan that stops at the ticket directory reports a leaking deployment clean, so it goes one level down and
+ * stops: only a directory that is itself a checkout counts, which keeps a `node_modules` full of nested `.git`
+ * directories out of the walk.
+ */
+export function checkoutDirs(root: string, limit = 300): string[] {
+  const dirs: string[] = []
+  for (const dir of childDirs(root, limit)) {
+    dirs.push(dir)
+    if (isCheckout(dir)) continue
+    for (const sub of childDirs(dir, 40)) if (isCheckout(sub)) dirs.push(sub)
+  }
+  return dirs
 }
 
 /** The one-line fix, with no secret in it: the URL stops being the credential store. */

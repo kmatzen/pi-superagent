@@ -138,7 +138,11 @@ the repository, so `gh auth git-credential` is not a usable store for this check
 proved it failed with `Repository not found` until the inherited helpers were cleared.
 
 `PI_SUPERAGENT_WATCHED_CHECKOUTS` adds checkouts to the scan. The deployment's own checkout and the ticket
-checkouts under the worktree root are always scanned.
+checkouts under the worktree root are always scanned, and the ticket checkouts are looked for one level past
+the ticket directory: the product clones into `<worktrees>/<ticket>/`, while a worker told "clone into your
+workspace" clones into `<worktrees>/<ticket>/repo/` — measured, 26 of the 29 live checkouts are the second
+shape. A linked worktree is read through its common dir, because that is where its remotes live. The scan
+descends one level and no deeper, so a `node_modules` full of nested `.git` directories costs nothing.
 
 Rotating a token a URL has exposed is a web-UI action: GitHub exposes no API for creating or rotating
 personal access tokens (a classic token asks 404), and a `ghp_` classic token cannot be scoped narrower than
