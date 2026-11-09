@@ -9,8 +9,20 @@ export interface ReportTool {
 /** Who ended a run: the worker, a crash, a run with no report ('silent'), or a launch that failed. */
 export type ReportOrigin = 'worker' | 'crash' | 'silent' | 'launch'
 
+/**
+ * Whether the router took the report. `dropped` is the answer a worker never used to get: the ticket it
+ * reported on had no live worker, so nothing was recorded and no reply was posted, and the tool still said
+ * `reported`. Measured 2026-11-09 on #255 — a report at 08:59:23Z ended the run, a queued copy of the mandate
+ * surfaced at ~09:01Z, the worker ran again and reported, and the issue gained no comment. Every later run of
+ * that ticket started from the belief that the previous one had spoken.
+ */
+export type ReportOutcome = 'recorded' | 'dropped'
+
 export type Reporter = (state: string, summary: string, question?: string | null, origin?: ReportOrigin,
-                        pullRequests?: readonly string[]) => void
+                        pullRequests?: readonly string[]) => ReportOutcome | void
+
+const NOT_RECORDED = 'not recorded: this ticket has no running worker, so nothing was written to it and no reply was posted. '
+  + 'End your turn now. A comment on the issue starts the work again; reporting again reaches nobody.'
 
 export function reportTool(report: Reporter): ReportTool {
   return {
@@ -28,8 +40,10 @@ export function reportTool(report: Reporter): ReportTool {
     execute: (_id, args) => {
       const a = args as unknown as { state: string; summary: string; question?: string; pullRequests?: unknown }
       const pulls = Array.isArray(a.pullRequests) ? a.pullRequests.filter((p): p is string => typeof p === 'string') : []
-      report(a.state, a.summary, a.question ?? null, undefined, pulls.length ? pulls : undefined)
-      return { content: [{ type: 'text', text: 'reported' }] }
+      const outcome = report(a.state, a.summary, a.question ?? null, undefined, pulls.length ? pulls : undefined)
+      // A reporter that answers nothing (the worker pane's file bridge) cannot know the verdict; say the plain
+      // thing. The router process says `dropped` loudly in its own log, which is where the operator reads it.
+      return { content: [{ type: 'text', text: outcome === 'dropped' ? NOT_RECORDED : 'reported' }] }
     },
   }
 }

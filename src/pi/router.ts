@@ -64,6 +64,17 @@ export interface RouterConfig {
   allowDelegation?: boolean
   /** Login patterns the router hears; set, the list replaces the write-access rule (see scopeOf). */
   allowed?: ReadonlySet<string>
+  /**
+   * Leave the watched repository's issue open when its ticket finishes with nothing to wait on. Off by default:
+   * an open, labelled issue is a request intake hears again, which is how a finished ticket kept recruiting
+   * workers (issue #309). `PI_SUPERAGENT_KEEP_ISSUES_OPEN=1` restores it.
+   */
+  keepIssuesOpen?: boolean
+  /**
+   * Times the same conclusion may be reported on one ticket before it stops recruiting sessions and says so on
+   * itself. Default 3. `PI_SUPERAGENT_REPORT_CAP`.
+   */
+  reportCap?: number
 }
 
 export interface SdkSurface {
