@@ -147,7 +147,85 @@ describe('GithubSource', () => {
     expect(await f.source.poll()).toHaveLength(1)
     rows[0]!.updatedAt = new Date().toISOString()
     expect(await f.source.poll(), 'the label is still on the issue, and the grant journal is what stops it').toHaveLength(0)
-    expect(warned[0]).toMatchObject({ event: 'intake.label_failed', issue: '#206' })
+    expect(warned[0], 'this fixture has no label-actor read, and says so once').toMatchObject({ event: 'intake.label_actor_unavailable', issue: '#206' })
+    expect(warned.find(w => w.event === 'intake.label_failed'), 'the label write is complained about too').toMatchObject({ issue: '#206' })
+  })
+
+  it('a label older than the router\'s own reply is an ask it answered, not a second one', async () => {
+    // Lock 2, for the case the grant journal cannot outlive: the journal is gone (a rebuilt database, the
+    // 4000-key cap, a router moved to a new machine) and the issue still carries the label its own receipts
+    // followed. GitHub kept the order: the label at 21:46, and every one of #255's dispatches woke on a label
+    // trigger its own receipt had just re-minted, all of them human:true.
+    const rows = [issue({ issue: 255, title: 'MERGE: the pull request', author: 'superagent[bot]', labels: ['agent-requested'] })]
+    const f = fixture([], rows)
+    f.store.set('source:github:o/r:issues', ['#255'])
+    f.api.labelEvent = async () => ({ actor: 'superagent[bot]', at: new Date(Date.now() - 3 * HOUR).toISOString() })
+    f.api.commentsFor = async () => [comment({
+      issue: 255, author: 'superagent[bot]', at: new Date(Date.now() - HOUR).toISOString(),
+      body: '#255 ready: the pull request merged <!-- superagent -->',
+    })]
+    const warned: Array<Record<string, unknown>> = []
+    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested',
+                                         onWarn: (event, fields) => warned.push({ event, ...fields }) }, f.store)
+    expect(await f.source.poll(), 'a receipt after the label proves the ask was answered').toHaveLength(0)
+    expect(await f.source.poll(), 'a refused ask is spent, so it says nothing twice').toHaveLength(0)
+    expect(f.labelsOff, 'and its label leaves the issue, so the board reads it as heard').toEqual([{ issue: 255, label: 'agent-requested' }])
+    expect(warned[0]).toMatchObject({ event: 'intake.label_stale', issue: '#255', by: 'superagent[bot]' })
+  })
+
+  it('a label that lands after the router\'s last reply is a person asking a second time, and it names them', async () => {
+    const rows = [issue({ issue: 255, title: 'MERGE: the pull request', author: 'superagent[bot]', labels: ['agent-requested'] })]
+    const f = fixture([], rows)
+    f.store.set('source:github:o/r:issues', ['#255'])
+    const labeledAt = new Date(Date.now() - 30 * 60_000).toISOString()
+    f.api.labelEvent = async () => ({ actor: 'octocat', at: labeledAt })
+    f.api.commentsFor = async () => [comment({
+      issue: 255, author: 'superagent[bot]', at: new Date(Date.now() - HOUR).toISOString(), body: 'ready: merged <!-- superagent -->',
+    })]
+    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', bots: new Set(['ci-*']), requestLabel: 'agent-requested' }, f.store)
+    const fired = await f.source.poll()
+    expect(fired.map(t => t.text), 'a new label is the door intake keeps open').toEqual(['MERGE: the pull request'])
+    // The asker is whoever applied the label, not the issue's author: crediting the author called the bot's
+    // own login a human, which is how a receipt read as the operator asking again.
+    expect(fired[0]).toMatchObject({ actor: { source: 'github', id: 'octocat' }, human: true,
+      meta: { via: 'label', author: 'superagent[bot]', labelActor: 'octocat', labeledAt } })
+  })
+
+  it('a label a bot applied is a grant, not a person\'s ask', async () => {
+    const rows = [issue({ issue: 256, title: 'DO: rescan the board', author: 'superagent[bot]', labels: ['agent-requested'] })]
+    const f = fixture([], rows)
+    f.store.set('source:github:o/r:issues', ['#256'])
+    f.api.labelEvent = async () => ({ actor: 'ci-bot', at: new Date(Date.now() - 30 * 60_000).toISOString() })
+    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', bots: new Set(['ci-*']), requestLabel: 'agent-requested' }, f.store)
+    const fired = await f.source.poll()
+    expect(fired.map(t => t.text), 'the ask is heard: intake labels with the deployment token, so the label is a grant').toEqual(['DO: rescan the board'])
+    expect(fired[0]!.human, 'a bot\'s label does not resume a ticket a person closed').toBe(false)
+  })
+
+  it('a label author GitHub cannot name costs the ask nothing, and one complaint', async () => {
+    // Losing intake is worse than the loop lock 1 already stops: every unreadable answer fires the ask.
+    const rows = [issue({ issue: 257, title: 'DO: rotate the keys', author: 'superagent[bot]', labels: ['agent-requested'] })]
+    const f = fixture([], rows)
+    f.store.set('source:github:o/r:issues', ['#257'])
+    f.api.labelEvent = async () => { throw new Error('gh api exited 1: HTTP 500') }
+    const warned: Array<Record<string, unknown>> = []
+    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested',
+                                         onWarn: (event, fields) => warned.push({ event, ...fields }) }, f.store)
+    expect(await f.source.poll()).toHaveLength(1)
+    expect(await f.source.poll(), 'the grant journal is spent, so the read is not made again').toHaveLength(0)
+    expect(warned.filter(w => w.event === 'intake.label_actor_unreadable'), 'one complaint per issue, not one per poll').toHaveLength(1)
+  })
+
+  it('a source without the label-actor read asks on the grant journal alone, and says so once', async () => {
+    const rows = [issue({ issue: 258, title: 'DO: rotate the keys', author: 'superagent[bot]', labels: ['agent-requested'] })]
+    const f = fixture([], rows)
+    f.store.set('source:github:o/r:issues', ['#258'])
+    const warned: Array<Record<string, unknown>> = []
+    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested',
+                                         onWarn: (event, fields) => warned.push({ event, ...fields }) }, f.store)
+    expect(await f.source.poll()).toHaveLength(1)
+    expect(await f.source.poll()).toHaveLength(0)
+    expect(warned.filter(w => w.event === 'intake.label_actor_unavailable')).toHaveLength(1)
   })
 
   it('an issue the seed recorded stays silent without the label', async () => {

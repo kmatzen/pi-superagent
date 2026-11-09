@@ -30,6 +30,19 @@ label comes off. A finished ticket then closes its issue, because intake hears o
 `ready` report with no pull request leaves nothing to wait on. A person's comment, or a reopen,
 still starts the work: that is new inbound speech, and the only thing that is.
 
+**Check the label's author and its moment, not just the journal.** The journal above is per-repository
+state, so it does not survive a rebuilt database, and a label a token without rights cannot take off is a
+standing ask with nothing behind it. The second lock asks GitHub who applied the label — the issue events
+feed, the only read that answers — and compares that moment with the router's own last reply on the
+issue. A label older than the router's last reply is an ask it heard and answered; a label newer than it is
+a person asking a second time, which is the door intake keeps open. The check is deliberately *not* "a
+human applied it": `superagent intake` labels with the deployment's own token, so a real ask and the
+router's speech carry the same login (measured 2026-11-09: one board issue labelled by `matzen_adobe`,
+another by `matzenbot_adobe`, both deliberate). An unreadable answer fails open, because losing intake costs
+more than the loop the journal already stops. The trigger now names the label's author too: it used to
+credit the issue's author and hardcode `human: true`, which is what made every one of the 8 label triggers
+on one ticket read as the operator asking again.
+
 **Stop a ticket that repeats itself.** The Nth report that lands with nothing new on the thread recruits
 a worker that can only report it again, so at `PI_SUPERAGENT_REPORT_CAP` (3) the ticket says so on itself
 and stops recruiting. The signature is the quiet thread, not the sentence: #255 wrote “Nothing to merge:
