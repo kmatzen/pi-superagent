@@ -1069,12 +1069,31 @@ describe('a pull request per ticket', () => {
     expect(f.judge.prompts.filter(p => p.includes('merge pi-superagent pull request 6')).length).toBe(1)
   })
 
-  it('a reference that is not a pull request URL holds nothing open', async () => {
+  it('a reference that is not a pull request URL is refused to the worker, and completes nothing', async () => {
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pullsFake().api })
     const ticket = await working(f, '494')
-    f.workers[0]!.report!({ state: 'ready', summary: 'done', pullRequests: ['#77'] })
+    const verdict = f.workers[0]!.report!({ state: 'ready', summary: 'done', pullRequests: ['#77'] }) as
+      { isError?: boolean; content: { text: string }[] }
+    expect(verdict.isError, 'the worker is told in its own run, where it can report the URL gh pr create printed').toBe(true)
+    expect(verdict.content[0]!.text).toContain('#77')
     await f.running.tick()
-    expect(ticket().ended).toMatchObject({ outcome: 'completed' })
+    expect(ticket().ended, 'a refused report is no report: a reference that tracks nothing cannot close a ticket').toBeUndefined()
+  })
+
+  it('a report that reaches the router with an unreadable reference still warns there, and completes the ticket', async () => {
+    // The router's warn is the backstop for the reports this boundary did not screen: an old worker build, a
+    // hand-written reports.jsonl. Keep it, so the order stays: the worker is told first, the router logs second.
+    const h = memoryHerdr()
+    const f = fixture(true, undefined, undefined, h.herdr, { pullApi: pullsFake().api })
+    f.addComment('496', 'octocat', 'rename the Export button to Ship')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    const bridge = join(f.dir, 'workers', readdirSync(join(f.dir, 'workers')).find(d => d.length === 36)!)
+    appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"ready","summary":"done","pullRequests":["#77"]}\n')
+    await until(() => f.receipts('496').includes('ready: done'))
+    expect(f.receipts('496'), 'nothing waited on #77, so the ticket completes').toContain('ready: done')
     expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/pull\.unreadable .*ref=#77/)
   })
 
