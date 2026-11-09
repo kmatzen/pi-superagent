@@ -53,8 +53,10 @@ function follower(api: Partial<PullApi>, open: string[] | null = [],
   const kv = new Map<string, unknown>()
   const calls: string[] = []
   const closed: Array<{ id: string; outcome: string; at: string }> = []
+  const reopened: string[] = []
   const received: Trigger[] = []
   const warned: string[] = []
+  let seen: Ticket[] = []
   let clock = Date.now()
   const full: PullApi = {
     pull: async (repo, n) => { calls.push(`pull ${repo}#${n}`); return api.pull?.(repo, n) },
@@ -66,6 +68,13 @@ function follower(api: Partial<PullApi>, open: string[] | null = [],
     positions: { get: <T,>(k: string) => kv.get(k) as T | undefined, set: (k, v) => { kv.set(k, v) } },
     self: 'agent-bot', bots: new Set(['ci-*']),
     closed: (thread, _pull, outcome, at) => closed.push({ id: thread.id, outcome, at }),
+    // What the router does with this callback: count the tickets holding a recorded close on the thread GitHub says
+    // is open, and open their wait. Zero is the common case, and it is the case that must stay silent.
+    reopened: thread => {
+      const n = seen.flatMap(t => t.follows ?? []).filter(f => f.thread === `github:${thread.id}` && f.closed?.outcome === 'closed').length
+      if (n > 0) reopened.push(thread.id)
+      return n
+    },
     receive: t => received.push(t),
     warn: event => warned.push(event),
     now: () => clock, everyMs: 120_000,
@@ -74,7 +83,10 @@ function follower(api: Partial<PullApi>, open: string[] | null = [],
     ...(limits.maxAtOnce === undefined ? {} : { maxAtOnce: limits.maxAtOnce }),
   })
   const following = (...threads: string[]) => [{ follows: threads.map(t => ({ thread: `github:${t}`, own: true })) }] as unknown as Ticket[]
-  return { f, kv, calls, closed, received, warned, following, tick: (ms: number) => { clock += ms } }
+  const recorded = (...threads: string[]) => [{ follows: threads.map(t => ({ thread: `github:${t}`, own: true, closed: { at: created, outcome: 'closed' as const } })) }] as unknown as Ticket[]
+  // The fake `reopened` reads the tickets of the pass in hand, the way the router reads them out of its store.
+  const reconcile = (tickets: Ticket[]) => { seen = tickets; return f.reconcile(tickets) }
+  return { f, kv, calls, closed, reopened, received, warned, following, recorded, reconcile, tick: (ms: number) => { clock += ms } }
 }
 
 const openPull: PullState = { open: true, merged: false, createdAt: created }
@@ -96,6 +108,82 @@ describe('following a ticket\'s pull requests', () => {
     })
     await t.f.reconcile(t.following('#9', '#10'))
     expect(t.closed).toEqual([{ id: '#9', outcome: 'merged', at: later }, { id: '#10', outcome: 'closed', at: expect.any(String) }])
+  })
+
+  it('a pull request the reader cannot see keeps its ticket waiting, and is complained about once', async () => {
+    // 404 is GitHub's answer for a pull request that is gone *and* for a repository the token cannot read. Ending
+    // the wait on the second one posts "closed without merging, so this ticket ends" on an open, ready pull request
+    // — measured 2026-11-09, twice in one day, about the router's own fix in a private repository.
+    let broken = true
+    const t = follower({
+      pull: async () => {
+        if (broken) throw new Error('HTTP 404 reading pull request private/secret#31, and this account cannot read private/secret either')
+        return openPull
+      },
+    })
+    await t.f.reconcile(t.following('private/secret#31'))
+    expect(t.closed, 'an unreadable read ends nothing').toEqual([])
+    expect(t.warned).toEqual(['pull.read_failed'])
+    t.tick(120_000)
+    await t.f.reconcile(t.following('private/secret#31'))
+    t.tick(120_000)
+    await t.f.reconcile(t.following('private/secret#31'))
+    expect(t.warned, 'once per thread, not once per poll').toEqual(['pull.read_failed'])
+    broken = false
+    t.tick(120_000)
+    await t.f.reconcile(t.following('private/secret#31'))
+    expect(t.warned, 'and it says when the read comes back').toEqual(['pull.read_failed', 'pull.read_readable'])
+    expect(t.closed, 'the follow survived to be read').toEqual([])
+  })
+
+  it('reopens a follow whose recorded close GitHub denies, and asks about it once per start', async () => {
+    // 21 live tickets on the live board hold exactly this shape: one follow, recorded closed, pull request open.
+    // Nothing reads a closed follow, so the ticket is followed by nothing, ends by nothing, and its reviews are
+    // never read. The repair is a state repair, so it says nothing on the thread: the router's own comment is what
+    // recruits a session (#309), and a repaired row is not news.
+    const t = follower({ pull: async () => openPull })
+    await t.reconcile(t.recorded('other/r#9'))
+    expect(t.reopened).toEqual(['other/r#9'])
+    expect(t.warned, 'the repair is said in the log, once').toEqual(['pull.reopened'])
+    t.tick(120_000)
+    await t.reconcile(t.recorded('other/r#9'))
+    t.tick(120_000)
+    await t.reconcile(t.recorded('other/r#9'))
+    expect(t.calls.filter(c => c.startsWith('pull ')), 'one look per start, not one per poll').toEqual(['pull other/r#9'])
+  })
+
+  it('leaves a recorded close GitHub confirms alone, and ends nothing on the way', async () => {
+    const t = follower({ pull: async () => ({ open: false, merged: false, createdAt: created, closedAt: later }) })
+    await t.reconcile(t.recorded('other/r#9'))
+    t.tick(120_000)
+    await t.reconcile(t.recorded('other/r#9'))
+    expect(t.reopened, 'the close is a fact, not a failed read').toEqual([])
+    expect(t.closed, 'a thread read only to check a recorded close ends no other ticket').toEqual([])
+    expect(t.calls.filter(c => c.startsWith('pull '))).toEqual(['pull other/r#9'])
+  })
+
+  it('says so, once, when the repair cannot be checked, and keeps the close as it was', async () => {
+    const t = follower({ pull: async () => { throw new Error('HTTP 404 reading pull request private/secret#31, and this account cannot read private/secret either') } })
+    await t.reconcile(t.recorded('private/secret#31'))
+    t.tick(120_000)
+    await t.reconcile(t.recorded('private/secret#31'))
+    expect(t.reopened, 'unknown is not open').toEqual([])
+    expect(t.warned).toEqual(['pull.read_failed'])
+  })
+
+  it('reopens a closed follow in the watched repository from its open-thread list, with no API call', async () => {
+    const t = follower({}, ['#9'])
+    await t.reconcile(t.recorded('#9'))
+    expect(t.reopened).toEqual(['#9'])
+    expect(t.calls, 'the list the poll already fetched answered it').toEqual([])
+  })
+
+  it('a merged close is never a suspect, and costs no read', async () => {
+    const t = follower({ pull: async () => openPull })
+    const merged = [{ follows: [{ thread: 'github:other/r#9', own: true, closed: { at: created, outcome: 'merged' } }] }] as unknown as Ticket[]
+    await t.reconcile(merged)
+    expect(t.reopened, 'merged needs a read that succeeded and saw merged_at').toEqual([])
+    expect(t.calls).toEqual([])
   })
 
   it('waits for the first look at the watched repository before deciding anything', async () => {
@@ -203,6 +291,23 @@ describe('the fan-out a pass pays', () => {
     expect(second.read, 'the 25 that waited, capped again').toBe(16)
     expect(second.deferred).toBe(9)
     expect(t.calls.filter(c => c.startsWith('pull #33'))).toHaveLength(0)
+  })
+
+  it('a capped pass reads a false-close repair before the fan-out it defers', async () => {
+    // The seam where the two features meet: a per-pass cap on external reads, and a recorded close's re-check
+    // pushed into the same due list. Sorting the fan-out least-recently-read first is what stops a busy follow
+    // starving a quiet one, but on the first pass after a start nothing carries a `polled` stamp: every external
+    // ties, the repair sorts last of nine, and a cap of two defers it. A false close left unrepaired is the row
+    // that is followed by nothing and ends by nothing, so the repair outranks a routine read.
+    const t = follower({ pull: async () => openPull }, [], { maxReads: 2 })
+    const board = [
+      ...t.following(...Array.from({ length: 8 }, (_, i) => `other/r#${100 + i}`)),
+      ...t.recorded('other/r#9'),
+    ] as unknown as Ticket[]
+    const report = await t.reconcile(board)
+    expect(report).toEqual({ due: 9, read: 2, deferred: 7, atOnce: 2 })
+    expect(t.reopened, 'the repair is read on the pass that capped, not behind 8 routine reads').toEqual(['other/r#9'])
+    expect(t.calls.filter(c => c.startsWith('pull '))[0], 'the repair is the first call of the pass').toBe('pull other/r#9')
   })
 
   it('every follow gets read within a few passes: a cap rotates, it does not starve', async () => {

@@ -60,7 +60,10 @@ as where the shortcut is defined. For that, an answer on the issue can finish th
 ## While the worker runs
 
 - **On GitHub**, reply on the issue to add a detail, or on the pull request to request a revision.
-  To stop work before there’s a PR, close the issue. Reopening it makes a fresh request.
+  To stop work before there’s a PR, close the issue. Reopening it makes a fresh request. When the
+  work finishes with no PR to wait on — an answer, an operation — the router closes the issue too,
+  because an open issue is a request the router hears again. Commenting on a closed issue starts the
+  work again.
 - **In herdr**, open the tab with the issue number to see the worker’s commands and output. The
   **engine log** tab shows what the router picked up and which requests it accepted.
 - **In the local panel**, look under *Needs a person* to see who’s waiting for an answer. You can

@@ -118,7 +118,10 @@ setup_needed() { [ -f "$STATE/setup.json" ] && grep -q '"problem": *{' "$STATE/s
 # intake asks the router to take issues it has already seen. The router records the issues open at its first
 # look as history and never fires them, which is right for a backlog and wrong for real requests: measured
 # 2026-11-08, 64 issues (205-268) sat unseen for three days. The label is the request, and labelling needs
-# write access, so this is a grant, not a trick: `agent-requested` on an issue enqueues it once.
+# write access, so this is a grant, not a trick: `agent-requested` on an issue enqueues it once. The router
+# takes the label off when it hears it, which is what makes it once: GitHub moves an issue's update time when
+# a comment lands, and the router's own receipt is a comment, so a label left on the issue re-asked for every
+# labelled issue on every poll (issue #309). Ask twice, label twice.
 intake() {
   : "${PI_SUPERAGENT_GITHUB_REPO:?set PI_SUPERAGENT_GITHUB_REPO (superagent init OWNER/REPO)}"
   : "${PI_SUPERAGENT_GITHUB_TOKEN_FILE:?set PI_SUPERAGENT_GITHUB_TOKEN_FILE}"
