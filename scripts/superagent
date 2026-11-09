@@ -58,6 +58,23 @@ READY_WAIT="${PI_SUPERAGENT_READY_WAIT:-60}"
 # it healthy, what is the history of one piece of work). Loopback only; the API refuses a caller that does
 # not say what it is, and any non-local Host.
 PANEL_PORT="${PI_SUPERAGENT_PANEL_PORT:-8788}"
+# The checkout this script was started from: the router's code, its .git/config, and the thing a deploy pulls.
+# Follow symlinks first: a `superagent` on PATH is usually a LINK (npm's global install leaves one in its bin
+# directory, and linking the script out of a checkout is the documented way to run it from a checkout), so
+# BASH_SOURCE names the link and a REPO_ROOT built from its dirname is the directory holding the link. Measured
+# through a link into a checkout whose config held a token: `start` exited 0, because the scan looked in the
+# link's own directory, found no checkout there, and printed nothing. A guard that reports a leaking box clean
+# is worse than no guard, so the link is followed to the file it points at before the directory is taken.
+script_realpath() {
+  local path="$1" link
+  while [ -L "$path" ]; do
+    link="$(readlink "$path")" || break
+    [ "${link#/}" = "$link" ] && link="$(dirname "$path")/$link"
+    path="$link"
+  done
+  printf '%s\n' "$path"
+}
+REPO_ROOT="$(cd "$(dirname "$(script_realpath "${BASH_SOURCE[0]}")")/.." && pwd -P)"
 # The router's judge runs through pi's SDK, and pi hands its own to the extension: inside pi, importing the
 # package name resolves to the running pi wherever it is installed. PI_SUPERAGENT_SDK_PATH, an entry file,
 # overrides that and passes through with the other settings.
@@ -97,6 +114,75 @@ workspace_id() {
 herdr_up() { "$HERDR_BIN" workspace list >/dev/null 2>&1; }
 running() { "$HERDR_BIN" agent get "$SESSION" >/dev/null 2>&1; }
 place() { [ -f "$ROUTER_PLACE" ] && sed -n "s/^$1=//p" "$ROUTER_PLACE"; }
+
+# A remote URL that carries its credential (`https://user:token@github.com/…`) is a live secret in a file git
+# writes 0644: every user and every process on the box reads it, and the first `git remote -v`, `git config
+# --list`, failed push or verbose `ls-remote` a worker prints carries it into a transcript, a board row, an
+# issue body. Measured on the deployment box (issue #314): the watched checkout held a 40-character `ghp_`
+# classic token with `repo` scope — read/write on every repository the account reaches — in `-rw-r--r--
+# .git/config`, with ~20 worker sessions per run able to print it. The deploy refuses to start on one.
+# Findings are masked here on purpose: a guard that prints the token to find the token has published it.
+CREDENTIAL_IN_URL='://[^/[:space:]]*:[^/[:space:]]*@|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}'
+mask_credential() { sed -E 's#(://[^/@[:space:]]*:)[^/@[:space:]]*(@)#\1***\2#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}#\1***#g'; }
+file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null || echo '?'; }
+
+# The config files that name a checkout's remotes. A linked worktree — 2 of the 86 directories under the live
+# worktree root — keeps its own `.git` as a FILE pointing at <repo>/.git/worktrees/<name>, and its remotes live
+# in the COMMON dir's config, so scanning `<checkout>/.git/config` walks straight past it. Same for a submodule.
+# Every file printed exists; a path that is not a checkout prints nothing.
+checkout_config_files() {
+  local dir="$1" gitdir common
+  if [ -d "$dir/.git" ]; then gitdir="$dir/.git"
+  elif [ -f "$dir/.git" ]; then
+    gitdir="$(sed -n 's/^gitdir:[[:space:]]*//p' "$dir/.git" | head -1)"
+    [ -n "$gitdir" ] || return 0
+    [ "${gitdir#/}" = "$gitdir" ] && gitdir="$(cd "$dir" 2>/dev/null && cd "$gitdir" 2>/dev/null && pwd)"
+  elif [ -f "$dir/HEAD" ] && [ -d "$dir/objects" ]; then gitdir="$dir"
+  else return 0; fi
+  [ -n "$gitdir" ] && [ -f "$gitdir/config" ] && printf '%s\n' "$gitdir/config"
+  [ -f "$gitdir/commondir" ] || return 0
+  common="$(head -1 "$gitdir/commondir")"
+  [ -n "$common" ] || return 0
+  [ "${common#/}" = "$common" ] && common="$(cd "$gitdir" 2>/dev/null && cd "$common" 2>/dev/null && pwd)"
+  [ -n "$common" ] && [ -f "$common/config" ] && printf '%s\n' "$common/config"
+  return 0
+}
+
+# Every checkout this deployment reads: its own, the ones the operator named, and the ticket checkouts. The
+# ticket checkouts are counted one level past the ticket directory, because the ticket prompt tells a worker to
+# clone into its workspace and the clone lands at <worktrees>/<ticket>/repo/ — measured: 26 of the 29 live
+# checkouts are that shape. Stopping at <worktrees>/<ticket>/.git reports a leaking deployment clean.
+watched_checkouts() {
+  printf '%s\n' "$REPO_ROOT"
+  printf '%s\n' "${PI_SUPERAGENT_WATCHED_CHECKOUTS:-}" | tr ':,' '\n\n' | sed '/^$/d'
+  local dir sub
+  for dir in "$WORKTREES"/*/; do
+    [ -d "$dir" ] || continue
+    if [ -e "${dir}.git" ]; then printf '%s\n' "${dir%/}"; continue; fi
+    for sub in "$dir"*/; do
+      [ -d "$sub" ] && [ -e "${sub}.git" ] && printf '%s\n' "${sub%/}"
+    done
+  done
+  return 0
+}
+
+git_credential_guard() {
+  local dir file hit bad=0 line seen=' '
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    while IFS= read -r file; do
+      case "$seen" in *" $file "*) continue ;; esac
+      seen="$seen$file "
+      hit="$(grep -m1 -nE "$CREDENTIAL_IN_URL" "$file" 2>/dev/null | mask_credential | cut -c1-200)"
+      [ -n "$hit" ] || continue
+      line="${hit%%:*}"
+      printf 'superagent: %s line %s carries a git credential in the clear, mode %s: %s\n' "$file" "$line" "$(file_mode "$file")" "${hit#*:}" >&2
+      printf '  every user on this box reads it and every `git remote -v` prints it. Fix: git -C %s remote set-url origin <the same URL with the user:token@ removed>, then supply the password from a 0600 file with a repo-local credential helper (docs/operator-guide.md).\n' "$dir" >&2
+      bad=1
+    done < <(checkout_config_files "$dir")
+  done < <(watched_checkouts)
+  return $bad
+}
 
 # The extension writes these two files; the script only reads them. A missing file is not an error:
 # a session that has not finished starting has written nothing yet, and that is code 0, not a failure.
@@ -155,6 +241,10 @@ intake() {
 
 
 start() {
+  # A deployment that stores its credential in a world-readable URL is not a deployment to bring up: the
+  # router's own workers are the readers. Refuse before herdr, the port and the tab, so the fix is the first
+  # thing the operator reads and nothing is half-started.
+  git_credential_guard || { echo "the router was not started: a watched checkout keeps its git credential in the remote URL" >&2; return 1; }
   if ! herdr_up; then
     echo "herdr is not reachable: the router runs only in herdr, so it was not started" >&2
     return 1

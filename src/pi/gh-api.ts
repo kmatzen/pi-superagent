@@ -2,12 +2,18 @@
 import { spawn } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState, type PrReview } from './source-github.ts'
+import { countCredentials, redactCredentials } from './git-credentials.ts'
 import type { PullApi } from './pulls.ts'
 
 export interface GhOptions {
   bin?: string
   /** A file holding the token of the account to act as; unset, gh acts as the account it is signed in as. */
   tokenFile?: string
+  /**
+   * Called with the NUMBER of credentials masked out of a body this account is publishing. The count is the
+   * point: a masked post must leave a trace in the log, and the value must not. Unset, the mask still runs.
+   */
+  onCredentialRedacted?: (count: number, where: string) => void
   /**
    * Called for every `gh` process this API is about to spawn. The fan-out is the tick's cost — 41 followed pull
    * requests measured 12 s per pass (2026-11-09, #303) — and the arithmetic that explains it had never been
@@ -142,7 +148,13 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     },
 
     async postComment(issue, body, repo) {
-      const payload = JSON.stringify({ body: `${body}\n\n${REPLY_MARKER}` })
+      // This call is the one that publishes into a GitHub issue, and a worker's report quotes what the worker
+      // printed: the `git remote -v` output of a checkout that stores its token in the remote URL. The issue
+      // body is public to everyone the repository reaches, so the mask goes on the write, not on the prompt
+      // that told the worker to paste. Counted, so the router logs that it masked without logging what.
+      const hits = countCredentials(body)
+      if (hits) options.onCredentialRedacted?.(hits, `${repo ?? options.repo}#${issue}`)
+      const payload = JSON.stringify({ body: `${redactCredentials(body)}\n\n${REPLY_MARKER}` })
       await call(['api', '-X', 'POST', `repos/${repo ?? options.repo}/issues/${issue}/comments`, '--input', '-'], payload)
     },
 
