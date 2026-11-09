@@ -893,8 +893,8 @@ describe('a pull request per ticket', () => {
   })
 
   it('the same conclusion reported three times stops the ticket and says so on it', async () => {
-    // #227 reported the same sentence 93 times in 20 hours, each report a fresh session's work on a thread the
-    // router had itself written on. The third identical conclusion is the last one, and the ticket says so.
+    // #227 reported 93 times in 20 hours, #255 five times in nine, each dispatch recruited by speech the
+    // router had itself written on the thread. The third report with nothing new on the thread is the last one.
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
     const ticket = await working(f, '503')
@@ -915,6 +915,50 @@ describe('a pull request per ticket', () => {
     expect(ticket().ended, 'it stops recruiting sessions').toMatchObject({ outcome: 'stopped' })
     expect(f.workers.length).toBe(1)
     expect(f.closes, 'a stop the router made leaves the issue to a person').toEqual([])
+  })
+
+  it('the loop is the quiet thread, not the sentence: reworded reports still count', async () => {
+    // The live shape, read out of the router's own database on 2026-11-09. #255 reported the same fact five
+    // times in new words -- "Nothing to merge: this pull request landed…", "The mandate is already
+    // satisfied…", "Close this ticket: its pull request merged…" -- and #227 wrote "eighty-sixth identical
+    // dispatch", "Still waiting on one click", "Resumed run: state is unchanged". A fingerprint over the
+    // wording matches none of it. The signature is a report that landed with nothing new on the thread.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '506')
+    pulls.open('o/r', 15)
+    const url = 'https://github.com/o/r/pull/15'
+    const words = [
+      'Nothing to merge: this pull request landed on 2026-11-07 and the fix is deployed.',
+      'Still waiting on one click: merge pull request 15 and this ticket closes.',
+      'Resumed run: state is unchanged, so I verified state only; the merge is yours.',
+    ]
+    for (const [n, summary] of words.entries()) {
+      f.workers[0]!.report!({ state: 'ready', summary, pullRequests: [url] })
+      await f.running.tick()
+      if (n < 2) expect(f.receipts('506'), `report ${n + 1} is not yet a loop`).not.toMatch(/reported \d+ times/)
+    }
+    expect(f.receipts('506')).toMatch(/the same result has been reported 3 times[\s\S]*no further session runs this ticket/)
+    expect(ticket().ended, 'the ticket stops recruiting sessions').toMatchObject({ outcome: 'stopped' })
+  })
+
+  it("a person's words on the thread restart the count", async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '507')
+    pulls.open('o/r', 14)
+    const said = () => f.workers[0]!.report!({ state: 'ready', summary: 'merge pull request 14 to close this ticket', pullRequests: ['https://github.com/o/r/pull/14'] })
+    said()
+    await f.running.tick()
+    said()
+    await f.running.tick()
+    // A person answers on the thread: the next report is a worker that had something to act on.
+    f.addComment('507', 'octocat', 'the merge window is Friday, deploy after it', new Date().toISOString())
+    await f.running.tick()
+    said()
+    await f.running.tick()
+    expect(f.receipts('507'), 'three reports, one of them answered: not a loop').not.toMatch(/reported \d+ times/)
+    expect(ticket().ended).toBeUndefined()
   })
 
   it('a report that changes the answer restarts the count', async () => {

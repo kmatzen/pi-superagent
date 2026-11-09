@@ -22,6 +22,7 @@ import { herdrCli, type Herdr } from './herdr.ts'
 import { HerdrWorkers } from './herdr-workers.ts'
 import { reportTool, type ReportOrigin } from './report-tool.ts'
 import { pullEndText, receiptText, conclusionOf, type ReportedRun } from './receipts.ts'
+import { isListed } from './authors.ts'
 import { workerRole } from './worker-role.ts'
 import { createPanelServer } from './server.ts'
 import { checkoutRepository, guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
@@ -336,40 +337,61 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
 
   /**
-   * The blast-radius bound: the same conclusion reported N times is a ticket with nothing new to act on. On
-   * 2026-11-09 #227 reported the same sentence 93 times in 20 hours and #255 woke four workers, each time on
-   * speech the router had itself written on the thread. The Nth identical report is the last one: the ticket
-   * says so on itself and stops recruiting sessions. `PI_SUPERAGENT_REPORT_CAP` moves N.
+   * The blast-radius bound: a ticket that keeps reporting with nothing new to act on must stop recruiting.
+   * On 2026-11-09 #227 reported the same sentence 93 times in 20 hours, and #255 reported five times in nine
+   * hours — each time in new words, and flipping from `ready` to `blocked`: "Nothing to merge: this pull
+   * request landed…", "The mandate is already satisfied…", "Close this ticket: its pull request merged…".
+   * Wording is not the signature. The signature is a report that landed with **no new inbound speech on the
+   * thread since the previous report**: the worker was recruited by speech the router wrote itself, so it can
+   * only re-prove what it proved last time. N of those (`PI_SUPERAGENT_REPORT_CAP`, default 3) and the ticket
+   * says so on itself and stops recruiting sessions.
    *
-   * The count is the router's journal, not the ticket's assignments: an Assignment keeps its LAST report, so a
-   * worker session that reported the same sentence from one session eleven times is one report in the ticket —
-   * the 93 receipts of #227 were one Assignment's. What is counted is what a person sees on the thread. Only a
-   * worker's own report counts: a launch that fails on every poll is the router retrying, and its contract is to
-   * keep trying and say so once, not to give up on a ticket a person asked for.
+   * Two things make the streak, and both must hold: the same report state, and quiet on the thread. A report
+   * that changed state, or a person's comment, restarts the count — three in a row is the loop, three spread
+   * across real progress is a worker that kept working. The count is the router's journal, not the ticket's
+   * assignments: an Assignment keeps its LAST report, so the 93 receipts of one worker session are one report
+   * in the ticket. Only a worker's own report counts: a launch that fails on every poll is the router retrying,
+   * and its contract is to keep trying and say so once, not to give up on a ticket a person asked for.
    */
   const capKey = 'report-conclusions'
-  type CapRow = { said: string; times: number; at: string }
+  type CapRow = { state: string; times: number; at: string }
   const capRows = (): Record<string, CapRow> => repos.kv.get<Record<string, CapRow>>(capKey) ?? {}
+  // GitHub's clock and the router's are not the same clock, and a comment that arrived a moment before a
+  // report is speech the worker acted on. Generous by two minutes: this window only ever resets the count.
+  const SPEECH_GRACE_MS = 120_000
+  /**
+   * Did a person say anything on this ticket's thread after `after`? The router's own writing is not speech
+   * (it is the receipt the worker is answering again), and the intake label is not speech either: it is a
+   * grant, and on the deployed router every one of #255's six dispatches arrived as a label trigger the
+   * router's own receipt had just re-minted.
+   */
+  const inboundSpeech = (ticket: Ticket, after: string): boolean =>
+    (ticket.inputs ?? []).some(input => {
+      if (input.kind !== 'trigger' || !input.human) return false
+      if (Date.parse(input.at) <= Date.parse(after) - SPEECH_GRACE_MS) return false
+      const trigger = repos.triggers.get(input.triggerId)
+      const author = String(trigger?.meta?.author ?? trigger?.actor?.id ?? '')
+      if (author && isListed(author, new Set([cfg.githubSelf ?? cfg.self, ...(cfg.bots ?? [])]))) return false
+      return (trigger?.meta?.via ?? 'comment') !== 'label'
+    })
   const capRepeats = (ticket: Ticket, run: ReportedRun): void => {
     const cap = cfg.reportCap ?? 3
     if (run.state === 'progress' || run.state === 'waiting') return
-    const said = conclusionOf(run.state, run.summary)
     const at = deps.now?.() ?? new Date().toISOString()
     const rows = capRows()
-    const times = rows[ticket.id]?.said === said ? rows[ticket.id]!.times + 1 : 1
-    // A report that changed the answer restarts the count: three in a row is the loop, three spread across
-    // real progress is a worker that kept working. Rows age out with the tickets, as the outbox ledger does.
-    const fresh = Object.fromEntries(Object.entries({ ...rows, [ticket.id]: { said, times, at } })
-      .filter(([, row]) => Date.parse(row.at) > Date.parse(at) - 30 * 86_400_000))
-    repos.kv.set(capKey, fresh)
+    const prior = rows[ticket.id]
+    const times = prior && prior.state === run.state && !inboundSpeech(ticket, prior.at) ? prior.times + 1 : 1
+    repos.kv.set(capKey, Object.fromEntries(Object.entries({ ...rows, [ticket.id]: { state: run.state, times, at } as CapRow })
+      .filter(([, row]) => Date.parse(row.at) > Date.parse(at) - 30 * 86_400_000)))
     if (times < cap) return
     const channel = ticket.channels[0]
     if (!channel) return
+    const said = conclusionOf(run.state, run.summary)
     outbox.send({
       id: `repeat:${ticket.id}:${createHash('sha1').update(said).digest('hex').slice(0, 12)}`,
       channel, kind: 'notice', ticketId: ticket.id,
-      text: `${channel.thread}: the same result has been reported ${times} times — ${run.summary}. Nothing new arrived between the `
-        + 'reports, so no further session runs this ticket. A comment here starts the work again.',
+      text: `${channel.thread}: the same result has been reported ${times} times — ${run.summary}. Nothing new arrived on this thread `
+        + 'between the reports, so no further session runs this ticket. A comment here starts the work again.',
     })
     if (!ticket.ended) {
       // A stop by the router on a person's loop is the one end a resumed ticket cannot outrun: `wake` refuses
@@ -382,6 +404,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // A finished conclusion that repeated closes the issue too: closing is what makes the quiet last.
     finishIssue(ticket.id)
   }
+
   // The engine ends a ticket with its pull request but posts nothing, so the issue hears it here, once per ticket.
   const pullEnded = (ticketId: string): void => {
     const ticket = repos.tickets.get(ticketId)
