@@ -108,6 +108,8 @@ export class PiExecutor {
   private tail: Promise<void> = Promise.resolve()
   /** ticket/assignment launches queued and not yet live: the loop calls start() every pass while one waits. */
   private readonly launching = new Set<string>()
+  /** Launches enqueued and not yet run. Measured, because a pass that waits on this needs to know its size. */
+  private queued = 0
 
   constructor(private readonly engine: EngineForExecutor, private readonly launcher: WorkerLauncher,
               private readonly options: ExecutorOptions) {}
@@ -264,6 +266,16 @@ export class PiExecutor {
     live.session.dispose()
   }
 
+  /** Launches queued and not yet run: the ones waiting for a free worker slot, counted for the tick's drain. */
+  get pendingLaunches(): number { return this.queued }
+
+  /**
+   * The worker cap the launch gate enforces, next to `running`: a stall is only readable when the reader can
+   * see both (`running=18 cap=8` is the cause, `stage=drain` alone is a symptom). Startup takeover can push
+   * `running` past this number on purpose, which is why the pair is worth publishing rather than assuming.
+   */
+  get capacity(): number { return this.options.maxConcurrent ?? 4 }
+
   /** What the operator can point a browser at: which worker, in which checkout, and when it last spoke. */
   workers(): WorkerView[] {
     return [...this.live.entries()].map(([ticketId, live]) => ({
@@ -299,19 +311,48 @@ export class PiExecutor {
   // Launches are serialised behind each other: the cap bounds how many workers are on a run at once, and
   // starting two sessions in one tick is how a router forks until the box dies.
   private enqueue(run: () => Promise<void>): void {
+    this.queued += 1
     this.tail = this.tail.then(async () => {
       const max = this.options.maxConcurrent ?? 4
       // A slot frees when a session ends, which needs the event loop. Awaiting an already-resolved promise
       // never yields to it: the process spun at 100% with the panel dead as soon as a fifth ticket queued.
       while (this.running >= max) await new Promise(resolve => setTimeout(resolve, this.options.slotPollMs ?? 1000))
-      await run()
+      try { await run() } finally { this.queued -= 1 }
     }).catch(() => {
       // A rejected tail skips every later launch; the only throw left here (a report on an ended ticket) is moot.
+      // The count is not adjusted here: the `finally` above runs on every path out of the launch, and counting a
+      // failure twice would report a queue as drained while a launch still waits in it.
     })
   }
 
-  /** Everything queued has been started: the seam tests use, and a graceful shutdown needs. */
+  /**
+   * Everything queued has been started: the seam tests use, and a graceful shutdown needs.
+   *
+   * **A production tick must never await this.** The tail carries the slot gate, so with the fleet at its cap
+   * it resolves only when the fleet goes quiet: measured 2026-11-09, one router entered 7 ticks in 6.6 h
+   * against a 30 s timer, and every other await in the pass paid a full GitHub fan-out because of it (#303).
+   * A caller that wants the launches without the capacity wait uses `drain`.
+   */
   idle(): Promise<void> { return this.tail }
+
+  /**
+   * Wait for the queued launches to run, but at most `budgetMs` of wall clock, and say which of the two
+   * happened. `pending` is the launches still waiting — normally on a free worker slot, which is the
+   * router's steady state under load and is not this pass's business: the next pass finds them running.
+   */
+  async drain(budgetMs: number): Promise<{ settled: boolean; pending: number }> {
+    if (this.queued === 0) return { settled: true, pending: 0 }
+    if (budgetMs <= 0) return { settled: false, pending: this.queued }
+    const tail = this.tail
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<'timeout'>(resolve => {
+      timer = setTimeout(() => resolve('timeout'), budgetMs)
+      timer.unref?.()
+    })
+    const outcome = await Promise.race([tail.then(() => 'settled' as const), expired])
+    clearTimeout(timer)
+    return { settled: outcome === 'settled', pending: this.queued }
+  }
 }
 
 const text = (e: unknown): string => e instanceof Error ? e.message : String(e)

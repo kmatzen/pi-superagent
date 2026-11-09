@@ -132,6 +132,42 @@ repositories every two minutes.
 **Status exits 2.** Read `~/.pi/superagent/health.json` to identify the failing component. For a
 GitHub source error, check `gh auth status`. The next successful poll clears the error.
 
+**Status exits 2 and `health.json` names a `tick`.** The loop is not beating: a pass has been running longer
+than `PI_SUPERAGENT_TICK_STALL_MS`, and `tick.stage` names where it is parked (`poll`, `reconcile`,
+`recovery`, `drain`). `engine.log` repeats it as `tick.stalled`, with the stage's own time, and a pass that
+never finishes is given up on (`tick.abandoned`) so the loop keeps its beat. A replacement that wedges in the
+same place stops the replacing (`tick.abandon_skipped`, `3 passes in flight`): three passes are allowed live at
+once, because an abandoned pass keeps its `gh` children and those have no timeout, and past that the alarm is
+the product. The stage `tick.abandon_skipped` names is what to fix; a restart clears a router wedged this way,
+which is the one case where it does. The line `tick n=…` is the
+liveness line: its `gapMs` is the time since the last pass finished, read against `PI_SUPERAGENT_TICK_MS`.
+A stall the fleet caused says so: `tick.stalled` carries `running` and `cap` next to `launchPending`, and
+`health.json`'s `detail` names the cause in words — `tick stalled in drain for 6.0s (pass 6.1s): 12 launches
+queued, 18 busy against the cap of 8` — because `superagent status` prints that sentence and a person reading
+it over a wall should not have to open `config.env` to learn the cap. `router.start` logs `maxWorkers` and
+`tickMs` for the same reason.
+A `engine_tick` (or the panel's tick) asked for while a pass is parked does its work and says nothing: the
+liveness line and `health.json` belong to the pass that owns the loop, so a tick by hand cannot switch off the
+alarm you are reading.
+
+**Status exits 2 saying `health.json is N min old`.** Nothing is reporting, which is the same fault with no
+report attached: the process is alive in herdr, but the loop that rewrites that file on every pass is not
+running — a pass blocked synchronously cannot report its own stall. Restart it (`scripts/superagent restart`).
+A router paused on purpose keeps writing, one line per beat, so a pause never reads as stale; the dial is
+`PI_SUPERAGENT_HEALTH_STALE_MIN` (15).
+
+**The board is busy and nothing starts.** `tick n=…` carries `launchPending` (launches waiting for a free
+worker slot) and `open`/`running`/`parked`. Waiting launches are the queue doing its job, not a stall; the
+router no longer waits a pass on them.
+
+Read the backlog per pass, not the fleet size. Measured on the live router over 1,690 tickets' worth of
+`engine.log` (2026-11-09, #303): the 35 runs that queued at most one launch per pass beat every **30.0 s**,
+and 17 of those runs were already over `PI_SUPERAGENT_MAX_WORKERS` with an empty queue; the one run that queued
+a median of **12 launches per pass** with 18 workers on a cap of 8 beat every **2,780 s**. A fleet over its cap
+is not the fault — it is the condition that makes a queued launch slow, and the old code waited a whole pass on
+that queue. Startup takeover is one reason `running` can exceed `cap`: workers that outlived the previous
+router are adopted without checking the cap, which is a policy question the code does not decide.
+
 **Status exits 3.** Read `~/.pi/superagent/setup.json` for the missing prerequisite and its location.
 
 **A worker looks stuck.** Open its herdr tab to inspect the current command. Type a message to steer

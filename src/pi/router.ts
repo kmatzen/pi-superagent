@@ -34,6 +34,21 @@ export interface RouterConfig {
   evalTimeoutMs?: number
   /** How often the loop polls without being nudged; the panel's freshness is this number. */
   tickMs?: number
+  /**
+   * How long a tick may wait on the launch queue. It never waits on worker capacity: the queue is gated on a free
+   * worker slot, and a tick that awaits that is re-entered only when the fleet goes quiet (measured 2026-11-09:
+   * 7 ticks in 6.6 h against a 30 s timer, #303).
+   */
+  launchDrainMs?: number
+  /** A tick that has not finished in this long is stalled: name the stage in the log and fail `superagent status`. */
+  tickStallMs?: number
+  /** How often one stall is repeated into the log and health.json: a wedged await is one fact, not 2880 lines a day. */
+  tickStallReportMs?: number
+  /** A tick that has not finished in this long is given up on and a fresh one started, so the cadence survives it. */
+  tickAbandonMs?: number
+  /** Most followed pull requests one tick reads, and the wall clock it spends starting them (#303). */
+  pullReadsPerTick?: number
+  pullReadBudgetMs?: number
   policyVersion?: string
   /** Serve the panel and the management API on 127.0.0.1:port; unset means no panel. */
   panelPort?: number
@@ -80,11 +95,12 @@ export interface SdkSurface {
 
 /** Pull requests are read as gh's own login: workers open them as that account, and a reader that cannot see
  *  one would take it for closed and end its ticket. */
-export const ghAccounts = (config: RouterConfig): { watched: GhOptions; pulls: GhOptions } => {
+export const ghAccounts = (config: RouterConfig, onCall?: (args: readonly string[]) => void): { watched: GhOptions; pulls: GhOptions } => {
   const bin = config.ghBin ? { bin: config.ghBin } : {}
   const token = config.githubTokenFile ? { tokenFile: config.githubTokenFile } : {}
+  const counted = onCall ? { onCall } : {}
   // One account for every call (the operator's rule 2026-11-08): the token file is GitHub, not the gh login.
-  return { watched: { ...bin, ...token }, pulls: { ...bin, ...token } }
+  return { watched: { ...bin, ...token, ...counted }, pulls: { ...bin, ...token, ...counted } }
 }
 
 export async function loadSdk(config: RouterConfig): Promise<SdkSurface> {

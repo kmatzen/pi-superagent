@@ -50,6 +50,25 @@ the router polls every 30 seconds and also wakes when its pi session goes idle. 
 triggers, reconciles PRs and closed threads, evaluates requests, starts pending work, checks for quiet
 workers and flushes replies. Three consecutive GitHub poll failures set an error in `health.json`.
 
+The pass never waits for a free worker slot: the launch queue is gated on capacity, and awaiting it made the
+loop enterable only when the fleet went quiet (measured 2026-11-09: 7 passes in 6.6 h against a 30 s timer,
+each one then paying the full PR fan-out because the 120 s read budget had expired). It takes a bounded start
+on the launches it queued instead, and the loop's own liveness is published: every pass logs `tick n=…` with
+`gapMs` and per-stage times and `gh` call count, and writes `tick` into `health.json`, so a pass parked for
+longer than `PI_SUPERAGENT_TICK_STALL_MS` fails `superagent status` naming its stage, and one past
+`PI_SUPERAGENT_TICK_ABANDON_MS` is abandoned and replaced. Abandoning gives up the guard's place, not the pass,
+so at most three passes run at once (`tick.abandon_skipped` says the loop is wedged rather than slow): a hung
+`gh` child has no timeout, and a ceiling stops a permanent wedge from collecting a pass every `abandonMs`.
+The pass that was given up on keeps running but stops speaking: a superseded pass writes no `tick n=` line and
+no `"state": "ok"`, because its numbers describe itself and not the loop, and clearing the alarm it caused is
+how a stalled loop looks healthy. `superagent status` counts a `health.json` nobody rewrote for
+`PI_SUPERAGENT_HEALTH_STALE_MIN` minutes as a failing part, which is the same fault read from outside a process
+too wedged to report it. A router paused on purpose keeps writing, so a pause is not a stall.
+`PullFollower` bounds its own fan-out per pass
+(`PI_SUPERAGENT_PULL_READS_PER_TICK`, read least-recently-read first) so a late pass defers reads instead of
+spending a minute on them. A recorded close awaiting repair goes to the head of that queue: the row whose false
+close is unrepaired is followed by nothing and ends by nothing, so it outranks a routine read of a busy pull request.
+
 `source-github.ts` tracks issues, comments and submitted reviews. It recognizes the router’s own
 comments by the bot login or a hidden marker. The `agent-requested` label is the board’s way of
 handing one issue over, so the router spends that grant: it journals the ask, takes the label off,

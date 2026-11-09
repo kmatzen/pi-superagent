@@ -8,6 +8,12 @@ export interface GhOptions {
   bin?: string
   /** A file holding the token of the account to act as; unset, gh acts as the account it is signed in as. */
   tokenFile?: string
+  /**
+   * Called for every `gh` process this API is about to spawn. The fan-out is the tick's cost — 41 followed pull
+   * requests measured 12 s per pass (2026-11-09, #303) — and the arithmetic that explains it had never been
+   * counted, so this is the number that goes into the tick's log line.
+   */
+  onCall?: (args: readonly string[]) => void
 }
 
 export interface GithubApiOptions extends GhOptions {
@@ -63,7 +69,8 @@ async function paged<T>(call: (args: string[]) => Promise<string>, url: (page: n
   }
 }
 
-const ghCall = ({ bin = 'gh', tokenFile }: GhOptions) => (args: string[], stdin?: string): Promise<string> => new Promise((resolve, reject) => {
+const ghCall = ({ bin = 'gh', tokenFile, onCall }: GhOptions) => (args: string[], stdin?: string): Promise<string> => new Promise((resolve, reject) => {
+  onCall?.(args)
   let env = process.env
   if (tokenFile) {
     // Read on every call, so a rotated token takes effect without a restart; only gh's environment holds it.
