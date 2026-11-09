@@ -1,5 +1,5 @@
 import { spawnSync, execFileSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
@@ -154,6 +154,21 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(run(['status']).status).toBe(2)
     writeFileSync(join(state, 'setup.json'), '{"problem":{"code":"state-missing","place":"Deployment"}}')
     expect(run(['status']).status).toBe(3)
+  })
+
+  it('a health.json the router stopped writing is a failing part: a wedged loop reports nothing', () => {
+    // The tick loop rewrites health.json on every pass, so the file going quiet is the same fault as a stalled
+    // tick — and the only form visible when the router itself is the wedged thing, unable to report its stall.
+    run(['start'])
+    const file = join(state, 'health.json')
+    writeFileSync(file, '{"runtime":{"state":"ready"},"tick":{"state":"ok","n":12}}')
+    expect(run(['status']).status, 'a fresh file that says ok is healthy').toBe(0)
+    const old = new Date(Date.now() - 20 * 60_000 - 5_000)   // 20 whole minutes, and the age line floors
+    utimesSync(file, old, old)
+    const r = run(['status'])
+    expect(r.status).toBe(2)
+    expect(r.stderr).toMatch(/health.json is 20 min old: the tick loop that writes it is not running/)
+    expect(run(['status'], { PI_SUPERAGENT_HEALTH_STALE_MIN: '60' }).status, 'the dial is the operator\'s').toBe(0)
   })
 
   it('a stop asks pi to exit, closes the router tab, leaves a marker, and the check respects it', () => {

@@ -48,7 +48,8 @@ const HOUR = 3_600_000
 const created = new Date(Date.now() - HOUR).toISOString()
 const later = new Date(Date.now() - HOUR / 2).toISOString()
 
-function follower(api: Partial<PullApi>, open: string[] | null = []) {
+function follower(api: Partial<PullApi>, open: string[] | null = [],
+                 limits: { maxReads?: number; budgetMs?: number; maxAtOnce?: number } = {}) {
   const kv = new Map<string, unknown>()
   const calls: string[] = []
   const closed: Array<{ id: string; outcome: string; at: string }> = []
@@ -77,6 +78,9 @@ function follower(api: Partial<PullApi>, open: string[] | null = []) {
     receive: t => received.push(t),
     warn: event => warned.push(event),
     now: () => clock, everyMs: 120_000,
+    ...(limits.maxReads === undefined ? {} : { maxReads: limits.maxReads }),
+    ...(limits.budgetMs === undefined ? {} : { budgetMs: limits.budgetMs }),
+    ...(limits.maxAtOnce === undefined ? {} : { maxAtOnce: limits.maxAtOnce }),
   })
   const following = (...threads: string[]) => [{ follows: threads.map(t => ({ thread: `github:${t}`, own: true })) }] as unknown as Ticket[]
   const recorded = (...threads: string[]) => [{ follows: threads.map(t => ({ thread: `github:${t}`, own: true, closed: { at: created, outcome: 'closed' as const } })) }] as unknown as Ticket[]
@@ -265,5 +269,87 @@ describe('following a ticket\'s pull requests', () => {
     const t = follower({ pull: async () => openPull })
     await t.f.reconcile([{ follows: [{ thread: 'github:other/lib#5', own: true, closed: { at: later, outcome: 'merged' } }] }] as unknown as Ticket[])
     expect(t.calls).toEqual([])
+  })
+})
+
+// The fan-out one pass pays, measured live 2026-11-09 (#303): 41 followed pull requests, all of them outside
+// the watched repository, read every pass because the 120 s budget is wall-clock and a loop entered hourly
+// finds every one of them past it. The pass cost 12.1 s against 1.9 s at 7 follows. These pin the pass's cost
+// to the cap, and the cap to the fan-out.
+describe('the fan-out a pass pays', () => {
+  const threads = (n: number, from = 1) => Array.from({ length: n }, (_x, i) => `other/lib#${i + from}`)
+  const many = (n: number, from = 1) => [{ follows: threads(n, from).map(t => ({ thread: `github:${t}`, own: true })) }] as unknown as Ticket[]
+
+  it('reads at most maxReads pull requests in a pass and defers the rest', async () => {
+    const t = follower({ pull: async () => openPull }, [], { maxReads: 16 })
+    const report = await t.f.reconcile(many(41))
+    expect(report).toEqual({ due: 41, read: 16, deferred: 25, atOnce: 6 })
+    expect(t.calls.filter(c => c.startsWith('pull '))).toHaveLength(16)
+    // The budget is wall-clock, so the deferred ones are due on the very next pass, and the rotation puts them
+    // first: the cap moves work to a later pass, it never drops it.
+    const second = await t.f.reconcile(many(41))
+    expect(second.read, 'the 25 that waited, capped again').toBe(16)
+    expect(second.deferred).toBe(9)
+    expect(t.calls.filter(c => c.startsWith('pull #33'))).toHaveLength(0)
+  })
+
+  it('a capped pass reads a false-close repair before the fan-out it defers', async () => {
+    // The seam where the two features meet: a per-pass cap on external reads, and a recorded close's re-check
+    // pushed into the same due list. Sorting the fan-out least-recently-read first is what stops a busy follow
+    // starving a quiet one, but on the first pass after a start nothing carries a `polled` stamp: every external
+    // ties, the repair sorts last of nine, and a cap of two defers it. A false close left unrepaired is the row
+    // that is followed by nothing and ends by nothing, so the repair outranks a routine read.
+    const t = follower({ pull: async () => openPull }, [], { maxReads: 2 })
+    const board = [
+      ...t.following(...Array.from({ length: 8 }, (_, i) => `other/r#${100 + i}`)),
+      ...t.recorded('other/r#9'),
+    ] as unknown as Ticket[]
+    const report = await t.reconcile(board)
+    expect(report).toEqual({ due: 9, read: 2, deferred: 7, atOnce: 2 })
+    expect(t.reopened, 'the repair is read on the pass that capped, not behind 8 routine reads').toEqual(['other/r#9'])
+    expect(t.calls.filter(c => c.startsWith('pull '))[0], 'the repair is the first call of the pass').toBe('pull other/r#9')
+  })
+
+  it('every follow gets read within a few passes: a cap rotates, it does not starve', async () => {
+    const t = follower({ pull: async () => openPull }, [], { maxReads: 16 })
+    for (let pass = 0; pass < 3; pass++) await t.f.reconcile(many(41))
+    const read = t.calls.filter(c => c.startsWith('pull '))
+    expect(read).toHaveLength(41)
+    expect(new Set(read).size, 'and none of them twice').toBe(41)
+  })
+
+  it('the width follows the fan-out, and stops at 16 `gh` calls at once', async () => {
+    // 4 was chosen for 7 follows; at 41 the same cap serialized a pass into ~31 sequential round trips.
+    const widths: Array<number> = []
+    for (const n of [4, 41, 128]) {
+      let live = 0
+      let peak = 0
+      const t = follower({
+        pull: async () => { live += 1; peak = Math.max(peak, live); await Promise.resolve(); live -= 1; return openPull },
+      }, [], { maxReads: 1000 })
+      const report = await t.f.reconcile(many(n))
+      widths.push(report.atOnce)
+      expect(peak, `${n} due: calls overlap, they do not multiply`).toBeLessThanOrEqual(report.atOnce)
+      expect(peak, `${n} due: the reads did run side by side`).toBeGreaterThan(1)
+    }
+    expect(widths, 'min(16, max(4, ceil(due/8))) over the 4, 41 and 128 follows a board can hold').toEqual([4, 6, 16])
+  })
+
+  it('a pass stops starting reads once its wall-clock budget is spent', async () => {
+    const t = follower({ pull: async () => { t.tick(6_000); return openPull } }, [], { maxReads: 10, budgetMs: 10_000, maxAtOnce: 1 })
+    const report = await t.f.reconcile(many(5))
+    // The clock is the follower's own, and each read moves it 6 s: the third read starts past the 10 s budget.
+    expect(report).toEqual({ due: 5, read: 2, deferred: 3, atOnce: 1 })
+    expect(t.calls.filter(c => c.startsWith('pull '))).toHaveLength(2)
+  })
+
+  it('a pull request a pass deferred is still due, and is not marked as read', async () => {
+    const t = follower({ pull: async () => openPull }, [], { maxReads: 1 })
+    await t.f.reconcile(many(2))
+    expect(t.calls.filter(c => c.startsWith('pull '))).toEqual(['pull other/lib#1'])
+    // Still the same instant: the 120 s budget cannot be what releases the second one, it was never read.
+    const second = await t.f.reconcile(many(2))
+    expect(second.read).toBe(1)
+    expect(t.calls.filter(c => c.startsWith('pull '))).toEqual(['pull other/lib#1', 'pull other/lib#2'])
   })
 })

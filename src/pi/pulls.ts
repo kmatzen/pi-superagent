@@ -83,10 +83,35 @@ export interface FollowerOptions {
   now?: () => number
   /** How often a pull request outside the watched repository is read: three calls each time, against GitHub's hourly limit. */
   everyMs?: number
+  /**
+   * Most pull requests one pass reads, whatever is due. The 120 s budget above is wall-clock, so it binds only
+   * while the loop keeps its cadence; when a tick is entered late, every follow is due at once and the pass pays
+   * the whole fan-out (measured 2026-11-09: 41 follows, 12.1 s per pass). The cap makes a pass's cost a property
+   * of this number, not of the backlog, and the rotation below guarantees the deferred reads go first next pass.
+   */
+  maxReads?: number
+  /** Wall-clock ceiling on starting new reads in one pass: a `gh` call that hangs cannot hold the tick open. */
+  budgetMs?: number
+  /** Reads to run at once; unset, `readsAtOnce(due)`. The ceiling is a shared-box dial, not a tuning knob. */
+  maxAtOnce?: number
 }
 
-// Four `gh` round trips (~0.9 s each) at a time finishes a pass inside one tick; the cap overlaps the calls, it adds none.
-const READS_AT_ONCE = 4
+// Four `gh` round trips (~0.9 s each) at a time finished a pass inside one tick when seven pulls were live, and
+// the cap overlaps calls so it adds none (measured live 2026-11-07). It was never a number for 41 follows: at 4
+// the pass is ~31 sequential round trips, which is the 12.1 s above. Scale it with the fan-out, and clamp at 16
+// because this box is shared with the workers every `gh` call competes with.
+const readsAtOnce = (due: number): number => Math.min(16, Math.max(4, Math.ceil(due / 8)))
+
+/** What one pass did, so the tick's log line can name its own cost. */
+export interface ReconcileReport {
+  /** Pull requests past their budget when the pass started. */
+  due: number
+  read: number
+  /** Past their budget, left for a later pass by `maxReads` or `budgetMs`; a stalled cadence defers, it never drops. */
+  deferred: number
+  /** Reads running at once in this pass. */
+  atOnce: number
+}
 
 export class PullFollower {
   private readonly polled = new Map<string, number>()
@@ -101,7 +126,7 @@ export class PullFollower {
   constructor(private readonly options: FollowerOptions) {}
 
   /** Closed pull requests end their tickets' wait; talk on those outside the watched repository becomes triggers. */
-  async reconcile(tickets: readonly Ticket[]): Promise<void> {
+  async reconcile(tickets: readonly Ticket[]): Promise<ReconcileReport> {
     const { home } = this.options
     const now = this.options.now?.() ?? Date.now()
     const followed = new Map<string, PullRef>()
@@ -118,10 +143,7 @@ export class PullFollower {
     for (const [id, pull] of followed) {
       const local = id.startsWith('#')
       if (local && (!open || open.has(id))) continue
-      if (!local) {
-        if (now - (this.polled.get(id) ?? -Infinity) < (this.options.everyMs ?? 120_000)) continue
-        this.polled.set(id, now)
-      }
+      if (!local && now - (this.polled.get(id) ?? -Infinity) < (this.options.everyMs ?? 120_000)) continue
       due.push({ id, pull, local })
     }
     // A follow recorded closed is not in `followed`, so nothing reads it again: a close a read *failed* to make —
@@ -148,13 +170,40 @@ export class PullFollower {
       if (id.startsWith('#') && open?.has(id)) { this.heal(id, pull); continue }
       due.push({ id, pull, local: id.startsWith('#'), reopen: true })
     }
+    // The watched repository's own threads cost nothing extra (the source has already read them), so they are
+    // never the part a cap defers. The rest go least-recently-read first: with a per-pass cap, that rotation is
+    // what guarantees a deferred pull request is read on a pass soon, not starved by a busier one forever.
+    // A recorded close awaiting repair goes to the head of the queue, above that rotation: on the first pass after
+    // a start nothing carries a `polled` stamp, so a repair sorting only by staleness ties with every follow and
+    // lands last of a full fan-out, and the row it is repairing is the one followed by nothing and ended by nothing.
+    const stamp = (id: string): number => this.polled.get(id) ?? -1
+    const local = due.filter(entry => entry.local)
+    const external = due.filter(entry => !entry.local)
+      .sort((a, b) => (a.reopen ? 0 : 1) - (b.reopen ? 0 : 1) || stamp(a.id) - stamp(b.id))
+    const maxReads = this.options.maxReads ?? 16
+    const budgetMs = this.options.budgetMs ?? 10_000
+    const queue = [...local, ...external.slice(0, maxReads)]
+    const skipped = external.length - Math.min(external.length, maxReads)
+    if (queue.length === 0) return { due: due.length, read: 0, deferred: skipped, atOnce: 0 }
+    // The width follows the fan-out, not the cap: 41 due reads get six at a time, which is three rounds of the
+    // 16 a pass is allowed, and 7 get four as they always did.
+    const atOnce = Math.min(this.options.maxAtOnce ?? readsAtOnce(due.length), queue.length)
+    let read = 0
     // Side by side, because serially seven follows serialized one tick out to 20 s (measured live 2026-11-07, every 120 s) and every worker launch in that window waited on GitHub.
-    const queue = [...due]
-    await Promise.all(Array.from({ length: Math.min(READS_AT_ONCE, queue.length) }, async () => {
+    const clock = () => this.options.now?.() ?? Date.now()
+    await Promise.all(Array.from({ length: atOnce }, async () => {
       for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+        // The budget is the pass's, not the pull's: past it the rest is deferred to a pass that reads them
+        // first, which is the difference between a slow tick and a tick that never ends.
+        if (!next.local && clock() - now >= budgetMs) { queue.unshift(next); break }
+        // Polled when the read starts, not when it is scheduled: a read this pass deferred stays due, and a
+        // timestamp for a read that never ran is how a follow goes twenty minutes without one look.
+        if (!next.local) this.polled.set(next.id, now)
+        read += 1
         await this.read(next.id, next.pull, next.local, now, next.reopen)
       }
     }))
+    return { due: due.length, read, deferred: skipped + queue.length, atOnce }
   }
 
   /** The tickets holding a close on this thread that GitHub says is open get their wait back. */
