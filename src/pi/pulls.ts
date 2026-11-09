@@ -13,12 +13,36 @@ export interface PullState {
   closedAt?: string
 }
 
+/**
+ * What one read of one pull request returned, and it is not two cases: GitHub answers HTTP 404 both for a
+ * pull request that does not exist and for one the token cannot see — measured 2026-11-09, the router's
+ * account `matzenbot_adobe` got 404 on `repos/kmatzen/pi-superagent` and on its pull requests #29/#30/#31,
+ * which the owner's token read as open — and the second one ended six live tickets with "closed without
+ * merging". So a read reports three things, and only the first two end a ticket's wait.
+ */
+export type PullRead =
+  /** GitHub's body: `open`, and `closed_at`/`merged_at` when it stopped. The only positive signal there is. */
+  | { read: 'found'; pull: PullState }
+  /** GitHub has no such pull request, and this token can read the repository, so the answer is about the pull. */
+  | { read: 'absent' }
+  /** The read said nothing about the pull request: a 404 from a token that cannot see the repository, a rate-limit account's 404, a 5xx, a dead token. */
+  | { read: 'unreadable'; reason: string }
+
 export interface PullApi {
-  /** Undefined when GitHub has no such pull request. */
-  pull(repo: string, number: number): Promise<PullState | undefined>
+  /** `found` with GitHub's body, `absent` when the repository is readable and has no such number, `unreadable` when the read itself failed. See `PullRead`. */
+  pull(repo: string, number: number): Promise<PullRead>
   comments(repo: string, number: number, since?: string): Promise<IssueComment[]>
   reviews(repo: string, number: number): Promise<PrReview[]>
 }
+
+/** One followed pull request the token cannot read, and how many reads in a row said so. */
+export interface UnreadablePull { reason: string; reads: number; at: string; escalated: boolean }
+
+/** Thread id (`owner/repo#29`) to the last unreadable read of it — the same list health.json and the end receipt read. */
+export type UnreadablePulls = Record<string, UnreadablePull>
+
+/** The durable position store key the follower keeps that list under, so a router restart does not forget it. */
+export const UNREADABLE_PULLS = 'pulls:unreadable'
 
 // URLs only: `#5` or `owner/repo#5` may be an issue, whose thread never merges, so its ticket would wait forever.
 export function parsePull(text: string): PullRef | undefined {
@@ -77,7 +101,16 @@ export interface FollowerOptions {
   now?: () => number
   /** How often a pull request outside the watched repository is read: three calls each time, against GitHub's hourly limit. */
   everyMs?: number
+  /**
+   * Consecutive unreadable reads of one pull request before it escalates: one warning per pull request per
+   * window of this many reads, and the count published for `health.json`. 40 at the read budget below is
+   * about 80 minutes of a pull request nobody can read — long enough that a permission blip never escalates,
+   * short enough that a pull request the token will never see is named the same working day. Default 40.
+   */
+  escalateAfter?: number
 }
+
+const ESCALATE_AFTER = 40
 
 // Four `gh` round trips (~0.9 s each) at a time finishes a pass inside one tick; the cap overlaps the calls, it adds none.
 const READS_AT_ONCE = 4
@@ -85,6 +118,8 @@ const READS_AT_ONCE = 4
 export class PullFollower {
   private readonly polled = new Map<string, number>()
   private readonly unreadable = new Set<string>()
+  /** Consecutive reads of one pull request that said nothing, by thread id; 0 once a read has answered. */
+  private readonly unreadReads = new Map<string, number>()
 
   constructor(private readonly options: FollowerOptions) {}
 
@@ -102,6 +137,13 @@ export class PullFollower {
       }
     }
     const open = this.options.openThreads()
+    // A follow nobody holds open any more has no ticket waiting on it: drop its count, so health.json names
+    // the pull requests blocking a ticket NOW and the list cannot grow past the follows it is counting.
+    const listed = this.options.positions.get<UnreadablePulls>(UNREADABLE_PULLS)
+    if (listed) {
+      const kept = Object.fromEntries(Object.entries(listed).filter(([thread]) => followed.has(thread)))
+      if (Object.keys(kept).length !== Object.keys(listed).length) this.options.positions.set(UNREADABLE_PULLS, kept)
+    }
     const due: Array<{ id: string; pull: PullRef; local: boolean }> = []
     for (const [id, pull] of followed) {
       const local = id.startsWith('#')
@@ -120,19 +162,65 @@ export class PullFollower {
   }
 
   private async read(id: string, pull: PullRef, local: boolean, now: number): Promise<void> {
-    let state: PullState | undefined
+    let result: PullRead
     try {
-      state = await this.options.api.pull(pull.repo, pull.number)
+      result = await this.options.api.pull(pull.repo, pull.number)
     } catch (error) {
-      this.options.warn('pull.read_failed', { thread: id, error: String(error).slice(0, 200) })
+      // Thrown reads count too: the rate-limit account's 404 (tagged 2026-11-08) is this same class of answer.
+      this.countUnreadable(id, String(error).slice(0, 200), 'pull.read_failed')
       return
     }
-    // A pull request GitHub no longer has cannot be merged, so the ticket's wait ends here: `undefined` is GitHub's only answer for one.
-    if (!state || !state.open) {
-      this.options.closed({ source: 'github', id }, pull, state?.merged ? 'merged' : 'closed', state?.closedAt ?? new Date(now).toISOString())
+    if (result.read === 'unreadable') {
+      // Not a close. The ticket keeps waiting and the follow keeps being read; the next pass asks again.
+      this.countUnreadable(id, result.reason, 'pull.unreadable')
+      return
+    }
+    this.readableAgain(id)
+    // A pull request GitHub has no more cannot be merged, so the ticket's wait ends: `absent` is only ever
+    // reported for a repository this token CAN read (see `ghPulls.pull`), which is what makes it an answer.
+    if (result.read === 'absent') {
+      this.options.warn('pull.absent', { thread: id, reason: 'repository readable, GitHub has no such pull request' })
+      this.options.closed({ source: 'github', id }, pull, 'closed', new Date(now).toISOString())
+      return
+    }
+    const state = result.pull
+    // The only path that ends a ticket's wait: GitHub's body, saying `state: closed`, with its own `closed_at`.
+    if (!state.open) {
+      this.options.closed({ source: 'github', id }, pull, state.merged ? 'merged' : 'closed', state.closedAt ?? new Date(now).toISOString())
       return
     }
     if (!local) await this.listen(id, pull, state.createdAt)
+  }
+
+  /**
+   * One more read of this pull request that said nothing. Warned once, then once per escalation window —
+   * 2880 polls a day is not a log — and kept in the durable list, which is what makes it countable from
+   * health.json and sayable on the ticket's receipt.
+   */
+  private countUnreadable(id: string, reason: string, event: string): void {
+    const reads = (this.unreadReads.get(id) ?? 0) + 1
+    this.unreadReads.set(id, reads)
+    const every = this.options.escalateAfter ?? ESCALATE_AFTER
+    // Warned on the window's edge, once; the record keeps "it has been unreadable a whole window" so
+    // health.json does not blink off between escalations.
+    const due = reads % every === 0
+    const list = this.options.positions.get<UnreadablePulls>(UNREADABLE_PULLS) ?? {}
+    if (reads === 1) this.options.warn(event, { thread: id, reason, reads })
+    if (due) this.options.warn('pull.unreadable_escalated', { thread: id, reason, reads, window: every })
+    this.options.positions.set(UNREADABLE_PULLS, { ...list, [id]: { reason, reads, at: list[id]?.at ?? new Date(this.options.now?.() ?? Date.now()).toISOString(), escalated: reads >= every } })
+  }
+
+  /** A read that answered: the count resets, the list drops it, and a pull request that came back says so once. */
+  private readableAgain(id: string): void {
+    const reads = this.unreadReads.get(id)
+    if (reads) {
+      this.unreadReads.delete(id)
+      this.options.warn('pull.readable', { thread: id, reads })
+    }
+    const list = this.options.positions.get<UnreadablePulls>(UNREADABLE_PULLS)
+    if (!list?.[id]) return
+    const { [id]: dropped, ...rest } = list
+    this.options.positions.set(UNREADABLE_PULLS, rest)
   }
 
   private async listen(id: string, pull: PullRef, createdAt: string): Promise<void> {

@@ -50,6 +50,14 @@ the router polls every 30 seconds and also wakes when its pi session goes idle. 
 triggers, reconciles PRs and closed threads, evaluates requests, starts pending work, checks for quiet
 workers and flushes replies. Three consecutive GitHub poll failures set an error in `health.json`.
 
+A pull read answers in three ways, not two (`PullRead` in `pulls.ts`): GitHub's body, the word `absent`
+when the same token can read the repository and GitHub has no such number, and `unreadable` when the read
+itself said nothing — a 404 from an account the repository is invisible to, a rate-limit account's 404, a
+5xx. Only the first two end a ticket's wait, because GitHub answers HTTP 404 for a pull request that is gone
+and for one the token cannot see with the same bytes. An unreadable read keeps the follow open, is named once
+per pull request per window (`pull.unreadable`, then `pull.unreadable_escalated`), and is counted under
+`pulls` in `health.json` as `degraded` — a repository the token will never see is not an outage to restart.
+
 `source-github.ts` tracks issues, comments and submitted reviews. It recognizes the router’s own
 comments by the bot login or a hidden marker. `scopeOf` in `router.ts` checks each author’s GitHub
 association or the configured login list before the trigger can reach a judge or worker.
