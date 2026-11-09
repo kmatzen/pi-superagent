@@ -1193,4 +1193,32 @@ describe('the tick keeps its cadence', () => {
     await until(() => (JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state === 'ok', 10_000)
     expect(trailOf(f.dir), 'a pass that owns the guard reports the cadence').toMatch(/ tick n=/)
   }, 30_000)
+
+  it('a tick asked for by hand cannot clear the alarm the loop is under', async () => {
+    // The panel's "run one pass now" and the `engine_tick` tool are what an operator reaches for the moment a
+    // router looks stuck. With a pass parked, that pass owns the guard, so the pass by hand must do its work and
+    // say nothing: the liveness line, the stage label and health.json belong to the parked one, and an `ok` from
+    // a side pass is the alarm switched off by the person trying to read it.
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let polls = 0
+    const api: GithubApi = {
+      issues: async () => { polls += 1; if (polls === 1) await gate; return [] as IssueComment[] as never },
+      comments: async () => [] as IssueComment[],
+      postComment: async () => {},
+    }
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, tickStallMs: 10, tickStallReportMs: 10, tickAbandonMs: 600_000, githubApi: api })
+    await until(() => trailOf(f.dir).includes('tick.stalled'), 2_000)
+    expect((JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state, 'the loop is under an alarm').toBe('error')
+
+    await withDeadline(f.running.tick(), 2_000, 'a pass asked for by hand')
+    expect(polls, 'it did run: the work of a tick is not what is withheld').toBe(2)
+    expect(trailOf(f.dir), 'it logs no liveness line for a loop that has finished nothing').not.toMatch(/ tick n=/)
+    expect((JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state, 'and writes no ok over the alarm').toBe('error')
+
+    release()
+    await until(() => (JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state === 'ok', 5_000)
+    expect(trailOf(f.dir), 'the pass that owns the guard is the one that clears it').toMatch(/ tick n=/)
+  }, 30_000)
 })
