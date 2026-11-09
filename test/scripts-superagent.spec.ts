@@ -89,6 +89,38 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     }
   })
 
+  it('frees the panel port when the router recorded that pid as its own panel', async () => {
+    // The refusal above is right about a stranger and fatal about us: our router rewrites its process title, so
+    // `ps` shows no environment, the guard saw a squatter, and `restart` (stop, then refuse) left the fleet on
+    // the old build. The pid the router recorded when it bound the panel is the second proof, and it is the
+    // narrowest question available: this exact pid. The squatter reports its own, as the router does — lsof mixes clients with listeners.
+    const selfPid = join(state, 'squatter.pid')
+    const squatter = spawn(process.execPath,
+      ['-e', `require('fs').writeFileSync(process.argv[1], String(process.pid));`
+        + `require('http').createServer((_q,r)=>r.end('mine')).listen(${PANEL_PORT},'127.0.0.1'); setInterval(()=>{},1000)`,
+        selfPid], { stdio: 'ignore' })
+    try {
+      await vi.waitFor(async () => {
+        const r = await fetch(`http://127.0.0.1:${PANEL_PORT}`).catch(() => null)
+        expect(r?.status, 'the panel is listening').toBe(200)
+      }, { timeout: 5000 })
+      await vi.waitFor(() => expect(existsSync(selfPid), 'the panel recorded its pid').toBe(true), { timeout: 5000 })
+      const holder = readFileSync(selfPid, 'utf8').trim()
+      expect(holder, 'the port owner knows its own pid').toMatch(/^\d+$/)
+      writeFileSync(join(state, 'panel.pid'), `${holder}\n`) // what the router wrote when it bound this port
+      const out = run(['start'])
+      expect(out.status, `${portHint()}\n${out.stderr}`).toBe(0)
+      expect(routerTab(), 'the new router starts on the port the old one held').toContain(`PI_SUPERAGENT_PANEL_PORT=${PANEL_PORT}`)
+      expect(squatter.pid, 'the recorded pid is the process that held the port').toBe(Number(holder))
+      await vi.waitFor(() => expect(portHolders(), 'the recorded panel was freed for the new one').not.toContain(holder),
+        { timeout: 10_000 })
+    } finally {
+      squatter.kill()
+      await new Promise<void>(resolve => squatter.once('exit', () => resolve()))
+      await portFree()
+    }
+  })
+
   it('every case starts on a port this run took, so two runs of this file cannot collide on one box', () => {
     expect(PANEL_PORT, 'an ephemeral port, not the box-wide constant the runs collided on').toBeGreaterThan(1024)
     started()

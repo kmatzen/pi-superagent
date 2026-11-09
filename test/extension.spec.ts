@@ -75,7 +75,8 @@ afterEach(() => { for (const r of live.splice(0)) r.stop() })
 
 function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
                  options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number;
-                   workerTiming?: { pollMs?: number; livenessMs?: number }; workerQuietMinutes?: number; pullApi?: PullApi; blocked?: string[];
+                   workerTiming?: { pollMs?: number; livenessMs?: number }; panelPort?: number | string;
+                   workerQuietMinutes?: number; pullApi?: PullApi; blocked?: string[];
                    judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
                    maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number } = {}) {
   const dir = reuse ?? tmp()
@@ -106,7 +107,13 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   const receipts = (n: string) => feed.posts.filter(p => String(p.issue) === n).map(p => p.body).join('\n')
   const config: RouterConfig = {
     dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', githubRepo: 'o/r', prepare: options.prepare ?? 'true',
-    bots: new Set(['fleet-answer-loop']), tickMs: options.tickMs ?? 5, ...(herdr ? { workers: 'herdr' as const } : {}),
+    bots: new Set(['fleet-answer-loop']), tickMs: options.tickMs ?? 5,
+    // No panel by default: 78 fixtures binding 78 sockets is not what these tests are about.
+    ...(options.panelPort === undefined ? {}
+      // '8799' as a string is the fixture's way of writing "bind a panel" without picking a number: the port
+      // never reaches a listen() call in these tests, and the file the router writes on binding is the subject.
+      : { panelPort: Number(options.panelPort) }),
+    ...(options.workerQuietMinutes === undefined ? {} : { workerQuietMinutes: options.workerQuietMinutes }), ...(herdr ? { workers: 'herdr' as const } : {}),
     ...(options.blocked ? { blockedCommands: options.blocked } : {}),
     ...(options.workerQuietMinutes === undefined ? {} : { workerQuietMinutes: options.workerQuietMinutes }),
 
@@ -342,6 +349,21 @@ describe('the router extension', () => {
     appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"ready","summary":"keys rotated"}\n')
     await until(() => f.receipts('460').includes('keys rotated'))
     expect(f.receipts('460')).toContain('ready: keys rotated')
+  })
+
+  it('the router records the pid that owns its panel, which is the proof the start script can read', async () => {
+    // The start script must not kill a stranger holding the panel port, and PR 36 proved ownership by reading
+    // the port owner's environment. A router rewrites its process title, so on macOS there is no environment to
+    // read: `ps eww` on the live router printed no PI_SUPERAGENT variable, `start` refused, and `restart` left
+    // the fleet running the previous build with the new one on disk. The pid that bound the panel is a proof that
+    // survives a title rewrite, so the router writes it and the guard reads it.
+    // 0, not a number: 8788 is the running engine's, and EADDRINUSE would land on the fallback path this
+    // repository already has for a busy port. An ephemeral port binds on the first try, and 'listening' is
+    // asynchronous, so the file is waited for rather than read on the next line.
+    const f = fixture(true, undefined, undefined, undefined, { panelPort: '8799' })
+    await f.running.tick()
+    await until(() => existsSync(join(f.dir, 'panel.pid')))
+    expect(readFileSync(join(f.dir, 'panel.pid'), 'utf8').trim(), 'the pid that bound the panel').toBe(String(process.pid))
   })
 
   it('a crashed worker gets one fresh worker by itself, told what happened; a second crash waits for a person', async () => {
