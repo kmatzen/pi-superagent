@@ -75,7 +75,7 @@ afterEach(() => { for (const r of live.splice(0)) r.stop() })
 
 function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
                  options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number;
-                   workerTiming?: { pollMs?: number; livenessMs?: number }; pullApi?: PullApi; blocked?: string[];
+                   workerTiming?: { pollMs?: number; livenessMs?: number }; workerQuietMinutes?: number; pullApi?: PullApi; blocked?: string[];
                    judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
                    maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number } = {}) {
   const dir = reuse ?? tmp()
@@ -108,6 +108,8 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', githubRepo: 'o/r', prepare: options.prepare ?? 'true',
     bots: new Set(['fleet-answer-loop']), tickMs: options.tickMs ?? 5, ...(herdr ? { workers: 'herdr' as const } : {}),
     ...(options.blocked ? { blockedCommands: options.blocked } : {}),
+    ...(options.workerQuietMinutes === undefined ? {} : { workerQuietMinutes: options.workerQuietMinutes }),
+
     ...(options.maxConcurrent === undefined ? {} : { maxConcurrent: options.maxConcurrent }),
     ...(options.launchDrainMs === undefined ? {} : { launchDrainMs: options.launchDrainMs }),
     ...(options.tickStallMs === undefined ? {} : { tickStallMs: options.tickStallMs }),
@@ -361,6 +363,34 @@ describe('the router extension', () => {
     h.agents.clear()
     await until(() => f.receipts('461').includes('Nothing is working on this ticket now'))
     expect(starts(), 'one fresh worker per ticket, not a loop').toBe(2)
+  })
+
+  it('the silence question frees the agent as well, and the next comment starts a fresh worker', async () => {
+    // Measured 2026-11-09, minutes after the release rule shipped: 6 tickets still held workers that had finished
+    // before the deploy. Their next report was going to be this sweep — the question the router asks a worker that
+    // has said nothing for 15 minutes — and that report went to the ticket while the Session, its tab and its slot
+    // stayed in place. A question is what frees an agent, whoever asks it. The question goes to the panel, not the
+    // issue, so this asserts the agent and the slot rather than a thread message.
+    const h = memoryHerdr()
+    // 0.3 s, not 15 minutes: the executor measures silence on the wall clock, and the threshold is config.
+    // It stays above the fake's launch latency, so the worker really starts, goes quiet, and is then asked.
+    const f = fixture(true, undefined, undefined, h.herdr,
+      { workerTiming: { pollMs: 10, livenessMs: 600_000 }, workerQuietMinutes: 0.005 })
+    f.addComment('512', 'octocat', 'bump the base image')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await until(() => h.calls.filter(c => c === 'agentStart').length === 1)
+    h.agents.clear() // the worker stops speaking: no crash, no report, just silence
+    // `load().running` is the authoritative slot count, and a released Assignment is not parked work either:
+    // together they say the agent is gone, which is what the panel question is supposed to buy.
+    await until(() => f.running.load().running === 0)
+    expect(f.running.load().parked, 'a released worker is not parked work').toBe(0)
+    f.addComment('512', 'octocat', 'merge it and close')
+    await f.running.tick()
+    await settle()
+    await until(() => h.calls.filter(c => c === 'agentStart').length === 2)
+    expect(f.receipts('512'), 'the ticket is live: a person was never asked to re-open it').not.toMatch(/stopped/)
   })
 
   it('after a router restart the herdr worker is taken over, not started a second time', async () => {
