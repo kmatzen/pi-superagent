@@ -269,6 +269,10 @@ start() {
     return 1
   fi
   rm -f "$STOP_MARKER"
+  # The pid that bound the panel, as the running router recorded it. Read once, before the loop: a file read
+  # inside the kill loop changes shape when the process it names dies.
+  RECORDED_PANEL_PID="$(cat "$STATE/panel.pid" 2>/dev/null)"
+  export RECORDED_PANEL_PID
   if [ -z "$SESSION_ID" ]; then
     [ -f "$STATE/session-id" ] || uuidgen | tr 'A-Z' 'a-z' > "$STATE/session-id"
     SESSION_ID="$(cat "$STATE/session-id")"
@@ -277,11 +281,17 @@ start() {
   # after 5 s) so the new panel binds where people look for it; workers never hold the port.
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     nc -z 127.0.0.1 "$PANEL_PORT" 2>/dev/null || break
-    for pid in $(lsof -ti "tcp:${PANEL_PORT}" 2>/dev/null); do
-      # Only our own router's panel may be killed here. A dev server, a database, or a second tool that
-      # picked 8788 is somebody's work, and the nightly health check must not terminate it. The environment
-      # names the owner: a superagent router carries the state directory it serves.
-      if ! ps eww -p "$pid" -o command= 2>/dev/null | grep -qF "PI_SUPERAGENT_STATE=$STATE"; then
+    # Listeners only, and `-a` is load-bearing: without it lsof ORs the port match with the state match and
+    # answers with every listening socket on the box. Clients are not the panel — measured 2026-11-09, a client
+    # connected to the panel made `start` refuse with "belongs to a process that is not this router".
+    for pid in $(lsof -nP -a -ti "tcp:${PANEL_PORT}" -sTCP:LISTEN 2>/dev/null); do
+      # Ours by two proofs, and the second is deliberately the narrowest question there is: the environment names
+      # the state directory this router serves, or this exact pid is the one the router wrote when it bound the
+      # panel. The environment is unreadable on macOS for a router, which rewrites its process title — that is
+      # what made `restart` refuse to start our own fleet. A client of the panel is never the recorded pid,
+      # because the pid belongs to the process that bound the socket, not to anyone connected to it.
+      if ! ps eww -p "$pid" -o command= 2>/dev/null | grep -qF "PI_SUPERAGENT_STATE=$STATE" \
+        && [ "${RECORDED_PANEL_PID:-}" != "$pid" ]; then
         echo "superagent: port $PANEL_PORT belongs to a process that is not this router (pid $pid: $(ps -p "$pid" -o command= 2>/dev/null | cut -c1-60)); move it, or set PI_SUPERAGENT_PANEL_PORT" >&2
         return 1
       fi

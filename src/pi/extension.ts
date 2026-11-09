@@ -1088,7 +1088,17 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       fallback = true
       panel.server.listen(0, '127.0.0.1')
     })
-    panel.server.on('listening', () => log.line('info', 'panel.bound', { port: (panel.server.address() as { port?: number } | null)?.port ?? cfg.panelPort }))
+    panel.server.on('listening', () => {
+      // The pid that bound the panel, recorded for the start script: before it kills a port owner it proves the
+      // owner is ours, and a router rewrites its process title, so macOS `ps` prints no command line and no
+      // environment for this process. Measured 2026-11-09: `ps eww` on the live router carried no PI_SUPERAGENT
+      // variable at all, so the environment test read every running router as a squatter and `restart` could not
+      // start. A pid is the proof that survives a rewritten title.
+      try {
+        writeFileSync(join(cfg.dataDir, 'panel.pid'), `${process.pid}\n`)
+      } catch { /* a panel that cannot record its pid still serves; `start` then falls back to its old refusal */ }
+      log.line('info', 'panel.bound', { port: (panel.server.address() as { port?: number } | null)?.port ?? cfg.panelPort })
+    })
     panel.server.listen(cfg.panelPort, '127.0.0.1')
   }
 
