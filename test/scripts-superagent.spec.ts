@@ -1,5 +1,5 @@
 import { spawn, spawnSync, execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, type AddressInfo } from 'node:net'
@@ -33,13 +33,15 @@ const portFree = () => vi.waitFor(() => new Promise<void>((resolve, reject) => {
 }), { timeout: 5000 })
 
 let state: string, herdrDir: string
-const run = (args: string[], extra: Record<string, string> = {}) => spawnSync(SCRIPT, args, {
-  encoding: 'utf8',
-  env: {
-    ...process.env, PI_SUPERAGENT_STATE: state, PI_SUPERAGENT_HERDR: FAKE, PI_SUPERAGENT_GRACE: '1', FAKE_HERDR_DIR: herdrDir,
-    PI_SUPERAGENT_PANEL_PORT: String(PANEL_PORT), FAKE_HERDR_READY: join(state, 'ready'), ...extra,
-  },
+// Every run of this file takes its env through here, so a case that needs its own setting says so in one
+// place — and so the guard's cases can run the same command from a binary of their choosing.
+const envFor = (extra: Record<string, string> = {}) => ({
+  ...process.env, PI_SUPERAGENT_STATE: state, PI_SUPERAGENT_HERDR: FAKE, PI_SUPERAGENT_GRACE: '1', FAKE_HERDR_DIR: herdrDir,
+  PI_SUPERAGENT_PANEL_PORT: String(PANEL_PORT), FAKE_HERDR_READY: join(state, 'ready'), ...extra,
 })
+const run = (args: string[], extra: Record<string, string> = {}) => spawnSync(SCRIPT, args, { encoding: 'utf8', env: envFor(extra) })
+/** The same command from a binary of the test's choosing: the guard must hold when `superagent` is a symlink. */
+const runFrom = (bin: string, args: string[], extra: Record<string, string> = {}) => spawnSync(bin, args, { encoding: 'utf8', env: envFor(extra) })
 // Every case that needs a router: a start that failed says what it hit, port and pid included.
 const started = (extra: Record<string, string> = {}) => {
   const r = run(['start'], extra)
@@ -284,6 +286,31 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     // The same checkout with the credential moved out of the URL deploys, so the guard costs nothing when clean.
     writeFileSync(join(watched, '.git', 'config'), '[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
     expect(run(['start'], { PI_SUPERAGENT_WATCHED_CHECKOUTS: `${watched}:${watched}` }).status, 'a clean URL deploys').toBe(0)
+  })
+
+  it('refuses a leaked credential when the command it is running is a symlink into the checkout', () => {
+    // The install shape the operator's PATH points at: `<prefix>/bin/superagent` is a LINK into the package
+    // (npm's global install leaves one, and a hand link into a checkout is the documented alternative). Then
+    // BASH_SOURCE names the link, and a REPO_ROOT built from its dirname is `<prefix>`: no checkout there, so
+    // the scan finds nothing, prints nothing, and the deploy proceeds over the leaked checkout below. Measured
+    // on a linked install before the fix: `start` exited 0. The guard's own path is part of what it guards.
+    const root = mkdtempSync(join(tmpdir(), 'pi-sa-link-')); dirs.push(root)
+    const checkout = join(root, 'prefix', 'lib', 'node_modules', 'pi-superagent')
+    mkdirSync(join(checkout, 'scripts'), { recursive: true })
+    mkdirSync(join(checkout, '.git'), { recursive: true })
+    const secret = `ghp_${'s'.repeat(36)}`
+    writeFileSync(join(checkout, '.git', 'config'), `[remote "origin"]\n\turl = https://x-access-token:${secret}@github.com/kmatzen/pi-superagent.git\n`)
+    const target = join(checkout, 'scripts', 'superagent')
+    copyFileSync(SCRIPT, target); chmodSync(target, 0o755)
+    const link = join(root, 'superagent')
+    symlinkSync(target, link)
+
+    const out = runFrom(link, ['start'])
+    expect(out.status, out.stderr).toBe(1)
+    expect(out.stderr).toMatch(/carries a git credential in the clear/)
+    expect(out.stderr).toMatch(/pi-superagent\/\.git\/config line 2/) // realpath may add a /private prefix
+    expect(out.stderr, 'the guard must not publish the token it found').not.toContain(secret)
+    expect(existsSync(join(herdrDir, 'calls')), 'nothing was started').toBe(false)
   })
 
   it('refuses a ticket checkout that came back with a credential in its remote', () => {

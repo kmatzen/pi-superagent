@@ -59,7 +59,22 @@ READY_WAIT="${PI_SUPERAGENT_READY_WAIT:-60}"
 # not say what it is, and any non-local Host.
 PANEL_PORT="${PI_SUPERAGENT_PANEL_PORT:-8788}"
 # The checkout this script was started from: the router's code, its .git/config, and the thing a deploy pulls.
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Follow symlinks first: a `superagent` on PATH is usually a LINK (npm's global install leaves one in its bin
+# directory, and linking the script out of a checkout is the documented way to run it from a checkout), so
+# BASH_SOURCE names the link and a REPO_ROOT built from its dirname is the directory holding the link. Measured
+# through a link into a checkout whose config held a token: `start` exited 0, because the scan looked in the
+# link's own directory, found no checkout there, and printed nothing. A guard that reports a leaking box clean
+# is worse than no guard, so the link is followed to the file it points at before the directory is taken.
+script_realpath() {
+  local path="$1" link
+  while [ -L "$path" ]; do
+    link="$(readlink "$path")" || break
+    [ "${link#/}" = "$link" ] && link="$(dirname "$path")/$link"
+    path="$link"
+  done
+  printf '%s\n' "$path"
+}
+REPO_ROOT="$(cd "$(dirname "$(script_realpath "${BASH_SOURCE[0]}")")/.." && pwd -P)"
 # The router's judge runs through pi's SDK, and pi hands its own to the extension: inside pi, importing the
 # package name resolves to the running pi wherever it is installed. PI_SUPERAGENT_SDK_PATH, an entry file,
 # overrides that and passes through with the other settings.
