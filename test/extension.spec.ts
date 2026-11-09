@@ -45,7 +45,7 @@ function fakePi(): FakePi {
   }
 }
 
-interface Spy { prompts: string[]; report: ((args: Record<string, unknown>) => unknown) | undefined; disposed: boolean }
+interface Spy { prompts: string[]; report: ((args: Record<string, unknown>) => unknown) | undefined; disposed: boolean; events: Array<(event: { type: string; error?: string }) => void> }
 
 const settle = () => new Promise<void>(resolve => setTimeout(resolve, 15))
 const until = async (ok: () => boolean, ms = 5000) => {
@@ -116,7 +116,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     ...(options.workerTokenFile ? { workerTokenFile: options.workerTokenFile } : {}),
   }
   const workers: Spy[] = []
-  const judge: Spy = { prompts: [], report: undefined, disposed: false }
+  const judge: Spy = { prompts: [], report: undefined, disposed: false, events: [] }
   const judgeSessions: string[] = []
   const loaders: Array<Record<string, unknown>> = []
   const judgeListeners: Array<(event: { type: string }) => void> = []
@@ -131,9 +131,9 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
         judge.report = args => tool.execute('judge-1', args as never)
         return { session: { sessionId: 'judge', prompt: async (t: string) => { judge.prompts.push(t) }, subscribe: (l: (event: { type: string }) => void) => { judgeListeners.push(l); return () => {} }, abort: () => {}, dispose: () => {} } }
       }
-      const spy: Spy = { prompts: [], report: args => tool.execute('call-1', args as never), disposed: false }
+      const spy: Spy = { prompts: [], report: args => tool.execute('call-1', args as never), disposed: false, events: [] }
       workers.push(spy)
-      return { session: { sessionId: `w${workers.length}`, prompt: async (t: string) => { spy.prompts.push(t) }, subscribe: () => () => {}, abort: () => {}, dispose: () => { spy.disposed = true } } }
+      return { session: { sessionId: `w${workers.length}`, prompt: async (t: string) => { spy.prompts.push(t) }, subscribe: (l: (event: { type: string; error?: string }) => void) => { spy.events.push(l); return () => {} }, abort: () => {}, dispose: () => { spy.disposed = true } } }
     },
     SessionManager: { inMemory: () => ({}) },
     DefaultResourceLoader: class { constructor(options: Record<string, unknown>) { loaders.push(options) } async reload() {} },
@@ -151,7 +151,9 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     invoke0(pi, 'ticket_decide', { evalId, kind, reason: kind === 'accept' ? 'the operator asked' : 'not a request', title: 'Ship tonight', scope: 'the named change', acknowledgement: 'on it' })
   }
   const settleJudge = () => { for (const l of judgeListeners) l({ type: 'agent_settled' }) }
-  return { dir, feed, addComment, receipts, config, pi, running, workers, judge, judgeSessions, loaders, settleJudge, sdk, accept, decide, closes, spent, calls }
+  // The Session's own events, so a test can die one: the pane closes, the process exits, a restart adopts a ticket whose session is gone.
+  const events = (i = 0) => workers[i]!.events
+  return { dir, feed, addComment, receipts, config, pi, running, workers, judge, judgeSessions, events, loaders, settleJudge, sdk, accept, decide, closes, spent, calls }
 }
 
 describe('the router extension', () => {
@@ -882,6 +884,23 @@ describe('a pull request per ticket', () => {
     expect(f.receipts('492')).toContain('#492 merged: https://github.com/o/r/pull/79. This ticket is done.')
   })
 
+  it('a finished worker whose pull request awaits a merge gives up its agent, and the merge still ends the ticket', async () => {
+    // Measured 2026-11-09: 15 tickets sat `ready` on an unmerged pull request, 4h to 21h each, each holding a
+    // tab, an agent and a slot while nobody was working. formal/Ticket.tla R5 is the claim.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '494')
+    pulls.open('o/r', 80)
+    f.workers[0]!.report!({ state: 'ready', summary: 'pushed the fix, it needs a merge', pullRequests: ['https://github.com/o/r/pull/80'] })
+    await f.running.tick()
+    expect(ticket().ended, 'the ticket stays open: only a person merges').toBeUndefined()
+    expect(f.workers[0]!.disposed, 'the finished worker is freed while the person decides').toBe(true)
+    expect(f.running.load().running, 'and the slot is free for the next ticket').toBe(0)
+    pulls.end('o/r', 80, true, '2026-11-05T10:00:00Z')
+    await f.running.tick()
+    expect(ticket().ended).toMatchObject({ outcome: 'merged', by: 'executor' })
+  })
+
   it('a ready report with no pull request completes the ticket: an answer or an operation changes no repository', async () => {
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pullsFake().api })
     const ticket = await working(f, '493')
@@ -1090,9 +1109,12 @@ describe('a pull request per ticket', () => {
     ])
     f.workers[0]!.report!({ state: 'ready', summary: 'opened it', pullRequests: ['https://github.com/other/lib/pull/5'] })
     await f.running.tick()
-    await until(() => f.workers[0]!.prompts.some(p => p.includes('rename the flag too')))
-    expect(f.workers[0]!.prompts.join('\n')).toContain('reviewer: rename the flag too')
-    expect(f.workers[0]!.prompts.join('\n')).not.toContain('example.invalid')
+    expect(f.workers[0]!.disposed, 'a finished worker whose pull request awaits a merge gives up its agent').toBe(true)
+    // The reviewer's comment is a request, so it starts the worker that reads it; the stranger's is never taken in.
+    await until(() => f.workers.some(w => w.prompts.some(p => p.includes('rename the flag too'))))
+    const carrier = f.workers.find(w => w.prompts.some(p => p.includes('rename the flag too')))!
+    expect(carrier.prompts.join('\n')).toContain('reviewer: rename the flag too')
+    expect(carrier.prompts.join('\n')).not.toContain('example.invalid')
   })
 
   it('a reply for a conversation in another repository is posted there, never on the watched repository', async () => {
