@@ -257,9 +257,19 @@ export function ghPulls(options: GhOptions = {}): PullApi {
     async pull(repo, number) {
       try {
         const r = JSON.parse(await call(['api', `repos/${repo}/pulls/${number}`])) as
-          { state: string; merged_at?: string | null; closed_at?: string | null; created_at: string }
+          { state: string; merged_at?: string | null; closed_at?: string | null; created_at: string; updated_at?: string;
+            head?: { sha?: string }; comments?: number; review_comments?: number }
         const closedAt = r.merged_at ?? r.closed_at
-        return { open: r.state === 'open', merged: Boolean(r.merged_at), createdAt: r.created_at, ...(closedAt ? { closedAt } : {}) }
+        // head/comments/updated_at ride in the same payload, so the freshness gate reads a pull request once.
+        // Absent keys stay absent: a caller that has no fact must not be handed a placeholder for one.
+        return {
+          open: r.state === 'open', merged: Boolean(r.merged_at), createdAt: r.created_at,
+          ...(closedAt ? { closedAt } : {}),
+          ...(r.head?.sha ? { headSha: r.head.sha } : {}),
+          ...(r.comments === undefined && r.review_comments === undefined
+            ? {} : { comments: (r.comments ?? 0) + (r.review_comments ?? 0) }),
+          ...(r.updated_at ? { updatedAt: r.updated_at } : {}),
+        }
       } catch (error) {
         if (!/HTTP 404|Not Found/i.test(String(error))) throw error
         if (await repoReadable(repo)) return undefined

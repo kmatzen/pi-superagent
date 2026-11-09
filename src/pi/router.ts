@@ -52,6 +52,13 @@ export interface RouterConfig {
   policyVersion?: string
   /** Serve the panel and the management API on 127.0.0.1:port; unset means no panel. */
   panelPort?: number
+  /**
+   * How often a settled ticket gets a worker when nothing it waits on has moved. The pre-dispatch freshness gate
+   * (`freshness.ts`) withholds the dispatches before that: a ticket whose last receipt is `ready`/`blocked` on a
+   * pull request nobody has reviewed, with no new answer on its ask, is in the state its receipt already told.
+   * Unset means 24 hours, and the valve exists so a gate that cannot see a move cannot mute a ticket for good.
+   */
+  freshnessRedispatchHours?: number
   prepare?: string
   githubRepo?: string
   githubSelf?: string
