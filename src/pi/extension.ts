@@ -509,7 +509,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       name: 'engine_tick', label: 'Run one pass now',
       description: 'Poll GitHub, judge what is due, start queued work, and post receipts.',
       parameters: STR,
-      execute: async () => { await tick(); return text(paused ? 'paused: tick skipped' : 'tick done') },
+      execute: async () => { await tickNow(); return text(paused ? 'paused: tick skipped' : 'tick done') },
     },
     {
       name: 'engine_pause', label: 'Pause or resume processing',
@@ -524,10 +524,17 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   process.on('uncaughtException', (error: unknown) => log.line('error', 'uncaught', { error: String(error).slice(0, 300) }))
   process.on('unhandledRejection', (error: unknown) => log.line('error', 'unhandled_rejection', { error: String(error).slice(0, 300) }))
 
-  async function tick(): Promise<void> {
+  /**
+   * One pass of the loop. `mine` is the generation that owns the cadence guard: a pass the beat abandoned keeps
+   * running, and a pass that no longer owns the guard must not describe the loop (see the closing block).
+   */
+  async function tick(mine: number): Promise<void> {
     if (paused) return
     const started = Date.now()
     const gapMs = started - lastTickEnd
+    // Only the pass holding the guard names the stage the loop is parked in; a superseded pass reaching its next
+    // await would move the label out from under the stall report that is describing it.
+    const enter = (name: string): void => { if (mine === generation) enterStage(name) }
     const callsAtStart = ghCalls
     let pollMs = 0
     let reconcileMs = 0
@@ -642,6 +649,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // where a slow pass spent itself. One `ms=` field carried all of it, which is why the 6 h stall took six
     // hours to see and the 15 s pass took a board to notice (measured 2026-11-09).
     const finished = Date.now()
+    // Superseded: the beat gave this pass up and a newer one owns the guard. Its numbers are true of itself and
+    // false of the loop, so publishing them would be the silent-success shape all over again — a loop that has
+    // finished nothing, logging a finished pass and writing `"state": "ok"` over its own alarm. The record that
+    // it landed at all is `tick.late_finish`, in `startTick`.
+    if (mine !== generation) return
     lastTickEnd = finished
     log.line('info', 'tick', {
       n: sweeps, inflight: repos.threads.active().filter(t => t.evaluating).length,
@@ -740,7 +752,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   let lastTickEnd = Date.now()
   let lastStallReport = 0
   let lastAbandonReport = 0
-  const enter = (name: string): void => { stage = name; stageAt = Date.now() }
+  const enterStage = (name: string): void => { stage = name; stageAt = Date.now() }
   // One decimal, because a stall reported as "0s" reads as nothing having happened.
   const secs = (ms: number): string => `${Math.round(ms / 100) / 10}s`
 
@@ -783,7 +795,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     tickBegan = beganAt
     ticking = true
     inFlight += 1
-    void tick().finally(() => {
+    void tick(mine).finally(() => {
       inFlight -= 1
       if (mine !== generation) {
         // The pass gave up its place long ago, and the live stage belongs to whoever holds it now: report only
@@ -798,6 +810,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const runTick = (): void => {
     // Measured 2026-11-08: a tick parked on worker capacity held nine replies for ten minutes, and the guard returned before this line.
     outbox.flush()
+    // A router paused on purpose keeps its beat in health.json: that file is what a scheduled check reads, and a
+    // loop that stops writing it is indistinguishable from a dead one (`stale_health` in scripts/superagent).
+    if (paused) { publishHealth(tickHealth('ok', { detail: 'paused: the beat is running, the pass is skipped' })); return }
     if (!ticking) { startTick(); return }
     again = true
     // The timer fires while a pass is parked, which makes it the one thing that can see the stall. Before this
@@ -841,6 +856,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     again = false
     startTick()
   }
+  /** A pass on demand: the panel, the `engine_tick` tool, a test. It borrows the current generation, so it
+   *  reports its own liveness, and it never takes the guard from a pass already in flight. */
+  const tickNow = (): Promise<void> => tick(generation)
   const timer = setInterval(runTick, tickMs)
   const off = pi.on('agent_settled', runTick)
 
@@ -887,7 +905,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
 
   return {
-    tick, tools, engine, assessor, workers: () => executor.workers(),
+    tick: tickNow, tools, engine, assessor, workers: () => executor.workers(),
     setPaused: (v: boolean) => { paused = v },
     isPaused: () => paused,
     load: panelLoad,

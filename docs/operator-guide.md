@@ -142,6 +142,12 @@ the product. The stage `tick.abandon_skipped` names is what to fix; a restart cl
 which is the one case where it does. The line `tick n=…` is the
 liveness line: its `gapMs` is the time since the last pass finished, read against `PI_SUPERAGENT_TICK_MS`.
 
+**Status exits 2 saying `health.json is N min old`.** Nothing is reporting, which is the same fault with no
+report attached: the process is alive in herdr, but the loop that rewrites that file on every pass is not
+running — a pass blocked synchronously cannot report its own stall. Restart it (`scripts/superagent restart`).
+A router paused on purpose keeps writing, one line per beat, so a pause never reads as stale; the dial is
+`PI_SUPERAGENT_HEALTH_STALE_MIN` (15).
+
 **The board is busy and nothing starts.** `tick n=…` carries `launchPending` (launches waiting for a free
 worker slot) and `open`/`running`/`parked`. Waiting launches are the queue doing its job, not a stall; the
 router no longer waits a pass on them.

@@ -1161,4 +1161,36 @@ describe('the tick keeps its cadence', () => {
     expect(health.tick.state, 'and the file the health check counts says the loop is not beating').toBe('error')
     expect(health.tick.detail).toContain('the loop is not beating')
   })
+
+  it('the pass the beat gave up on clears nothing', async () => {
+    // Abandoning a pass gives up its place in the guard, not the pass, so the abandoned one eventually lands.
+    // It must not stamp the liveness line, move `lastTickEnd`, or write `"state": "ok"` over the alarm the loop
+    // is under: that is the silent-success shape, with health.json — the file `superagent status` counts — as
+    // the victim, and it is the one report a stalled loop can produce against itself.
+    const resolvers: Array<() => void> = []
+    let polls = 0
+    const api: GithubApi = {
+      // Every pass parks in the poll, each on its own resolver: nothing can finish on its own, so any
+      // `tick n=` line in the trail is the report this test is looking for.
+      issues: async () => { polls += 1; await new Promise<void>(resolve => { resolvers.push(resolve) }); return [] },
+      comments: async () => [] as IssueComment[],
+      postComment: async () => {},
+    }
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, tickStallMs: 10, tickStallReportMs: 10, tickAbandonMs: 30, githubApi: api })
+    await until(() => trailOf(f.dir).includes('tick.abandon_skipped'), 10_000)
+    expect(polls, 'the ceiling is in force: every pass is parked in the poll').toBe(3)
+
+    for (const release of resolvers.splice(0, 1)) release()   // the superseded pass lands; the loop is still wedged
+    await until(() => trailOf(f.dir).includes('tick.late_finish'), 10_000)
+    expect(trailOf(f.dir), 'it says where it landed, and nothing else').toMatch(/tick\.late_finish runningMs=\d+ supersededBy=\d+/)
+    expect(trailOf(f.dir), 'it writes no liveness line for a loop that has finished nothing').not.toMatch(/ tick n=/)
+    expect((JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state, 'and it leaves the alarm up')
+      .toBe('error')
+
+    // Let everything through: the beat finishes passes again, and the pass that owns the guard reports it.
+    await until(() => { for (const release of resolvers.splice(0)) release(); return polls > 3 }, 10_000)
+    await until(() => (JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state === 'ok', 10_000)
+    expect(trailOf(f.dir), 'a pass that owns the guard reports the cadence').toMatch(/ tick n=/)
+  }, 30_000)
 })
