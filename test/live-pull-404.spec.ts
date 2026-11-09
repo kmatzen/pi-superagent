@@ -3,6 +3,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { ghPulls } from '../src/pi/gh-api.ts'
+import { PullFollower, UNREADABLE_PULLS, type UnreadablePulls } from '../src/pi/pulls.ts'
+import type { Ticket } from '../src/core/index.ts'
 
 /**
  * The live proof, against GitHub itself, of the fact the fakes can only imitate: a 404 is GitHub's answer for
@@ -55,6 +57,35 @@ describe.skipIf(!live)('a pull request the token cannot see reads as unreadable,
     const read = await ghPulls({ tokenFile: routerToken }).pull(watched, 1)
     expect(['found', 'absent'], `${watched} is readable to the router's token, so a 404 there is absence`).toContain(read.read)
   })
+
+  it('the 11:34:18Z first pass, replayed: the follows the router ended are read, and none of them closes', async () => {
+    // Every thread in the ticket's block, the router's own token, the real follower, GitHub answering live.
+    // Before the fix this pass logged `pull.closed outcome=closed` for all of them and ended board ticket #303
+    // for the third time; all of these pull requests are open.
+    const threads = ['matzen_adobe/fleet-board#70', 'matzen_adobe/fleet-board#69', 'matzen_adobe/pi-superagent#1',
+      'kmatzen/pi-superagent#29', 'kmatzen/pi-superagent#31', 'kmatzen/pi-superagent#30']
+    const closed: string[] = []
+    const warned: string[] = []
+    const kv = new Map<string, unknown>()
+    const follower = new PullFollower({
+      home: 'matzen_adobe/superagent-board-spike', api: ghPulls({ tokenFile: routerToken }),
+      openThreads: () => new Set<string>(),
+      positions: { get: <T,>(k: string) => kv.get(k) as T | undefined, set: (k, v) => { kv.set(k, v) } },
+      self: 'matzenbot_adobe', everyMs: 0,
+      closed: thread => { closed.push(thread.id) },
+      receive: () => { throw new Error('an unreadable pull must not produce triggers either') },
+      warn: (event, fields) => { warned.push(`${event} ${fields.thread} ${fields.reason ?? ''}`) },
+    })
+    const tickets = [{ follows: threads.map(t => ({ thread: `github:${t}`, own: true })) }] as unknown as Ticket[]
+    await follower.reconcile(tickets)
+    expect(closed, 'a read that GitHub cannot answer ends no ticket: no close, no invented closedAt').toEqual([])
+    const blind = warned.filter(w => w.startsWith('pull.unreadable'))
+    expect(blind, 'one line per pull request, naming it and the reason').toHaveLength(threads.length)
+    expect(blind.join('\n')).toContain('repo-invisible:http-404')
+    const listed = (kv.get(UNREADABLE_PULLS) ?? {}) as UnreadablePulls
+    expect(Object.keys(listed), 'and all of them counted, which is what health.json publishes')
+      .toEqual(expect.arrayContaining(threads))
+  }, 180_000)
 })
 
 /** The same facts, printed for the human who is asked to believe them. */
