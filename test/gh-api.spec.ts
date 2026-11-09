@@ -148,6 +148,7 @@ function fakePullsGh() {
   writeFileSync(bin, `#!/bin/bash
 printf '%s\n' "$*" >> "$(dirname "$0")/calls.log"
 case "$*" in
+  "api repos/x/y") echo '{"full_name":"x/y"}' ;;
   "api repos/x/y/pulls/9") echo '{"state":"closed","merged_at":"2026-11-06T10:00:00Z","closed_at":"2026-11-06T10:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/10") echo '{"state":"closed","merged_at":null,"closed_at":"2026-11-06T11:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/11") echo '{"state":"open","merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z"}' ;;
@@ -165,12 +166,58 @@ esac
 
 describe('ghPulls', () => {
   it('reads a pull request as merged, closed or open, and one GitHub does not have as absent', async () => {
-    const api = ghPulls({ bin: fakePullsGh().bin })
-    expect(await api.pull('x/y', 9)).toEqual({ open: false, merged: true, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T10:00:00Z' })
-    expect(await api.pull('x/y', 10)).toEqual({ open: false, merged: false, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T11:00:00Z' })
-    expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, createdAt: '2026-11-05T09:00:00Z' })
-    expect(await api.pull('x/y', 404)).toBeUndefined()
+    const gh = fakePullsGh()
+    const api = ghPulls({ bin: gh.bin })
+    expect(await api.pull('x/y', 9)).toEqual({ read: 'found', pull: { open: false, merged: true, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T10:00:00Z' } })
+    expect(await api.pull('x/y', 10)).toEqual({ read: 'found', pull: { open: false, merged: false, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T11:00:00Z' } })
+    expect(await api.pull('x/y', 11)).toEqual({ read: 'found', pull: { open: true, merged: false, createdAt: '2026-11-05T09:00:00Z' } })
+    // `absent` is allowed only where the repository itself answered: that is the one 404 that is about the pull.
+    expect(await api.pull('x/y', 404)).toEqual({ read: 'absent' })
+    expect(gh.calls(), 'the 404 is checked against the repository before it is called an absence')
+      .toEqual(['api repos/x/y/pulls/9', 'api repos/x/y/pulls/10', 'api repos/x/y/pulls/11', 'api repos/x/y/pulls/404', 'api repos/x/y'])
     await expect(api.pull('x/y', 502), 'any other failure is an error, not a closed pull request').rejects.toThrow(/502/)
+  })
+
+  it('reads a 404 on a repository the token cannot see as an unreadable read, never as an absent pull request', async () => {
+    // Measured 2026-11-09 with the router's own token (account matzenbot_adobe): GET repos/kmatzen/pi-superagent
+    // is 404 and GET .../pulls/29 is 404, while the owner's token reads #29 open with mergeable=clean. The two
+    // 404s are the same answer, and the router read the second one as "closed" and ended six live tickets.
+    const dir = tmp()
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+printf '%s\n' "$*" >> "$(dirname "$0")/calls.log"
+case "$*" in
+  "api repos/secret/lib") echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  "api repos/secret/lib/pulls/"*) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  "api repos/secret/lib/pulls/502") echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const calls = () => readFileSync(join(dir, 'calls.log'), 'utf8').trim().split('\n')
+    const api = ghPulls({ bin })
+    expect(await api.pull('secret/lib', 29), 'invisible is not absent: nothing here ends a ticket')
+      .toEqual({ read: 'unreadable', reason: 'repo-invisible:http-404' })
+    expect(await api.pull('secret/lib', 30), 'and every pull in that repository reads the same way')
+      .toEqual({ read: 'unreadable', reason: 'repo-invisible:http-404' })
+    expect(calls().filter(c => c === 'api repos/secret/lib'), 'one probe per repository per window, not one per pull per poll')
+      .toHaveLength(1)
+    expect(await ghPulls({ bin, repoProbeMs: 0 }).pull('secret/lib', 29)).toEqual({ read: 'unreadable', reason: 'repo-invisible:http-404' })
+  })
+
+  it('a repository read that fails for a reason other than 404 is an unreadable read too, with that reason', async () => {
+    const dir = tmp()
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+case "$*" in
+  "api repos/x/y") echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
+  "api repos/x/y/pulls/404") echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    // The repository probe did not say "readable", so the pull's 404 proves nothing about the pull.
+    expect(await ghPulls({ bin }).pull('x/y', 404)).toEqual({ read: 'unreadable', reason: 'repo-read-http-502:http-404' })
   })
 
   it("reads one pull request's comments from a time, and its submitted reviews, with each author's standing", async () => {
@@ -235,7 +282,7 @@ esac
 `)
     chmodSync(bin, 0o755)
     const api = ghPulls({ bin, tokenFile: token })
-    expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, createdAt: '2026-11-08T00:00:00Z' })
+    expect(await api.pull('x/y', 11)).toEqual({ read: 'found', pull: { open: true, merged: false, createdAt: '2026-11-08T00:00:00Z' } })
     expect(readFileSync(join(dir, 'used.log'), 'utf8').trim()).toBe('pulls-secret')
   })
 })
@@ -261,7 +308,7 @@ esac
 
   it('with a token file, every call acts as that account: reads and replies alike', async () => {
     const gh = tokenGh()
-    expect(await ghPulls({ bin: gh.bin, tokenFile: gh.token }).pull('x/y', 11)).toMatchObject({ open: true })
+    expect(await ghPulls({ bin: gh.bin, tokenFile: gh.token }).pull('x/y', 11)).toMatchObject({ read: 'found', pull: { open: true } })
     await expect(ghApi({ repo: 'o/r', bin: gh.bin, tokenFile: gh.token, followed: () => [] }).postComment(3, 'on it')).resolves.toBeUndefined()
     await expect(ghPulls({ bin: gh.bin }).pull('x/y', 11), 'without it, gh acts as whoever it is signed in as').rejects.toThrow(/401/)
   })

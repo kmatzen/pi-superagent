@@ -52,7 +52,7 @@ async function boot(withTicket: boolean) {
   }
   const running = createRouterExtension(piStub(), { config, sdk, now: () => new Date().toISOString(),
     githubApi: { issues: async () => [...issues], comments: async () => [...comments], postComment: async () => {} },
-    pullApi: { pull: async () => ({ open: true, merged: false, createdAt: new Date().toISOString() }), comments: async () => [], reviews: async () => [] } })
+    pullApi: { pull: async () => ({ read: 'found', pull: { open: true, merged: false, createdAt: new Date().toISOString() } }), comments: async () => [], reviews: async () => [] } })
   await new Promise(r => running.tick().then(() => setTimeout(r as () => void, 30)))
   const addComment = (n: number, body: string) => {
     if (!issues.some(i => i.issue === n)) issues.push({ issue: n, title: 'DO: the thing', labels: [], author: 'pi', association: 'OWNER',
