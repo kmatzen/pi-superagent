@@ -6,6 +6,7 @@ import { basename, join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
   childDirs,
+  countCredentials,
   credentialFix,
   credentialProblem,
   describeCredentials,
@@ -13,6 +14,7 @@ import {
   gitConfigFiles,
   holdsCredential,
   maskSecret,
+  redactCredentials,
   scanGitConfig,
 } from '../src/pi/git-credentials.ts'
 import { checkoutRepository, prepareWorkspace, setupProblems, WorkspaceError } from '../src/pi/workspace.ts'
@@ -132,6 +134,48 @@ describe('the credential guard', () => {
     expect(describeCredentials('/repo', findEmbeddedGitCredentials(checkoutWith(poisonedConfig())))).toContain('git -C /repo remote set-url origin')
     expect(credentialFix('/repo')).toContain('credential helper')
     expect(problem.detail).not.toContain(SECRET)
+  })
+})
+
+describe('the mask, on the way out', () => {
+  it('finds a credential baked into a section NAME, the url.<base>.insteadOf shape', () => {
+    // `[url "https://x-access-token:ghp_…@github.com/"] insteadOf = git@github.com:` is a documented way to
+    // make a token the credential store, and it puts the secret in a section header, not a `key = value` line.
+    // Measured before the fix: the TS scanner returned [] for this file — `status` and the panel called it
+    // clean — while the shell guard's line grep refused the same file. Two answers to one file is the bug.
+    const dir = checkoutWith(`[remote "origin"]\n\turl = ${CLEAN}\n[url "${LEAKY.replace('/kmatzen/pi-superagent.git', '/')}"]\n\tinsteadOf = git@github.com:\n`)
+    const findings = findEmbeddedGitCredentials(dir)
+    expect(findings.length, 'the section-name credential is a finding').toBe(1)
+    expect(findings[0]!.key).toBe('url (section name)')
+    expect(findings[0]!.masked).toContain('x-access-token:***@github.com')
+    expect(findings[0]!.masked).not.toContain(SECRET)
+    // The clean half of the same file stays unreported, so the finding is the section name and nothing else.
+    expect(findings.some(f => f.key === 'remote.origin.url')).toBe(false)
+  })
+
+  it('masks EVERY credential in one value, because the finding is what gets logged and posted', () => {
+    // A masker that stops at the first match publishes the rest of the value into the report.
+    const two = `https://a:${SECRET}@github.com/o/r -> https://b:${SECRET}@github.com/x/y`
+    const masked = maskSecret(two)
+    expect(masked.match(/:\*\*\*@/g)?.length, 'both credentials masked').toBe(2)
+    expect(masked).not.toContain(SECRET)
+  })
+
+  it('masks the shapes a worker prints, and touches a body that has nothing to mask', () => {
+    const printed = `pushed to origin https://x-access-token:${SECRET}@github.com/kmatzen/pi-superagent.git (token ${SECRET})`
+    const masked = redactCredentials(printed)
+    expect(masked).not.toContain(SECRET)
+    expect(masked).toContain('https://x-access-token:***@github.com') // the shape stays readable
+    expect(countCredentials(printed)).toBe(2)
+    expect(countCredentials(masked)).toBe(0)
+
+    // Clean text comes back byte-identical: URLs, an SSH remote, a bare user@host and a code fence untouched.
+    const clean = ['See https://github.com/kmatzen/pi-superagent/pull/30 for the change.',
+      'remote: git@github.com:kmatzen/pi-superagent.git',
+      'ssh://git@github.com:22/org/repo',
+      '```\ngit remote -v\norigin  https://github.com/kmatzen/pi-superagent.git (fetch)\n```'].join('\n')
+    expect(redactCredentials(clean)).toBe(clean)
+    expect(countCredentials(clean)).toBe(0)
   })
 })
 
