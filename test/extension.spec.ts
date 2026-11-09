@@ -942,6 +942,29 @@ describe('a pull request per ticket', () => {
     expect(ticket().ended, 'the ticket stops recruiting sessions').toMatchObject({ outcome: 'stopped' })
   })
 
+  it('a ticket waiting on CI is a quiet thread, and the notice says how to ask again', async () => {
+    // #205 reported 48 times in 2h13m while waiting on one pull request: every check that finished, every
+    // recompute of `mergeable`, fired a pull Trigger, and the worker answered each with the same sentence --
+    // "Unchanged: PR caramel#1997 open, ready, mergeable". A pull request's edge is not a person speaking, so
+    // the streak holds and the ticket stops. Its issue stays open: the ticket is waiting, not finished.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '508')
+    pulls.open('o/r', 16)
+    const url = 'https://github.com/o/r/pull/16'
+    for (const [n, summary] of ['Unchanged: the pull request is open, ready and mergeable.',
+      'CI is still running; nothing to do until it finishes.',
+      'Resumed run: state is unchanged, so I verified state only.'].entries()) {
+      f.workers[0]!.report!({ state: 'ready', summary, pullRequests: [url] })
+      await f.running.tick()
+      if (n < 2) expect(f.receipts('508'), `report ${n + 1} is not yet a loop`).not.toMatch(/reported \d+ times/)
+    }
+    expect(f.receipts('508')).toMatch(/the same result has been reported 3 times[\s\S]*no further session runs this ticket/)
+    expect(f.receipts('508'), 'the notice is honest: a comment will not wake a stopped ticket').toMatch(/a comment here will not wake it/)
+    expect(ticket().ended).toMatchObject({ outcome: 'stopped' })
+    expect(f.closes, 'a ticket waiting on CI keeps its issue open').toEqual([])
+  })
+
   it("a person's words on the thread restart the count", async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })

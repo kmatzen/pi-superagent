@@ -21,7 +21,7 @@ import { openWorkerView } from './worker-view.ts'
 import { herdrCli, type Herdr } from './herdr.ts'
 import { HerdrWorkers } from './herdr-workers.ts'
 import { reportTool, type ReportOrigin } from './report-tool.ts'
-import { pullEndText, receiptText, conclusionOf, type ReportedRun } from './receipts.ts'
+import { pullEndText, receiptText, type ReportedRun } from './receipts.ts'
 import { isListed } from './authors.ts'
 import { workerRole } from './worker-role.ts'
 import { createPanelServer } from './server.ts'
@@ -361,18 +361,20 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const SPEECH_GRACE_MS = 120_000
   /**
    * Did a person say anything on this ticket's thread after `after`? The router's own writing is not speech
-   * (it is the receipt the worker is answering again), and the intake label is not speech either: it is a
-   * grant, and on the deployed router every one of #255's six dispatches arrived as a label trigger the
-   * router's own receipt had just re-minted.
+   * (it is the receipt the worker is answering again), the intake label is not speech (it is a grant), and a
+   * pull request's edge is not speech either: #205 sat 2h13m waiting on CI and reported 48 times because
+   * every check that finished, every recompute of `mergeable`, fired a pull Trigger that woke the worker.
+   * Words from a person on the thread are the only thing that restarts the count.
    */
   const inboundSpeech = (ticket: Ticket, after: string): boolean =>
     (ticket.inputs ?? []).some(input => {
       if (input.kind !== 'trigger' || !input.human) return false
       if (Date.parse(input.at) <= Date.parse(after) - SPEECH_GRACE_MS) return false
       const trigger = repos.triggers.get(input.triggerId)
-      const author = String(trigger?.meta?.author ?? trigger?.actor?.id ?? '')
+      if (!trigger || trigger.source === 'pull') return false
+      const author = String(trigger.meta?.author ?? trigger.actor?.id ?? '')
       if (author && isListed(author, new Set([cfg.githubSelf ?? cfg.self, ...(cfg.bots ?? [])]))) return false
-      return (trigger?.meta?.via ?? 'comment') !== 'label'
+      return (trigger.meta?.via ?? 'comment') !== 'label'
     })
   const capRepeats = (ticket: Ticket, run: ReportedRun): void => {
     const cap = cfg.reportCap ?? 3
@@ -386,16 +388,18 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     if (times < cap) return
     const channel = ticket.channels[0]
     if (!channel) return
-    const said = conclusionOf(run.state, run.summary)
+    const said = `${run.state}: ${run.summary}`.slice(0, 160)
     outbox.send({
       id: `repeat:${ticket.id}:${createHash('sha1').update(said).digest('hex').slice(0, 12)}`,
       channel, kind: 'notice', ticketId: ticket.id,
       text: `${channel.thread}: the same result has been reported ${times} times — ${run.summary}. Nothing new arrived on this thread `
-        + 'between the reports, so no further session runs this ticket. A comment here starts the work again.',
+        + 'between the reports, so no further session runs this ticket. It is stopped, not waiting: a comment here will not wake it, and a person un-stops it.',
     })
     if (!ticket.ended) {
-      // A stop by the router on a person's loop is the one end a resumed ticket cannot outrun: `wake` refuses
-      // what a person stopped, so this ticket is quiet until someone speaks on it.
+      // A stop by the router on a repeating loop, and it is deliberately the strong kind: `wake` refuses to
+      // resume a stopped ticket, so neither the router's receipt, a label trigger, nor a pull request's CI
+      // churn can put a session back on it. Re-asking is then a deliberate act — `superagent intake #NNN`,
+      // which relabels — which is what "new inbound speech" is allowed to look like.
       try {
         engine.stopTicket(ticket.id, `the same result was reported ${times} times, so the ticket stops here`)
         log.line('info', 'ticket.repeat_stopped', { ticket: ticket.id, times, state: run.state })
