@@ -552,6 +552,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     renderInput,
     reported,
     follow,
+    reportDropped: fields => log.line('warn', 'worker.report_dropped', fields),
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
   })
   executorRef = executor
