@@ -13,19 +13,19 @@
 *)
 EXTENDS Integers, Sequences, FiniteSets
 
-CONSTANTS t1, t2, k1, k2, m11, m12, m21, m22   (* model values: threads, ticket slots, messages *)
+CONSTANTS t1, t2, k1, k2, m11, m12, m21   (* model values: threads, ticket slots, messages *)
 
 (* ---- the finite world ---- *)
 Threads    == {t1, t2}
 TicketIds  == {k1, k2}
-(* m11, m12 arrive on t1; m21, m22 on t2. m11 and m21 are a person's; m12, m22 a bot's. *)
-Msgs       == {m11, m12, m21, m22}
+(* m11, m12 arrive on t1; m21 on t2. m11 and m21 are a person's; m12 is a bot's. *)
+Msgs       == {m11, m12, m21}   (* m22 dropped 2026-11-09: the worker Session vars made the space 500x; the third bot message adds intake order, nothing the ticket claims need *)
 ThreadOf(m) == IF m \in {m11, m12} THEN t1 ELSE t2
 Human(m)   == m \in {m11, m21}
 States     == {"free", "live", "stopped", "done", "dropped"}
 AsgStates  == {"pend", "run", "end"}
 Reports    == {"none", "progress", "waiting", "ready", "blocked", "failed", "dropped"}
-MaxAsg     == 3   (* bound on assignments per ticket: the cap makes the state space finite *)
+MaxAsg     == 2   (* bound on assignments per ticket: the cap makes the state space finite *)
 
 (* ---- state ---- *)
 (* `released[k]`: the worker of a live ticket was freed after it asked a person (the operator's rule
@@ -34,7 +34,10 @@ MaxAsg     == 3   (* bound on assignments per ticket: the cap makes the state sp
 (* tickets: per slot — lifecycle state, assignment states (newest last), latest report,
    subscribed threads, undelivered human messages (ticket.inputs/undelivered, model.ts). *)
 VARIABLES
-  released,       \* tickets whose asking worker was freed, awaiting the answer that restarts one
+  released,       \* tickets whose worker was freed (it asked, or it finished and a person must merge), awaiting the next request
+  working,        \* tickets whose worker Session exists: the tab, the agent, the slot (the executor's live map)
+  pullOpen,       \* tickets following their own pull request that a person has not merged yet
+  gone,           \* tickets whose worker Session died outside the engine (a restart adopts, then the session is gone)
   batch,          \* the Evaluation's queued triggers: accept attaches every one of them (Tickets.create loops evaluation.triggerIds)
   tickets,
   delivered,      \* messages the source has emitted (ids are content hashes: intake.ts dedups)
@@ -42,10 +45,18 @@ VARIABLES
   evaluating,     \* threads with an open Evaluation — one per thread by construction (model.ts `evaluating?`)
   ackPend, ackSent  \* outbox halves for acknowledgements (ports.ts ReplyStatus)
 
-vars == <<released, batch, tickets, delivered, evalQ, evaluating, ackPend, ackSent>>
+vars == <<released, working, pullOpen, gone, batch, tickets, delivered, evalQ, evaluating, ackPend, ackSent>>
+
+(* A worker is waiting on a person, so its agent is worth more free than warm: it asked a question, it needs an
+   answer, or its own pull request is open and only a person can merge it. *)
+asksAHuman(k) == tickets[k].lastReport \in {"blocked", "waiting"}
+                   \/ (tickets[k].lastReport = "ready" /\ k \in pullOpen)
 
 Init ==
   /\ released = [k \in TicketIds |-> FALSE]
+  /\ working = {}
+  /\ pullOpen = {}
+  /\ gone = {}
   /\ tickets = [k \in TicketIds |-> [state |-> "free", asg |-> <<>>, lastReport |-> "none",
                                      subs |-> {}, humanIn |-> {}]]
   /\ batch = {} /\ delivered = {} /\ evalQ = {} /\ evaluating = {}
@@ -67,7 +78,7 @@ Deliver(m) ==
         THEN [tickets[k] EXCEPT !.humanIn = IF Human(m) THEN @ \cup {m} ELSE @]
         ELSE tickets[k]]
   /\ delivered' = delivered \cup {m}
-  /\ UNCHANGED <<released, batch, evaluating, ackPend, ackSent>>
+  /\ UNCHANGED <<pullOpen, working, gone, released, batch, evaluating, ackPend, ackSent>>
 
 (* ------------------------------------------------------------------- evals ----
   Evals start per thread with queued triggers (evals.ts); accept creates the ticket
@@ -80,7 +91,7 @@ StartEval(th) ==
   /\ evaluating' = evaluating \cup {th}
   /\ evalQ' = evalQ \ {m \in evalQ : ThreadOf(m) = th}
   /\ batch' = batch \cup {m \in evalQ : ThreadOf(m) = th}
-  /\ UNCHANGED <<released, tickets, delivered, ackPend, ackSent>>
+  /\ UNCHANGED <<pullOpen, working, gone, released, tickets, delivered, ackPend, ackSent>>
 
 (* The one-ticket rule as the accept guard: an accept on a thread that a live ticket
    already follows becomes an ignore. The router enforces it in code (its ticket_decide
@@ -98,14 +109,14 @@ VerdictAccept(th, k) ==
         ELSE \E m0 \in cand : ackPend' = ackPend \cup {m0}
      /\ batch' = batch \ b
   /\ evaluating' = evaluating \ {th}
-  /\ UNCHANGED <<released, evalQ, delivered, ackSent>>
+  /\ UNCHANGED <<pullOpen, working, gone, released, evalQ, delivered, ackSent>>
 
 (* ignore: the Evaluation ends, nothing is authorized. *)
 VerdictIgnore(th) ==
   /\ th \in evaluating
   /\ evaluating' = evaluating \ {th}
   /\ batch' = batch \ {m \in batch : ThreadOf(m) = th}
-  /\ UNCHANGED <<released, tickets, evalQ, delivered, ackPend, ackSent>>
+  /\ UNCHANGED <<pullOpen, working, gone, released, tickets, evalQ, delivered, ackPend, ackSent>>
 
 (* ---------------------------------------------------------------- execution ----
   The Executor starts the newest pending Assignment when none runs — its contract,
@@ -117,7 +128,12 @@ Launch(k) ==
      /\ asg[Len(asg)] = "pend"
      /\ \A i \in 1..Len(asg) : asg[i] # "run"
      /\ tickets' = [tickets EXCEPT ![k].asg = [asg EXCEPT ![Len(asg)] = "run"]]
-  /\ UNCHANGED <<released, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+  /\ working' = working \cup {k}
+  /\ gone' = gone \ {k}
+  (* `released` is the latest Assignment's end reason in code, so a worker starting clears the flag: the ticket
+     has a worker again, whatever freed the previous one. R1 is the claim this keeps true. *)
+  /\ released' = [released EXCEPT ![k] = FALSE]
+  /\ UNCHANGED <<pullOpen, released, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 (* Assignments.report (assignments.ts): only a live ticket with a running Assignment
   reports; a `ready` report ends the ticket completed (no followed threads here), a
@@ -130,9 +146,57 @@ Report(k, r) ==
   /\ \E i \in 1..Len(tickets[k].asg) : tickets[k].asg[i] = "run"
   /\ LET allEnd == [j \in 1..Len(tickets[k].asg) |-> "end"] IN
      /\ tickets' = [tickets EXCEPT ![k].lastReport = r,
-                               ![k].state = IF r = "ready" THEN "done" ELSE IF r = "dropped" THEN "dropped" ELSE @,
+                               ![k].state = IF r = "ready" /\ k \notin pullOpen THEN "done"
+                                            ELSE IF r = "dropped" THEN "dropped" ELSE @,
                                ![k].asg = IF r = "ready" \/ r = "dropped" THEN allEnd ELSE @]
-  /\ UNCHANGED <<released, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+     (* A report that ENDS the ticket disposes its Session (the executor's ending path). A `ready` report on a
+        ticket that follows its own open pull request ends no ticket, and the Session survives it — that is the
+        shape measured on 2026-11-09: 15 tickets sat `ready` on an unmerged pull request, 4h to 21h, each still
+        holding a tab, an agent and a slot. R5 is the claim that this is fixed. *)
+     /\ IF tickets'[k].state \in {"done", "dropped"} THEN working' = working \ {k} ELSE UNCHANGED working
+  /\ UNCHANGED <<pullOpen, gone, released, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+
+(* A worker pushes its own pull request, which the router follows. The ticket stays open: only a person
+   merges, and the close is what ends it (Tickets.threadClosed). *)
+OpenPull(k) ==
+  /\ tickets[k].state = "live"
+  /\ k \notin pullOpen
+  /\ pullOpen' = pullOpen \cup {k}
+  /\ UNCHANGED <<released, working, gone, tickets, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+
+(* PullFollower observes the merge, engine.threadClosed ends the ticket with its result, and the ending
+   disposes the Session. *)
+MergePull(k) ==
+  /\ k \in pullOpen
+  /\ tickets[k].state = "live"
+  /\ tickets[k].lastReport = "ready"
+  /\ pullOpen' = pullOpen \ {k}
+  /\ tickets' = [tickets EXCEPT ![k].state = "done"]
+  /\ working' = working \ {k}
+  /\ UNCHANGED <<released, gone, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+
+(* The worker Session dies outside the engine: the process exits, or a router restart adopts the ticket and the
+   session behind it is already gone. Nothing in the engine asked for this. *)
+SessionDies(k) ==
+  /\ k \in working
+  /\ k \notin gone
+  /\ gone' = gone \cup {k}
+  /\ UNCHANGED <<released, working, pullOpen, tickets, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+
+(* Router.recover (extension.ts), which runs at every router start: a ticket left `running` with no Session
+   behind it — the ones a restart adopts whose worker is already dead (measured 2026-11-09: 21 assignments 4h+,
+   oldest 34.7h) — frees the claim, says so on the ticket, and starts a fresh worker. The model makes the death
+   (SessionDies) and the engine's response (Sweep) separate so R6 can say the response always comes. *)
+Sweep(k) ==
+  /\ k \in gone
+  /\ k \in working
+  /\ tickets[k].state = "live"
+  /\ LET asg == tickets[k].asg IN
+     /\ tickets' = [tickets EXCEPT ![k].asg = IF Len(asg) > 0 /\ asg[Len(asg)] = "run"
+                                              THEN [asg EXCEPT ![Len(asg)] = "end"] ELSE asg]
+  /\ released' = [released EXCEPT ![k] = TRUE]
+  /\ working' = working \ {k}
+  /\ UNCHANGED <<pullOpen, gone, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 (* Tickets.retry (tickets.ts): a blocked/failed latest report makes the ticket
   retryable; the stalled Assignment ends and a fresh pending one is appended. *)
@@ -149,7 +213,7 @@ Retry(k) ==
      /\ tickets' = [tickets EXCEPT ![k].asg = Append([asg EXCEPT ![Len(asg)] = "end"], "pend"),
                                ![k].lastReport = "none"]
   /\ released' = [released EXCEPT ![k] = FALSE]
-  /\ UNCHANGED <<batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+  /\ UNCHANGED <<pullOpen, working, gone, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 (* PiExecutor.release + Tickets.release: the worker of a live ticket asked a person and its agent, tab and slot
    are freed. Its Assignment ends with reason "released"; the ticket stays live, so a person's stop stays
@@ -157,14 +221,16 @@ Retry(k) ==
    which is what R3 checks. *)
 Release(k) ==
   /\ tickets[k].state = "live"
+  /\ k \in working
   /\ ~released[k]
-  /\ tickets[k].lastReport \in {"blocked", "waiting"}
+  /\ asksAHuman(k)
   /\ LET asg == tickets[k].asg IN
      /\ Len(asg) > 0
-     /\ asg[Len(asg)] = "run"
-     /\ tickets' = [tickets EXCEPT ![k].asg = [asg EXCEPT ![Len(asg)] = "end"]]
+     /\ tickets' = [tickets EXCEPT ![k].asg = IF asg[Len(asg)] = "run"
+                                              THEN [asg EXCEPT ![Len(asg)] = "end"] ELSE asg]
   /\ released' = [released EXCEPT ![k] = TRUE]
-  /\ UNCHANGED <<batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+  /\ working' = working \ {k}
+  /\ UNCHANGED <<pullOpen, gone, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 (* Tickets.wake widened for a released worker (the manager's door): the person's undelivered message starts a
    fresh Assignment, exactly as it resumes an ended ticket. R2 is the claim this action exists to make true. *)
@@ -177,7 +243,7 @@ Resurrect(k) ==
                              ![k].lastReport = "none",
                              ![k].humanIn = {}]
   /\ released' = [released EXCEPT ![k] = FALSE]
-  /\ UNCHANGED <<batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+  /\ UNCHANGED <<pullOpen, working, gone, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 (* Tickets.wake (tickets.ts): an ended ticket resumes under its unchanged Mandate on a
   person's undelivered message. Its first guard is the claim checked below:
@@ -191,7 +257,7 @@ Wake(k) ==
                              ![k].asg = Append(tickets[k].asg, "pend"),
                              ![k].lastReport = "none",
                              ![k].humanIn = {}]
-  /\ UNCHANGED <<released, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+  /\ UNCHANGED <<pullOpen, working, gone, released, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 (* Tickets.stop (tickets.ts), from a stop Decision (engine.ts), the panel API, or a
   conversation closed on GitHub: end(by = 'human', outcome = 'stopped'); every
@@ -203,14 +269,15 @@ StopByHuman(th, k) ==
                              ![k].asg = [i \in 1..Len(tickets[k].asg) |-> "end"]]
   /\ evaluating' = evaluating \ {th}
   /\ batch' = batch \ {m \in batch : ThreadOf(m) = th}
-  /\ UNCHANGED <<released, delivered, evalQ, ackPend, ackSent>>
+  /\ working' = working \ {k}
+  /\ UNCHANGED <<pullOpen, gone, released, delivered, evalQ, ackPend, ackSent>>
 
 (* The outbox flushing a queued acknowledgement: pending -> sent, never back. *)
 SendAck(a) ==
   /\ a \in ackPend
   /\ ackPend' = ackPend \ {a}
   /\ ackSent' = ackSent \cup {a}
-  /\ UNCHANGED <<released, batch, tickets, delivered, evalQ, evaluating>>
+  /\ UNCHANGED <<pullOpen, working, gone, released, batch, tickets, delivered, evalQ, evaluating>>
 
 (* A finished system has nothing left to do; this stuttering step makes stopping legal
    instead of a deadlock. It also means TLC's deadlock check finds nothing here:
@@ -226,6 +293,10 @@ Next ==
   \/ \E k \in TicketIds : Launch(k)
   \/ \E k \in TicketIds, r \in Reports : Report(k, r)
   \/ \E k \in TicketIds : Release(k)
+  \/ \E k \in TicketIds : OpenPull(k)
+  \/ \E k \in TicketIds : MergePull(k)
+  \/ \E k \in TicketIds : SessionDies(k)
+  \/ \E k \in TicketIds : Sweep(k)
   \/ \E k \in TicketIds : Resurrect(k)
   \/ \E k \in TicketIds : Retry(k)
   \/ \E k \in TicketIds : Wake(k)
@@ -238,6 +309,7 @@ Fairness ==
   /\ \A th \in Threads, k \in TicketIds : WF_vars(VerdictAccept(th, k))
   /\ \A k \in TicketIds : WF_vars(Launch(k)) /\ WF_vars(Report(k, "ready")) /\ WF_vars(Wake(k))
   /\ \A k \in TicketIds : WF_vars(Release(k)) /\ WF_vars(Resurrect(k))
+  /\ \A k \in TicketIds : WF_vars(Sweep(k)) /\ WF_vars(MergePull(k))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -298,11 +370,29 @@ R2_AnswerGetsAWorker ==
         \/ tickets[k].state = "stopped"
         \/ Len(tickets[k].asg) = MaxAsg)   (* the model's assignment bound, not a behavior: the real code appends without one *)
 
-(* R3. Only a worker that asked is freed: a release step implies the last report was a question or a wait, so a
-   working worker's agent is never taken from under it. *)
+(* R3. Nothing is taken from under a turn: a step that frees a worker implies the person is the only thing it can
+   be waiting for — it asked, it needs an answer, its own pull request waits on a merge — or its Session is dead.
+   A step formula, so it is checked as a property. *)
 R3_ReleaseNeedsAQuestion ==
-  [][\A k \in TicketIds : (released'[k] /\ ~released[k]) =>
-        tickets[k].lastReport \in {"blocked", "waiting"}]_vars
+  [][\A k \in TicketIds : (released'[k] /\ ~released[k]) => (asksAHuman(k) \/ k \in gone)]_vars
+
+(* R5. Nobody sits on a merge: while a live ticket's own pull request is open and its worker reported `ready`,
+   the ticket eventually has no worker Session, so the agent, tab and slot are free while a person decides. The
+   ticket itself stays open — it is the visible ask. Measured 2026-11-09: 15 tickets in exactly this state, 4h
+   to 21h each. *)
+R5_ReadyWaitsWithNoWorker ==
+  []<>\A k \in TicketIds : (tickets[k].state = "live" /\ tickets[k].lastReport = "ready" /\ k \in pullOpen)
+    => k \notin working
+
+(* R6. A Session that died outside the engine is never left claimed: the sweep runs, and the person's next
+   message then starts a fresh worker (R2). Measured 2026-11-09: 21 assignments 4h+ on dead Sessions, oldest 34.7h. *)
+R6_DeadSessionIsFreed ==
+  []<>\A k \in TicketIds : k \in gone => k \notin working
+
+(* W1. A worker Session belongs to a live ticket: an ended, stopped, dropped or merged ticket never holds one.
+   This is what makes R5 and R6 about the agent rather than about an unused variable. *)
+W1_SessionNeedsALiveTicket ==
+  working \subseteq {k \in TicketIds : tickets[k].state = "live"}
 
 (* R4. Resurrection appends, never reuses: a freed Assignment is never set back to running, so a released
    worker's record cannot come back and two agents can never act on one ticket. *)
