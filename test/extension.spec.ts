@@ -961,61 +961,59 @@ describe('a pull request per ticket', () => {
     expect(f.closes).toEqual([501])
   })
 
-  it('the same conclusion reported three times stops the ticket and says so on it', async () => {
-    // #227 reported 93 times in 20 hours, #255 five times in nine, each dispatch recruited by speech the
-    // router had itself written on the thread. The third report with nothing new on the thread is the last one.
+  it('a finished worker cannot repeat: its agent is freed, so the loop has no second session', async () => {
+    // #227 reported 93 times in 20 hours and #255 five times in nine, each dispatch recruited by speech the
+    // router had itself written on the thread. PR 37 cut that at the source: the first `ready` on a ticket that
+    // stays open (only a person can merge) frees the Session, and nothing recruits the next one without a
+    // person's new message. The cap below stays as the backstop for reports that arrive from a live Session.
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
     const ticket = await working(f, '503')
     pulls.open('o/r', 12)
-    const said = (count: string) => f.workers[0]!.report!({
-      state: 'ready', summary: `merge pull request 12 to close this ticket, ${count} time asking`,
+    f.workers[0]!.report!({
+      state: 'ready', summary: 'merge pull request 12 to close this ticket',
       pullRequests: ['https://github.com/o/r/pull/12'],
     })
-    said('first')
     await f.running.tick()
-    said('second')
-    await f.running.tick()
-    expect(ticket().ended, 'a ticket waiting on a merge stays open').toBeUndefined()
-    expect(f.receipts('503'), 'two reports are not yet a loop').not.toMatch(/reported \d+ times/)
-    said('third')
-    await f.running.tick()
-    expect(f.receipts('503')).toMatch(/the same result has been reported 3 times[\s\S]*no further session runs this ticket/)
-    expect(ticket().ended, 'it stops recruiting sessions').toMatchObject({ outcome: 'stopped' })
-    expect(f.workers.length).toBe(1)
-    expect(f.closes, 'a stop the router made leaves the issue to a person').toEqual([])
+    expect(f.workers[0]!.disposed, 'the finished worker gives up its agent').toBe(true)
+    expect(f.running.load().running, 'the slot is free').toBe(0)
+    expect(f.running.load().parked, 'and it is not counted as parked work either').toBe(0)
+    expect(f.workers.length, 'no second session is recruited to repeat it').toBe(1)
+    expect(f.receipts('503'), 'there is no loop to declare').not.toMatch(/reported \d+ times/)
+    expect(ticket().ended, 'the ticket stays open: the merge is a person\'s act').toBeUndefined()
   })
 
   it('the loop is the quiet thread, not the sentence: reworded reports still count', async () => {
     // The live shape, read out of the router's own database on 2026-11-09. #255 reported the same fact five
-    // times in new words -- "Nothing to merge: this pull request landed…", "The mandate is already
-    // satisfied…", "Close this ticket: its pull request merged…" -- and #227 wrote "eighty-sixth identical
-    // dispatch", "Still waiting on one click", "Resumed run: state is unchanged". A fingerprint over the
-    // wording matches none of it. The signature is a report that landed with nothing new on the thread.
+    // times in new words, and a fingerprint over the wording matches none of it: the signature is a report that
+    // landed with nothing new on the thread. After PR 37 a `ready` worker is gone after its first report, so the
+    // shape that can still repeat from one Session is a turn that keeps failing — same state, new words.
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
     const ticket = await working(f, '506')
     pulls.open('o/r', 15)
     const url = 'https://github.com/o/r/pull/15'
     const words = [
-      'Nothing to merge: this pull request landed on 2026-11-07 and the fix is deployed.',
-      'Still waiting on one click: merge pull request 15 and this ticket closes.',
-      'Resumed run: state is unchanged, so I verified state only; the merge is yours.',
+      'The push was rejected: the remote moved under me and my branch is stale.',
+      'Still blocked on the remote: pull the latest main into this branch first.',
+      'Third attempt, same rejection: the branch is behind and the push is refused.',
     ]
     for (const [n, summary] of words.entries()) {
-      f.workers[0]!.report!({ state: 'ready', summary, pullRequests: [url] })
+      f.workers[0]!.report!({ state: 'failed', summary, pullRequests: [url] })
       await f.running.tick()
       if (n < 2) expect(f.receipts('506'), `report ${n + 1} is not yet a loop`).not.toMatch(/reported \d+ times/)
     }
-    expect(f.receipts('506')).toMatch(/the same result has been reported 3 times[\s\S]*no further session runs this ticket/)
-    expect(ticket().ended, 'the ticket stops recruiting sessions').toMatchObject({ outcome: 'stopped' })
+    expect(f.receipts('506')).toMatch(/the same result has been reported 3 times/)
+    expect(ticket().ended).toMatchObject({ outcome: 'stopped' })
+    expect(f.workers.length).toBe(1)
   })
 
   it('a ticket waiting on CI is a quiet thread, and the notice says how to ask again', async () => {
     // #205 reported 48 times in 2h13m while waiting on one pull request: every check that finished, every
-    // recompute of `mergeable`, fired a pull Trigger, and the worker answered each with the same sentence --
-    // "Unchanged: PR caramel#1997 open, ready, mergeable". A pull request's edge is not a person speaking, so
-    // the streak holds and the ticket stops. Its issue stays open: the ticket is waiting, not finished.
+    // recompute of `mergeable`, fired a pull Trigger, and the worker answered each with the same sentence. A
+    // pull request's edge is not a person speaking, so the streak holds and the ticket stops; its issue stays
+    // open, because the ticket is waiting, not finished. Reports of `ready` now free the Session after the first
+    // one (PR 37), so the streak that a live Session can produce is a turn that keeps failing.
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
     const ticket = await working(f, '508')
@@ -1024,7 +1022,7 @@ describe('a pull request per ticket', () => {
     for (const [n, summary] of ['Unchanged: the pull request is open, ready and mergeable.',
       'CI is still running; nothing to do until it finishes.',
       'Resumed run: state is unchanged, so I verified state only.'].entries()) {
-      f.workers[0]!.report!({ state: 'ready', summary, pullRequests: [url] })
+      f.workers[0]!.report!({ state: 'failed', summary, pullRequests: [url] })
       await f.running.tick()
       if (n < 2) expect(f.receipts('508'), `report ${n + 1} is not yet a loop`).not.toMatch(/reported \d+ times/)
     }
