@@ -57,17 +57,3 @@ export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; 
   return `${thread}: ${urls(merged)} merged and ${urls(closed)} closed without merging, so this ticket ends with the work that landed. A comment here starts the work again.`
 }
 
-/**
- * The same conclusion, twice over. A worker that re-proves a finished job reports the same sentence, and the
- * count in it is the only thing that changes: "merge PR 69, twelfth time asking" and "merge PR 69, thirteenth
- * time asking" (measured on #227, 93 receipts in 20 hours) are one conclusion. Numbers, digits and the English
- * words for them come out, the rest is the fingerprint.
- */
-export function conclusionOf(state: string, summary: string): string {
-  const words = summary.toLowerCase()
-    .replace(/\d+[a-z]*/g, ' # ')
-    .replace(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|hundredth)\b/g, ' # ')
-    .replace(/\s+/g, ' ')
-    .trim()
-  return `${state}:${words.slice(0, 200)}`
-}
