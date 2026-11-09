@@ -26,8 +26,13 @@ export interface CredentialFinding {
   worldReadable: boolean
 }
 
-/** `scheme://user:secret@host`. A bare `user@host` names an account; only the password half is a secret. */
-const USERINFO = /([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/\s@"]*):([^/\s@"]*)@/
+/**
+ * `scheme://user:secret@host`. A bare `user@host` names an account; only the password half is a secret. The
+ * password may not be a run of `*`: that is this module's own mask, and masking must be idempotent — the
+ * guard prints `https://x-access-token:***@github.com/…`, a worker quotes that line in its report, and a
+ * scanner that reads its own output as a credential cries wolf on every quote of a refusal.
+ */
+const USERINFO = /([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/\s@"]*):(?!\*+@)([^/\s@"]*)@/
 /**
  * GitHub's own token shapes: a `credential.helper` line can carry one with no URL around it. Deliberately
  * not global: `.test()` on a global regex advances `lastIndex`, and the next call resumes there, so a value
@@ -37,16 +42,44 @@ const USERINFO = /([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/\s@"]*):([^/\s@"]*)@/
 const TOKEN = /\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})\b/
 /** The same shapes, global, for masking *every* occurrence inside one value. */
 const TOKENS = new RegExp(TOKEN.source, 'g')
+/**
+ * `USERINFO`, global: one config value can carry two credentials, and a masker that stops at the first one
+ * publishes the rest. Measured: a value with two credential-bearing URLs masked the first and left the
+ * second whole in the finding — the finding is the thing that gets logged, posted and printed.
+ */
+const URL_CREDENTIALS = new RegExp(USERINFO.source, 'g')
+/** Git's section header, brackets already stripped by the caller: `name` or `name "subsection"`. A
+ * `url.<base>.insteadOf` base lands in that subsection, so a token can live in the header and nowhere else. */
+const HEADER = /^([^\s\]"]+)\s*(?:"([^"]*)"\s*)?$/
 
 /** True when a config value carries a credential: userinfo in a URL, or a GitHub token in plain text. */
 export const holdsCredential = (value: string): boolean => USERINFO.test(value) || TOKEN.test(value)
 
 /** Replace the secret with `***`, keeping the scheme, the account name and the host so the finding is locatable. */
 export const maskSecret = (value: string): string => value
-  .replace(USERINFO, (_all, scheme: string, user: string) => `${scheme}://${user}:***@`)
+  .replace(URL_CREDENTIALS, (_all, scheme: string, user: string) => `${scheme}://${user}:***@`)
   .replace(TOKENS, (token: string) => `${token.slice(0, 4)}***`)
   .trim()
   .slice(0, 140)
+
+/**
+ * The outbound filter: every credential shape in a text, masked, nothing truncated.
+ *
+ * The router publishes a worker's report into a GitHub issue, and a report that quotes what the worker
+ * printed quotes what the checkout stored: `git remote -v` output is the leak, and the issue body is the
+ * publication. The ticket that opened this class named it — the board redacts credential-shaped strings, the
+ * transcript carrying them upstream does not — so the mask sits on the write, where it cannot be skipped by
+ * whatever a future prompt tells a worker to paste. It keeps the shape (`https://x-access-token:***@github…`)
+ * so a reader can still tell what was there, and it never invents: a body with nothing to mask comes back
+ * byte-identical.
+ */
+export const redactCredentials = (text: string): string => text
+  .replace(URL_CREDENTIALS, (_all, scheme: string, user: string) => `${scheme}://${user}:***@`)
+  .replace(TOKENS, (token: string) => `${token.slice(0, 4)}***`)
+
+/** How many credentials a text carries. A count is loggable; the value is not. */
+const CREDENTIAL_SHAPES = new RegExp(`${USERINFO.source}|${TOKEN.source}`, 'g')
+export const countCredentials = (text: string): number => (text.match(CREDENTIAL_SHAPES) ?? []).length
 
 /** Git's value syntax, reduced to what the scan needs: quotes, and a comment outside them. */
 const unquote = (raw: string): string => {
@@ -69,6 +102,14 @@ export function scanGitConfig(file: string): Array<{ key: string; masked: string
     const header = /^\[(.+)\]$/.exec(line)
     if (header) {
       section = header[1]!.trim().replace(/\s+/g, ' ')
+      // A section NAME holds a credential too, and that is a documented way to make a token the store:
+      // `[url "https://x-access-token:ghp_…@github.com/"] insteadOf = git@github.com:`. Reading only the
+      // `key = value` lines calls that file clean — measured, 0 findings — while the shell guard's line grep
+      // refuses the same file, so `status` said clean and `start` refused. One answer, from both.
+      const named = HEADER.exec(section)
+      if (named && holdsCredential(`${named[1]} ${named[2] ?? ''}`)) {
+        found.push({ key: `${named[1]} (section name)`, masked: maskSecret(named[2] ?? named[1]!) })
+      }
       continue
     }
     const entry = /^([A-Za-z0-9._-]+)\s*=\s*(.*)$/.exec(line)

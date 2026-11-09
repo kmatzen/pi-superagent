@@ -11,6 +11,7 @@ import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type Out
 import { SqliteRepositories } from './store.ts'
 import {GithubSource, REPLY_MARKER, type GithubApi, REQUEST_LABEL} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
+import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi } from './pulls.ts'
 import { CommentOutbox } from './outbox.ts'
 import { PiExecutor } from './executor.ts'
@@ -116,9 +117,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const repo = repoOf(m)
       if (!issue || !githubApi) return
       try {
-        // GitHub may have taken the last attempt before the process died: on a retry, look first.
+        // GitHub may have taken the last attempt before the process died: on a retry, look first. The
+        // comparison is against the body as it will be posted — credentials masked — because the masked text is
+        // what GitHub has, and comparing the unmasked original would post a duplicate on every retry.
         const seen = retry && githubApi.commentsFor ? await githubApi.commentsFor(issue, repo) : []
-        if (seen.some(c => c.body.trimEnd() === `${body}\n\n${REPLY_MARKER}`)) return
+        const posted = `${redactCredentials(body)}\n\n${REPLY_MARKER}`
+        if (seen.some(c => c.body.trimEnd() === posted)) return
         await githubApi.postComment(issue, body, repo)
       } catch (error) {
         log.line('warn', 'outbox.github_failed', { issue, repo, error: String(error).slice(0, 200) })
@@ -134,6 +138,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     repo: cfg.githubRepo, ...accounts.watched,
     // The reviews a ticket waits on are the ones on the pull requests it follows.
     onPullUnreadable: (ref, problem) => log.line('warn', 'pull.reviews_readability', { ref, problem: problem ?? 'readable again' }),
+    // A worker's report that quotes `git remote -v` carries the checkout's credential, and this is the write
+    // that publishes it to GitHub. It is masked on the way out; the log says that it happened, never what.
+    onCredentialRedacted: (count, where) => log.line('warn', 'github.credential_redacted', { where, count }),
     followed: () => followedPulls(repos.tickets.open(), cfg.githubRepo ?? ''),
   }) : undefined)
   const github = githubApi

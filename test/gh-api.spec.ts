@@ -132,6 +132,35 @@ describe('ghApi', () => {
     expect(sent).toContain(REPLY_MARKER)
   })
 
+  it('masks a credential out of a body before publishing it, and says that it did', async () => {
+    // A worker's report quotes what the worker printed, and `git remote -v` in a checkout that stores its
+    // token in the remote URL prints the token. This call is the write that publishes it to GitHub, where
+    // everyone the repository reaches reads it, so the mask belongs here and not in the prompt.
+    const gh = fakeGh('[]', '[]')
+    const secret = `ghp_${'m'.repeat(36)}`
+    const notices: Array<{ count: number, where: string }> = []
+    const api = ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [], onCredentialRedacted: (count, where) => notices.push({ count, where }) })
+    await api.postComment(12, `pushed via https://x-access-token:${secret}@github.com/o/r (token ${secret})`)
+    const sent = JSON.parse(gh.posts()).body
+    expect(sent, 'the published body carries no credential').not.toContain(secret)
+    expect(sent, 'the shape stays readable so a reader knows what was masked').toContain('https://x-access-token:***@github.com')
+    expect(sent).toContain(REPLY_MARKER)
+    expect(notices, 'the router logs the count, never the value').toEqual([{ count: 2, where: 'o/r#12' }])
+  })
+
+  it('publishes a clean body byte for byte, and says nothing about it', async () => {
+    // The filter must not touch ordinary work: pull-request links, SSH remotes, bare user@host URLs and
+    // prose about tokens are the normal content of a receipt, and a filter that mangles them gets disabled.
+    const gh = fakeGh('[]', '[]')
+    const clean = ['Merged https://github.com/o/r/pull/8.',
+      'remote: git@github.com:o/r.git and ssh://git@github.com:22/o/r',
+      'the `ghp_` prefix marks a classic token; guard output reads https://x-access-token:***@github.com/o/r'].join('\n')
+    const notices: number[] = []
+    await ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [], onCredentialRedacted: count => notices.push(count) }).postComment(8, clean)
+    expect(JSON.parse(gh.posts()).body).toBe(`${clean}\n\n${REPLY_MARKER}`)
+    expect(notices, 'nothing to mask, nothing to report').toEqual([])
+  })
+
   it('a gh failure is an error, not an empty answer', async () => {
     const dir = tmp()
     const bin = join(dir, 'gh')
