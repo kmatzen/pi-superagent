@@ -58,6 +58,8 @@ READY_WAIT="${PI_SUPERAGENT_READY_WAIT:-60}"
 # it healthy, what is the history of one piece of work). Loopback only; the API refuses a caller that does
 # not say what it is, and any non-local Host.
 PANEL_PORT="${PI_SUPERAGENT_PANEL_PORT:-8788}"
+# The checkout this script was started from: the router's code, its .git/config, and the thing a deploy pulls.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The router's judge runs through pi's SDK, and pi hands its own to the extension: inside pi, importing the
 # package name resolves to the running pi wherever it is installed. PI_SUPERAGENT_SDK_PATH, an entry file,
 # overrides that and passes through with the other settings.
@@ -97,6 +99,41 @@ workspace_id() {
 herdr_up() { "$HERDR_BIN" workspace list >/dev/null 2>&1; }
 running() { "$HERDR_BIN" agent get "$SESSION" >/dev/null 2>&1; }
 place() { [ -f "$ROUTER_PLACE" ] && sed -n "s/^$1=//p" "$ROUTER_PLACE"; }
+
+# A remote URL that carries its credential (`https://user:token@github.com/…`) is a live secret in a file git
+# writes 0644: every user and every process on the box reads it, and the first `git remote -v`, `git config
+# --list`, failed push or verbose `ls-remote` a worker prints carries it into a transcript, a board row, an
+# issue body. Measured on the deployment box (issue #314): the watched checkout held a 40-character `ghp_`
+# classic token with `repo` scope — read/write on every repository the account reaches — in `-rw-r--r--
+# .git/config`, with ~20 worker sessions per run able to print it. The deploy refuses to start on one.
+# Findings are masked here on purpose: a guard that prints the token to find the token has published it.
+CREDENTIAL_IN_URL='://[^/[:space:]]*:[^/[:space:]]*@|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}'
+mask_credential() { sed -E 's#(://[^/@[:space:]]*:)[^/@[:space:]]*(@)#\1***\2#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}#\1***#g'; }
+file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null || echo '?'; }
+
+# Every checkout this deployment reads: its own, the ones the operator named, and the ticket checkouts.
+watched_checkouts() {
+  printf '%s\n' "$REPO_ROOT"
+  printf '%s\n' "${PI_SUPERAGENT_WATCHED_CHECKOUTS:-}" | tr ':,' '\n\n' | sed '/^$/d'
+  local dir
+  for dir in "$WORKTREES"/*/; do [ -f "${dir}.git/config" ] && printf '%s\n' "${dir%/}"; done
+  return 0
+}
+
+git_credential_guard() {
+  local dir file hit bad=0 line
+  while IFS= read -r dir; do
+    [ -n "$dir" ] && [ -f "$dir/.git/config" ] || continue
+    file="$dir/.git/config"
+    hit="$(grep -m1 -nE "$CREDENTIAL_IN_URL" "$file" 2>/dev/null | mask_credential | cut -c1-200)"
+    [ -n "$hit" ] || continue
+    line="${hit%%:*}"
+    printf 'superagent: %s line %s carries a git credential in the clear, mode %s: %s\n' "$file" "$line" "$(file_mode "$file")" "${hit#*:}" >&2
+    printf '  every user on this box reads it and every `git remote -v` prints it. Fix: git -C %s remote set-url origin <the same URL with the user:token@ removed>, then supply the password from a 0600 file with a repo-local credential helper (docs/operator-guide.md).\n' "$dir" >&2
+    bad=1
+  done < <(watched_checkouts)
+  return $bad
+}
 
 # The extension writes these two files; the script only reads them. A missing file is not an error:
 # a session that has not finished starting has written nothing yet, and that is code 0, not a failure.
@@ -155,6 +192,10 @@ intake() {
 
 
 start() {
+  # A deployment that stores its credential in a world-readable URL is not a deployment to bring up: the
+  # router's own workers are the readers. Refuse before herdr, the port and the tab, so the fix is the first
+  # thing the operator reads and nothing is half-started.
+  git_credential_guard || { echo "the router was not started: a watched checkout keeps its git credential in the remote URL" >&2; return 1; }
   if ! herdr_up; then
     echo "herdr is not reachable: the router runs only in herdr, so it was not started" >&2
     return 1

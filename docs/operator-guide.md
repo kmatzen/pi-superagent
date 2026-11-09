@@ -102,6 +102,49 @@ The job finds `superagent`, `pi` and `herdr` on its own PATH: Homebrew's directo
 `~/.npm-global/bin`. If `command -v superagent` or `command -v pi` prints a directory outside those, as nvm's
 do, add it to the job's PATH. From a checkout, replace `superagent` in the job with the script's full path.
 
+### Keep the git credential out of .git/config
+
+A remote URL that carries its credential — `https://x-access-token:ghp_…@github.com/org/repo.git` — is a
+live secret in a file git writes 0644. Every user and every process on the box reads it, and the first
+`git remote -v`, `git config --list` or failed push a worker prints carries it into a transcript, a board
+row, an issue body. Measured on the deployment box (issue #314): the watched checkout's `.git/config`,
+`-rw-r--r--`, held a 40-character `ghp_` classic token with `repo` scope — read/write on every repository
+the account reaches — and one settled ticket checkout, written 18 hours later, held that same token.
+
+`superagent start` refuses to deploy over one, `setupProblems` reports it (status code 3), and a worker is
+refused a clone that carries one. Every finding prints masked: a guard that echoed the token it found would
+publish it.
+
+Move the credential out of the URL and into a file only you can read:
+
+```sh
+umask 077
+printf '%s\n' '<the token>' > ~/.pi/superagent/deploy-git-token            # 0600, and the file is the store
+cd ~/git/pi-superagent
+git remote set-url origin https://github.com/kmatzen/pi-superagent.git     # the same URL, credential removed
+U=credential.https://github.com/kmatzen/pi-superagent.git
+git config --local "$U.useHttpPath" true
+git config --local --add "$U.helper" ''                 # clears the helpers inherited from ~/.gitconfig
+git config --local --add "$U.helper" '!f(){ echo username=x-access-token; echo "password=$(cat "$HOME/.pi/superagent/deploy-git-token")"; }; f'
+chmod 600 .git/config
+git ls-remote origin HEAD && git push --dry-run origin HEAD                # the helper answers for this repo
+git remote -v                                                             # prints no secret now
+```
+
+The empty `helper` line is what makes it work on a box whose `~/.gitconfig` already names a helper: the
+first helper that answers wins, so an inherited `gh` helper hands git a *different* account's token, and a
+private repository answers that account 404. Measured here — `gh` is signed in as an account that cannot see
+the repository, so `gh auth git-credential` is not a usable store for this checkout, and the clone that
+proved it failed with `Repository not found` until the inherited helpers were cleared.
+
+`PI_SUPERAGENT_WATCHED_CHECKOUTS` adds checkouts to the scan. The deployment's own checkout and the ticket
+checkouts under the worktree root are always scanned.
+
+Rotating a token a URL has exposed is a web-UI action: GitHub exposes no API for creating or rotating
+personal access tokens (a classic token asks 404), and a `ghp_` classic token cannot be scoped narrower than
+`repo`. Mint a fine-grained token for the one repository with `contents: write` and `pull_requests: read`,
+write it into the 0600 file, and `git ls-remote` proves the swap. Rotation then touches no git config.
+
 ## When several issues arrive at once
 
 By default, four workers can run at once. If you open a fifth issue while all four are busy, its
@@ -168,7 +211,15 @@ is not the fault — it is the condition that makes a queued launch slow, and th
 that queue. Startup takeover is one reason `running` can exceed `cap`: workers that outlived the previous
 router are adopted without checking the cap, which is a policy question the code does not decide.
 
-**Status exits 3.** Read `~/.pi/superagent/setup.json` for the missing prerequisite and its location.
+
+**Status exits 3.** Read `~/.pi/superagent/setup.json` for the missing prerequisite and its location. One
+prerequisite is a credential in a checkout's git config; see
+[Keep the git credential out of .git/config](#keep-the-git-credential-out-of-gitconfig).
+
+**Start refuses with “carries a git credential in the clear”.** A watched checkout stores its credential in
+the remote URL, where every worker can read it. The message names the file, the line and the mode; the fix
+is in [Keep the git credential out of .git/config](#keep-the-git-credential-out-of-gitconfig). Nothing was
+started, so the fix costs nothing to apply.
 
 **A worker looks stuck.** Open its herdr tab to inspect the current command. Type a message to steer
 the worker or press Esc to interrupt it.

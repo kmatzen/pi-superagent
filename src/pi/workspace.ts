@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync,
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { execFile, execFileSync } from 'node:child_process'
+import { childDirs, describeCredentials, findEmbeddedGitCredentials } from './git-credentials.ts'
 
 export interface WorkspaceRequest {
   root: string
@@ -102,8 +103,16 @@ export async function checkoutRepository(workspace: PreparedWorkspace, repo: str
   try {
     await run('gh', ['repo', 'clone', `github.com/${repo}`, '.', '--', '--quiet'], options)
     await run('git', ['switch', '-c', `superagent/${ticketId}`], options)
+    // A checkout that carries a credential in its remote URL hands that secret to the worker session, which
+    // prints `git remote -v` in the ordinary course of work and puts it in a transcript. Refuse the checkout.
+    const leaked = findEmbeddedGitCredentials(stage)
+    if (leaked.length) {
+      throw new WorkspaceError('git-credential-in-url', `refusing to hand ${repo} to ${ticketId}: the clone's git config carries a credential`, describeCredentials(stage, leaked))
+    }
     renameSync(stage, workspace.dir)
   } catch (error) {
+    // A guard's refusal is its own reason: wrapping it in `prepare-failed` hides the credential from the log.
+    if (error instanceof WorkspaceError) throw error
     throw new WorkspaceError('prepare-failed', `cannot prepare ${repo} for ${ticketId}`, (error as Error).message)
   } finally {
     rmSync(stage, { recursive: true, force: true })
@@ -137,10 +146,17 @@ export function shims(stateDir: string, blocked: readonly string[]): string {
 }
 
 /** What `superagent status` reads as code 3: a router that cannot start its work is not a healthy one. */
-export function setupProblems(request: { root: string; stateDir: string }): Array<{ code: string; place: string; detail: string }> {
+export function setupProblems(request: { root: string; stateDir: string; checkouts?: readonly string[] }): Array<{ code: string; place: string; detail: string }> {
   const problems: Array<{ code: string; place: string; detail: string }> = []
   if (!existsSync(request.stateDir)) problems.push({ code: 'state-missing', place: 'Deployment', detail: `no state directory at ${request.stateDir}` })
   if (!writable(request.root)) problems.push({ code: 'worktrees-unwritable', place: 'Execution', detail: `cannot write ${request.root}` })
+  // Every checkout this deployment reads: the ones the operator named, the one the router runs from, and the
+  // ticket checkouts under the worktree root. A credential in any of them is readable by every user on the
+  // box and printed by every worker that runs `git remote -v`, so it is a setup problem, not a lint.
+  for (const dir of new Set([...(request.checkouts ?? []), ...childDirs(request.root)])) {
+    const findings = findEmbeddedGitCredentials(dir)
+    if (findings.length) problems.push({ code: 'git-credential-in-url', place: 'Deployment', detail: describeCredentials(dir, findings) })
+  }
   return problems
 }
 
