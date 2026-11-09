@@ -141,6 +141,9 @@ once, because an abandoned pass keeps its `gh` children and those have no timeou
 the product. The stage `tick.abandon_skipped` names is what to fix; a restart clears a router wedged this way,
 which is the one case where it does. The line `tick n=…` is the
 liveness line: its `gapMs` is the time since the last pass finished, read against `PI_SUPERAGENT_TICK_MS`.
+A `engine_tick` (or the panel's tick) asked for while a pass is parked does its work and says nothing: the
+liveness line and `health.json` belong to the pass that owns the loop, so a tick by hand cannot switch off the
+alarm you are reading.
 
 **Status exits 2 saying `health.json is N min old`.** Nothing is reporting, which is the same fault with no
 report attached: the process is alive in herdr, but the loop that rewrites that file on every pass is not

@@ -856,9 +856,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     again = false
     startTick()
   }
-  /** A pass on demand: the panel, the `engine_tick` tool, a test. It borrows the current generation, so it
-   *  reports its own liveness, and it never takes the guard from a pass already in flight. */
-  const tickNow = (): Promise<void> => tick(generation)
+  /** A pass on demand: the panel, the `engine_tick` tool, a test. It takes the guard from no one. While a pass
+   *  owns the guard it also runs as a superseded one, because a tick asked for by hand over a stalled loop must
+   *  not move that loop's stage label, log a liveness line for a loop that has finished nothing, or write
+   *  `"state": "ok"` over the alarm — the panel button is exactly what an operator reaches for in that moment. */
+  const tickNow = (): Promise<void> => tick(ticking ? -1 : generation)
   const timer = setInterval(runTick, tickMs)
   const off = pi.on('agent_settled', runTick)
 
