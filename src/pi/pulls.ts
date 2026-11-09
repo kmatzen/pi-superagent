@@ -25,7 +25,7 @@ export type PullRead =
   | { read: 'found'; pull: PullState }
   /** GitHub has no such pull request, and this token can read the repository, so the answer is about the pull. */
   | { read: 'absent' }
-  /** The read said nothing about the pull request: a 404 from a token that cannot see the repository, a rate-limit account's 404, a 5xx, a dead token. */
+  /** The read said nothing about the pull request: a 404 from a token that cannot see the repository, a 5xx, a 403 from an IP allowlist, a dead token. */
   | { read: 'unreadable'; reason: string }
 
 export interface PullApi {
@@ -166,7 +166,7 @@ export class PullFollower {
     try {
       result = await this.options.api.pull(pull.repo, pull.number)
     } catch (error) {
-      // Thrown reads count too: the rate-limit account's 404 (tagged 2026-11-08) is this same class of answer.
+      // Thrown reads count too: a 5xx, a dead token, an allowlist 403 — none of them an answer about the pull.
       this.countUnreadable(id, String(error).slice(0, 200), 'pull.read_failed')
       return
     }

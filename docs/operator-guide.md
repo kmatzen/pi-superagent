@@ -134,9 +134,9 @@ cannot read that repository. GitHub answers HTTP 404 — the same answer it give
 and a ticket whose pull request nobody can read stays open instead of ending, because the alternative is a
 receipt that says “closed without merging” about a pull request that is open. `grep 'pull.unreadable'
 ~/.pi/superagent/engine.log` names the thread and the reason; the ticket's end receipt says the same thing.
-Grant read access to the account the router reads pulls as (its `gh` login, and the worker token when
-GitHub rate-limits it), and the next pass reads the pull request, clears the count, and says
-`pull.readable` once.
+Grant read access to the account the router reads pulls as (its `PI_SUPERAGENT_GITHUB_TOKEN_FILE` account,
+or its `gh` login when no token file is set), and the next pass reads the pull request, clears the count, and
+says `pull.readable` once.
 
 **Status exits 2.** Read `~/.pi/superagent/health.json` to identify the failing component. For a
 GitHub source error, check `gh auth status`. The next successful poll clears the error.
