@@ -207,7 +207,11 @@ export class PullFollower {
     const list = this.options.positions.get<UnreadablePulls>(UNREADABLE_PULLS) ?? {}
     if (reads === 1) this.options.warn(event, { thread: id, reason, reads })
     if (due) this.options.warn('pull.unreadable_escalated', { thread: id, reason, reads, window: every })
-    this.options.positions.set(UNREADABLE_PULLS, { ...list, [id]: { reason, reads, at: list[id]?.at ?? new Date(this.options.now?.() ?? Date.now()).toISOString(), escalated: reads >= every } })
+    // `escalated` is monotonic: the counter is in memory, so a router restart starts `reads` at 1 again, and the
+    // incident class here is a router that restarts. Losing the flag would hide a pull request that has been
+    // blind for three hours behind reads=1; `since` and the flag stay, and only a read that answers clears them.
+    const escalated = reads >= every || (list[id]?.escalated ?? false)
+    this.options.positions.set(UNREADABLE_PULLS, { ...list, [id]: { reason, reads, at: list[id]?.at ?? new Date(this.options.now?.() ?? Date.now()).toISOString(), escalated } })
   }
 
   /** A read that answered: the count resets, the list drops it, and a pull request that came back says so once. */

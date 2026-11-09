@@ -58,7 +58,9 @@ that is gone and for one the token cannot see with the same bytes. An unreadable
 named once per pull request per window (`pull.unreadable`, then `pull.unreadable_escalated`), and is counted
 under `pulls` in `health.json` as `degraded` — a repository the token will never see is not an outage to
 restart. The probe that tells the two apart asks the REPOSITORY the same question with the SAME token, because
-the operator's rule of 2026-11-08 is that every call to GitHub is the one configured account.
+the operator's rule of 2026-11-08 is that every call to GitHub is the one configured account. The window's read
+count restarts with the router; the escalation and the first-seen time do not, because the measured incident is
+a router that restarts. A report URL that is not a pull request link is `pull.parse_failed`.
 
 `source-github.ts` tracks issues, comments and submitted reviews. It recognizes the router’s own
 comments by the bot login or a hidden marker. `scopeOf` in `router.ts` checks each author’s GitHub
