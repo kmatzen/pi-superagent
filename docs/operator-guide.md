@@ -149,6 +149,20 @@ personal access tokens (a classic token asks 404), and a `ghp_` classic token ca
 `repo`. Mint a fine-grained token for the one repository with `contents: write` and `pull_requests: read`,
 write it into the 0600 file, and `git ls-remote` proves the swap. Rotation then touches no git config.
 
+Read which file feeds which role before you narrow a scope, and rotate every token the box holds, not only
+the one the URL exposed. `PI_SUPERAGENT_GITHUB_TOKEN_FILE` is the router's own GitHub identity — it reads and
+writes the watched board repository, files issues and posts receipts — and `PI_SUPERAGENT_WORKER_TOKEN_FILE`
+is the identity a worker pushes its branch and opens its pull request as. Neither is the deployment's git
+token, and scoping either one to a single code repository stops intake or stops the worker's push: the
+one-repository recipe above is for the git credential only. Measured on the deployment box: three 0600 token
+files in the state directory — the GitHub token (one file behind both settings above), the deployment's git
+token, and the panel secret — and two of them are *separate* `repo`-scope classic tokens, so the URL exposed
+one while the other kept read/write on every repository the account reaches.
+
+Revoking the token is also what cleans the copies you cannot see: every worker home keeps a 0600
+`~/.git-credentials` holding the worker token (62 of them on this box, written by the deployment for workers
+that never finished). Revoke first, then delete the worker homes — deleting first leaves a live token behind.
+
 ## When several issues arrive at once
 
 By default, four workers can run at once. If you open a fifth issue while all four are busy, its
