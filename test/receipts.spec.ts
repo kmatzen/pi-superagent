@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { pullEndText, receiptText } from '../src/pi/receipts.ts'
+import { evidenceOf } from './pull-read.ts'
 
 describe('what the thread reads when a run ends', () => {
   it('a result is one line: the thread, the state, the summary', () => {
@@ -40,5 +41,28 @@ describe('what the thread reads when a run ends', () => {
     const mixed = pullEndText('#400', [pr(9, 'merged'), pr(12, 'closed')])
     expect(mixed).toMatch(/pull\/9 merged and https:\/\/github.com\/o\/r\/pull\/12 closed without merging/)
     expect(mixed).toMatch(/ends with the work that landed/)
+  })
+
+  it('an ending quotes the read it acted on, so a person can check it against the API', () => {
+    const text = pullEndText('#235', [{
+      url: 'https://github.com/matzen_adobe/fleet-board/pull/74', outcome: 'closed',
+      evidence: evidenceOf({ repo: 'matzen_adobe/fleet-board', number: 74, status: 0, state: 'closed',
+        closedAt: '2026-11-09T06:00:01Z', mergedAt: null, headRefOid: '9a0e7ea1234567890abcdef1234567890abcdef1' }),
+    }])
+    expect(text).toMatch(/closed without merging/)
+    // Every field the ticket asks a receipt to carry: PR number, raw state, closed_at, merged_at, head, exit status.
+    expect(text).toContain('#74 in matzen_adobe/fleet-board')
+    expect(text).toContain('gh exit 0')
+    expect(text).toContain('state=closed')
+    expect(text).toContain('closed_at=2026-11-09T06:00:01Z')
+    expect(text).toContain('merged_at=null')
+    expect(text).toContain('head=9a0e7ea123')
+  })
+
+  it('a pull request GitHub has no number for is named as that, not as a reviewer closing the work', () => {
+    const text = pullEndText('#400', [{ url: 'https://github.com/o/r/pull/9', outcome: 'closed', evidence: evidenceOf({ number: 9, status: 1, reason: 'no-such-pull-request' }) }])
+    expect(text).toMatch(/no longer exists on GitHub.*nothing merged/)
+    expect(text).not.toMatch(/closed without merging/)
+    expect(text).toContain('read=no-such-pull-request')
   })
 })

@@ -2,7 +2,16 @@
 import { spawn } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState, type PrReview } from './source-github.ts'
-import type { PullApi } from './pulls.ts'
+import type { PullApi, PullEvidence, PullRead } from './pulls.ts'
+
+/**
+ * A `gh` run that did not succeed, carrying what the caller needs to decide what it means: the exit status and
+ * the stderr it printed. Collapsing these into a message string is how a rate limit and a real "closed" became
+ * the same fact to the poller (board #235, eight false closings of an open pull request, 2026-11-09).
+ */
+export class GhFailure extends Error {
+  constructor(message: string, readonly status: number, readonly stderr: string) { super(message) }
+}
 
 export interface GhOptions {
   bin?: string
@@ -87,7 +96,7 @@ const ghCall = ({ bin = 'gh', tokenFile }: GhOptions) => (args: string[], stdin?
   child.on('error', reject)
   child.on('close', code => code === 0
     ? resolve(out)
-    : reject(new Error(`gh ${args.slice(0, 2).join(' ')} exited ${code}: ${err.trim().slice(0, 300)}`)))
+    : reject(new GhFailure(`gh ${args.slice(0, 2).join(' ')} exited ${code}: ${err.trim().slice(0, 300)}`, code ?? -1, err.trim())))
   // gh may exit before reading stdin (for example, on an auth failure). Its exit reports the cause.
   child.stdin.on('error', (error: NodeJS.ErrnoException) => { if (error.code !== 'EPIPE') reject(error) })
   child.stdin.end(stdin)
@@ -182,20 +191,97 @@ export function ghApi(options: GithubApiOptions): GithubApi {
   }
 }
 
+type PullRow = { state?: unknown; merged_at?: unknown; closed_at?: unknown; created_at?: unknown; head?: { sha?: unknown } | null }
+
+const text = (value: unknown): string | null => typeof value === 'string' && value ? value : null
+const NOT_FOUND = /HTTP 404|Not Found/i
+// GitHub's rate-limit bodies (primary, secondary, abuse) all say so, and all arrive as a non-zero exit.
+const RATE_LIMITED = /rate limit|abuse detection|secondary limit|HTTP 403|HTTP 429/i
+
+/** How long a repository's invisibility to this token is taken as settled: it is a property of the account, not of the poll. */
+const INVISIBLE_TTL_MS = 600_000
+
+/**
+ * A 404 on a pull request means "no such pull request" only to a token that can read the repository: GitHub
+ * answers 404, never 403, for a private repository outside the account's reach. Measured 2026-11-09, the
+ * router's account got 404 on the whole of `matzen_adobe/fleet-board` and on `kmatzen/pi-superagent`, and every
+ * follow of those repositories ended its ticket as "closed without merging" while the pull requests sat open.
+ * So the same token is asked about the repository: 200 there makes the 404 a fact about the pull request, and
+ * anything else makes the read say nothing.
+ */
+async function invisibleOrAbsent(call: (args: string[]) => Promise<string>, repo: string, pollStatus: number,
+                                 evidence: (over: Partial<PullEvidence>) => PullEvidence,
+                                 invisible: Map<string, number>, now: () => number): Promise<PullRead> {
+  const cached = invisible.get(repo)
+  if (cached && cached > now()) return { read: 'unknown', reason: 'repo-invisible', evidence: evidence({ status: pollStatus, reason: 'repo-invisible' }) }
+  try {
+    await call(['api', `repos/${repo}`])
+    // GitHub answered for the repository with this same token and has no such number: the only 404 that is a
+    // fact about the pull request, so this is the one read that ends a ticket without a state to quote.
+    return { read: 'absent', evidence: evidence({ status: pollStatus, reason: 'no-such-pull-request' }) }
+  } catch (error) {
+    const failure = error instanceof GhFailure
+    const reason = failure && (error.status === 404 || NOT_FOUND.test(error.stderr)) ? 'repo-invisible' : 'repo-read-failed'
+    if (reason === 'repo-invisible') invisible.set(repo, now() + INVISIBLE_TTL_MS)
+    return { read: 'unknown', reason, evidence: evidence({ status: pollStatus, reason }) }
+  }
+}
+
 /** Pull requests in any repository the operator's gh can read, by number: the ones tickets follow. */
-export function ghPulls(options: GhOptions = {}): PullApi {
+export function ghPulls(options: GhOptions = {}, now: () => number = () => Date.now()): PullApi {
   const call = ghCall(options)
+  const invisible = new Map<string, number>()
   return {
-    async pull(repo, number) {
+    async pull(repo, number): Promise<PullRead> {
+      const evidence = (over: Partial<PullEvidence> = {}): PullEvidence =>
+        ({ repo, number, status: 0, state: '', closedAt: null, mergedAt: null, headRefOid: '', ...over })
+      const unknown = (reason: string, over: Partial<PullEvidence> = {}): PullRead =>
+        ({ read: 'unknown', reason, evidence: evidence({ reason, ...over }) })
+      let body: string
       try {
-        const r = JSON.parse(await call(['api', `repos/${repo}/pulls/${number}`])) as
-          { state: string; merged_at?: string | null; closed_at?: string | null; created_at: string }
-        const closedAt = r.merged_at ?? r.closed_at
-        return { open: r.state === 'open', merged: Boolean(r.merged_at), createdAt: r.created_at, ...(closedAt ? { closedAt } : {}) }
+        body = await call(['api', `repos/${repo}/pulls/${number}`])
       } catch (error) {
-        if (/HTTP 404|Not Found/i.test(String(error))) return undefined
-        throw error
+        // A `gh` that never ran (a token file that cannot be read, a missing binary) is a configuration fault, and
+        // it throws so the caller names the cause; a `gh` that ran and failed is a read that decided nothing.
+        if (!(error instanceof GhFailure)) throw error
+        const status = error.status
+        const stderr = error.stderr
+        if (NOT_FOUND.test(stderr)) return invisibleOrAbsent(call, repo, status, evidence, invisible, now)
+        // Everything else a poll can die of — a 5xx, a rate limit, a dead token, a gh that never started — is a
+        // read that decided nothing, and the follow lives to the next pass.
+        if (RATE_LIMITED.test(stderr)) return unknown('rate-limited', { status })
+        return unknown(`gh-exit-${status}`, { status })
       }
+      if (!body.trim()) return unknown('empty-output')
+      let row: PullRow
+      try {
+        row = JSON.parse(body) as PullRow
+      } catch {
+        return unknown('unparseable-output', { state: body.trim().slice(0, 40) })
+      }
+      const rawState = text(row.state) ?? ''
+      const mergedAt = text(row.merged_at)
+      const closedAt = text(row.closed_at)
+      const headRefOid = text(row.head?.sha) ?? ''
+      const base = { status: 0, state: rawState, mergedAt, closedAt, headRefOid }
+      const state = rawState.trim().toLowerCase()
+      const found = (over: { open?: boolean; merged?: boolean; closedAt?: string; mergedAt?: string } = {}): PullRead => ({
+        read: 'found',
+        evidence: evidence(base),
+        state: {
+          open: over.open ?? false, merged: over.merged ?? false,
+          createdAt: text(row.created_at) ?? '', rawState, headRefOid,
+          ...(over.closedAt ? { closedAt: over.closedAt } : {}),
+          ...(over.mergedAt ? { mergedAt: over.mergedAt } : {}),
+        },
+      })
+      if (!state) return unknown('no-state-in-body', base)
+      if (state === 'open') return found({ open: true })
+      if (mergedAt || state === 'merged') return found({ merged: true, ...(mergedAt ? { mergedAt } : {}), ...(closedAt ? { closedAt } : {}) })
+      // A closed pull request whose body carries no close time is an incomplete answer, not a close: the poller
+      // that invents a `closed_at` is what made these endings uncheckable.
+      if (state === 'closed') return closedAt ? found({ closedAt }) : unknown('closed-without-closed-at', base)
+      return unknown(`unrecognised-state:${rawState.slice(0, 24)}`, base)
     },
     async comments(repo, number, since) {
       return paged(call, page => `repos/${repo}/issues/${number}/comments?${since ? `since=${encodeURIComponent(since)}&` : ''}page=${page}`,

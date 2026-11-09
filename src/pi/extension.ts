@@ -22,6 +22,7 @@ import { herdrCli, type Herdr } from './herdr.ts'
 import { HerdrWorkers } from './herdr-workers.ts'
 import { reportTool, type ReportOrigin } from './report-tool.ts'
 import { pullEndText, receiptText, type ReportedRun } from './receipts.ts'
+import type { PullEvidence } from './pulls.ts'
 import { workerRole } from './worker-role.ts'
 import { createPanelServer } from './server.ts'
 import { checkoutRepository, guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
@@ -277,6 +278,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     pullEnded(ticket.id)
   }
   const home = cfg.githubRepo ?? ''
+  /** Where the read that ended a follow is kept, so a receipt written after a restart can still quote it. */
+  const evidenceKey = (thread: string): string => `pulls:evidence:${thread}`
   // The engine ends a ticket with its pull request but posts nothing, so the issue hears it here, once per ticket.
   const pullEnded = (ticketId: string): void => {
     const ticket = repos.tickets.get(ticketId)
@@ -284,9 +287,17 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const channel = ticket?.channels[0]
     if (!ticket || !channel || ticket.ended?.by !== 'executor' || (outcome !== 'merged' && outcome !== 'closed')) return
     const pulls = (ticket.follows ?? []).filter(f => f.own && f.closed)
-      .flatMap(f => { const pull = parseThread(f.thread.replace(/^github:/, ''), home)
-        return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome }] : [] })
-    outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, pulls) })
+      .flatMap(f => {
+        const pull = parseThread(f.thread.replace(/^github:/, ''), home)
+        const evidence = repos.kv.get<PullEvidence>(evidenceKey(f.thread))
+        return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome, ...(evidence ? { evidence } : {}) }] : []
+      })
+    if (!pulls.length) return
+    // One ending notice per pull request per ticket, keyed on the thread and the pulls, not on the ticket row:
+    // a false ending re-arms the issue as a NEW ticket id (measured on #235: seven rows, seq 146-183, for one
+    // issue), so `pull-end:<ticketId>` let the same PR post eight "ends" notices for one open pull request.
+    const prs = pulls.map(p => p.url).sort().join(',')
+    outbox.send({ id: `pull-end:${channel.thread}:${prs}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, pulls) })
   }
   const follower = new PullFollower({
     home, api: deps.pullApi ?? ghPulls(accounts.pulls),
@@ -294,11 +305,14 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, now: () => Date.now(),
     receive: trigger => { engine.receive(trigger) },
     warn: (event, fields) => log.line('warn', event, fields),
-    closed: (thread, pull, outcome, at) => {
+    closed: (thread, pull, outcome, at, evidence) => {
       const key = `github:${thread.id}`
       const waiting = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && !f.closed)).map(t => t.id)
+      repos.kv.set(evidenceKey(key), evidence)
       engine.threadClosed(thread, outcome, at)
-      log.line('info', 'pull.closed', { thread: thread.id, outcome, url: pullUrl(pull), tickets: waiting.length })
+      log.line('info', 'pull.closed', { thread: thread.id, outcome, url: pullUrl(pull), tickets: waiting.length,
+        state: evidence.state, closedAt: evidence.closedAt, mergedAt: evidence.mergedAt, head: evidence.headRefOid, status: evidence.status,
+        ...(evidence.reason ? { reason: evidence.reason } : {}) })
       for (const id of waiting) pullEnded(id)
     },
   })
