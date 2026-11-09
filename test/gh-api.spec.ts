@@ -148,6 +148,7 @@ function fakePullsGh() {
   writeFileSync(bin, `#!/bin/bash
 printf '%s\n' "$*" >> "$(dirname "$0")/calls.log"
 case "$*" in
+  "api repos/x/y") echo '{"full_name":"x/y","private":false}' ;;
   "api repos/x/y/pulls/9") echo '{"state":"closed","merged_at":"2026-11-06T10:00:00Z","closed_at":"2026-11-06T10:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/10") echo '{"state":"closed","merged_at":null,"closed_at":"2026-11-06T11:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/11") echo '{"state":"open","merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z"}' ;;
@@ -171,6 +172,34 @@ describe('ghPulls', () => {
     expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, createdAt: '2026-11-05T09:00:00Z' })
     expect(await api.pull('x/y', 404)).toBeUndefined()
     await expect(api.pull('x/y', 502), 'any other failure is an error, not a closed pull request').rejects.toThrow(/502/)
+  })
+
+  it('a repository this account cannot see is an unreadable pull request, never a vanished one', async () => {
+    // GitHub answers 404 for a private repository, the same answer it gives for a pull request that does not exist,
+    // and a reader that takes 404 as "absent" ends the ticket waiting on it. Measured 2026-11-09: the router's
+    // account cannot read the private repository its own code lives in, and it posted "closed without merging, so
+    // this ticket ends" twice in one day about an open, ready, mergeable pull request.
+    const dir = tmp()
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+printf '%s\n' "$*" >> "$(dirname "$0")/calls.log"
+echo 'gh: Not Found (HTTP 404)' >&2
+exit 1
+`)
+    chmodSync(bin, 0o755)
+    const api = ghPulls({ bin })
+    await expect(api.pull('private/secret', 31)).rejects.toThrow(/cannot read private\/secret/)
+    await expect(api.pull('private/secret', 32), 'every read of it stays an error').rejects.toThrow(/unreadable, not absent/)
+    const calls = readFileSync(join(dir, 'calls.log'), 'utf8').trim().split('\n')
+    expect(calls.filter(c => c === 'api repos/private/secret'), 'the repository is asked once, not once per pull').toHaveLength(1)
+  })
+
+  it('a repository the account CAN see is probed once, and its 404 pull request stays absent', async () => {
+    const gh = fakePullsGh()
+    const api = ghPulls({ bin: gh.bin })
+    expect(await api.pull('x/y', 404)).toBeUndefined()
+    expect(await api.pull('x/y', 404), 'asked twice, because the follower reads on its interval').toBeUndefined()
+    expect(gh.calls().filter(c => c === 'api repos/x/y'), 'visibility is asked once per repository').toHaveLength(1)
   })
 
   it("reads one pull request's comments from a time, and its submitted reviews, with each author's standing", async () => {

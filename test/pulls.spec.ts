@@ -94,6 +94,32 @@ describe('following a ticket\'s pull requests', () => {
     expect(t.closed).toEqual([{ id: '#9', outcome: 'merged', at: later }, { id: '#10', outcome: 'closed', at: expect.any(String) }])
   })
 
+  it('a pull request the reader cannot see keeps its ticket waiting, and is complained about once', async () => {
+    // 404 is GitHub's answer for a pull request that is gone *and* for a repository the token cannot read. Ending
+    // the wait on the second one posts "closed without merging, so this ticket ends" on an open, ready pull request
+    // — measured 2026-11-09, twice in one day, about the router's own fix in a private repository.
+    let broken = true
+    const t = follower({
+      pull: async () => {
+        if (broken) throw new Error('HTTP 404 reading pull request private/secret#31, and this account cannot read private/secret either')
+        return openPull
+      },
+    })
+    await t.f.reconcile(t.following('private/secret#31'))
+    expect(t.closed, 'an unreadable read ends nothing').toEqual([])
+    expect(t.warned).toEqual(['pull.read_failed'])
+    t.tick(120_000)
+    await t.f.reconcile(t.following('private/secret#31'))
+    t.tick(120_000)
+    await t.f.reconcile(t.following('private/secret#31'))
+    expect(t.warned, 'once per thread, not once per poll').toEqual(['pull.read_failed'])
+    broken = false
+    t.tick(120_000)
+    await t.f.reconcile(t.following('private/secret#31'))
+    expect(t.warned, 'and it says when the read comes back').toEqual(['pull.read_failed', 'pull.read_readable'])
+    expect(t.closed, 'the follow survived to be read').toEqual([])
+  })
+
   it('waits for the first look at the watched repository before deciding anything', async () => {
     const t = follower({ pull: async () => ({ open: false, merged: true, createdAt: created, closedAt: later }) }, null)
     await t.f.reconcile(t.following('#9'))

@@ -55,6 +55,18 @@ comment, or a report that changed state, restarts the count. The journal is the 
 aggregate's: an Assignment keeps its last report, so the 93 receipts of one worker session are one
 report in the ticket.
 
+**A 404 from a repository you cannot see is not a vanished pull request.** GitHub answers 404,
+not 403, for a private repository a token cannot read, and the pull-request reader returned
+`undefined` for every 404. A follow whose read returns `undefined` is finished: the engine ends
+the ticket and the router posts "closed without merging, so this ticket ends". Measured
+2026-11-09, the router's account cannot read the private repository its own code lives in, so it
+told the board twice in one day that an open, ready, mergeable pull request had closed without
+merging, and ended the ticket that was fixing the board. The reader now asks the repository
+(once, cached): visible means the pull request is absent and the wait ends, invisible means the
+read is unreadable, the follow stays open, and the failure is said once per thread with the
+matching `pull.read_readable` when it recovers. Absent and unreadable are different answers; only
+the first one ends a wait.
+
 **Say a report nobody received.** A worker's report travels: the pane appends it to
 `reports.jsonl`, the router reads the file and files it on the ticket. When the ticket has no
 live worker by then — it ended on the worker's own report, and a queued copy of its mandate

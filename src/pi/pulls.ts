@@ -14,7 +14,8 @@ export interface PullState {
 }
 
 export interface PullApi {
-  /** Undefined when GitHub has no such pull request. */
+  /** Undefined when GitHub has no such pull request. A read this account cannot make — a private repository it
+   *  cannot see, which GitHub answers with 404 — throws: the state is unknown, not absent. */
   pull(repo: string, number: number): Promise<PullState | undefined>
   comments(repo: string, number: number, since?: string): Promise<IssueComment[]>
   reviews(repo: string, number: number): Promise<PrReview[]>
@@ -85,6 +86,9 @@ const READS_AT_ONCE = 4
 export class PullFollower {
   private readonly polled = new Map<string, number>()
   private readonly unreadable = new Set<string>()
+  /** Threads whose state read has already been complained about: a follow in a repository the account cannot see
+   *  fails every interval, and 720 identical lines a day is how the one real line gets buried. */
+  private readonly unread = new Set<string>()
 
   constructor(private readonly options: FollowerOptions) {}
 
@@ -124,10 +128,19 @@ export class PullFollower {
     try {
       state = await this.options.api.pull(pull.repo, pull.number)
     } catch (error) {
-      this.options.warn('pull.read_failed', { thread: id, error: String(error).slice(0, 200) })
+      // Unknown is not closed. Ending the wait on a read that failed posts "closed without merging, so this ticket
+      // ends" on a pull request that is open and ready — measured 2026-11-09, twice in one day, on the router's
+      // own fix, because its account cannot see the private repository that pull lives in.
+      if (!this.unread.has(id)) {
+        this.unread.add(id)
+        this.options.warn('pull.read_failed', { thread: id, error: String(error).slice(0, 200) })
+      }
       return
     }
-    // A pull request GitHub no longer has cannot be merged, so the ticket's wait ends here: `undefined` is GitHub's only answer for one.
+    if (this.unread.delete(id)) this.options.warn('pull.read_readable', { thread: id })
+    // A pull request GitHub no longer has cannot be merged, so the ticket's wait ends here. `undefined` is GitHub's
+    // answer for one *to a reader that can see the repository*: a repository this account cannot read throws above
+    // and returns here as an untouched follow, because 404 is also what GitHub says about a private repository.
     if (!state || !state.open) {
       this.options.closed({ source: 'github', id }, pull, state?.merged ? 'merged' : 'closed', state?.closedAt ?? new Date(now).toISOString())
       return

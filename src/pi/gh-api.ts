@@ -216,6 +216,24 @@ export function ghApi(options: GithubApiOptions): GithubApi {
 /** Pull requests in any repository the operator's gh can read, by number: the ones tickets follow. */
 export function ghPulls(options: GhOptions = {}): PullApi {
   const call = ghCall(options)
+  /**
+   * Whether this account can read a repository at all, asked once per repository. GitHub answers **404**, not 403,
+   * for a private repository the token cannot see, and a caller that reads a 404 on a pull request as "GitHub has
+   * no such pull request" ends the ticket that waits on it. Measured 2026-11-09: the router's account cannot see
+   * the private repository its own code lives in, so it told the board twice in one day that an open, ready, mergeable
+   * pull request had "closed without merging, so this ticket ends" — a false terminal end on the live fix, posted
+   * in the router's own voice. Absent and unreadable are different answers, and only the first one ends a wait.
+   */
+  const visibility = new Map<string, boolean>()
+  const repoReadable = async (repo: string): Promise<boolean> => {
+    const known = visibility.get(repo)
+    if (known !== undefined) return known
+    // A probe that fails for any reason counts as unreadable: the safe reading of a repository the reader cannot
+    // confirm is that the pull request's state is unknown, which keeps the ticket waiting and says so.
+    const readable = await call(['api', `repos/${repo}`]).then(() => true, () => false)
+    visibility.set(repo, readable)
+    return readable
+  }
   return {
     async pull(repo, number) {
       try {
@@ -224,8 +242,10 @@ export function ghPulls(options: GhOptions = {}): PullApi {
         const closedAt = r.merged_at ?? r.closed_at
         return { open: r.state === 'open', merged: Boolean(r.merged_at), createdAt: r.created_at, ...(closedAt ? { closedAt } : {}) }
       } catch (error) {
-        if (/HTTP 404|Not Found/i.test(String(error))) return undefined
-        throw error
+        if (!/HTTP 404|Not Found/i.test(String(error))) throw error
+        if (await repoReadable(repo)) return undefined
+        throw new Error(`HTTP 404 reading pull request ${repo}#${number}, and this account cannot read ${repo} either: `
+          + 'GitHub answers 404 for a private repository it cannot see, so the pull request is unreadable, not absent')
       }
     },
     async comments(repo, number, since) {
