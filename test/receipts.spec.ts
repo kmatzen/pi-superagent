@@ -56,4 +56,22 @@ describe('what the thread reads when a run ends', () => {
     expect(pullEndText('#303', [pr(9, 'merged')]), 'nothing added when every follow was readable')
       .toBe('#303 merged: https://github.com/o/r/pull/9. This ticket is done.')
   })
+
+  it('says a deleted pull request as a deleted pull request, never as unreadable', () => {
+    // `absent` is GitHub answering for a repository the router CAN read and having no such number. "The router
+    // could not read it" would be its own false statement, and this receipt is where an operator reads it.
+    const pr = (n: number, outcome: 'merged' | 'closed') => ({ url: `https://github.com/o/r/pull/${n}`, outcome })
+    const text = pullEndText('#410', [pr(9, 'merged')],
+      [{ url: 'https://github.com/o/r/pull/12', reason: 'github-has-no-such-pull' }])
+    expect(text).toMatch(/GitHub has no pull request at https:\/\/github\.com\/o\/r\/pull\/12/)
+    expect(text).toMatch(/the router can read that repository/)
+    expect(text).toMatch(/ended this ticket on the signal above, not on that pull request/)
+    expect(text, 'it is not reported as a read the router could not make')
+      .not.toMatch(/could NOT read/)
+    const both = pullEndText('#410', [pr(9, 'merged')],
+      [{ url: 'https://github.com/o/r/pull/12', reason: 'github-has-no-such-pull' },
+        { url: 'https://github.com/secret/lib/pull/3', reason: 'repo-invisible:http-404' }])
+    expect(both).toMatch(/could NOT read https:\/\/github\.com\/secret\/lib\/pull\/3/)
+    expect(both).toMatch(/GitHub has no pull request at https:\/\/github\.com\/o\/r\/pull\/12/)
+  })
 })

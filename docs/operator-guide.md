@@ -138,6 +138,11 @@ Grant read access to the account the router reads pulls as (its `gh` login, and 
 GitHub rate-limits it), and the next pass reads the pull request, clears the count, and says
 `pull.readable` once.
 
+The same list carries `pull.absent`: GitHub answered for the repository and has no such number, which is
+almost always a deleted pull request. The router names it and keeps the ticket open, because a number GitHub
+does not answer is not a close it watched — if the deletion really is the answer the ticket was waiting for,
+close the ticket by hand. `pulls.unreadable` counts both, and each entry's `reason` says which.
+
 **Status exits 2.** Read `~/.pi/superagent/health.json` to identify the failing component. For a
 GitHub source error, check `gh auth status`. The next successful poll clears the error.
 

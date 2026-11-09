@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { followedPulls, parsePull, parseThread, PullFollower, threadOfPull, threadUrl, UNREADABLE_PULLS, type FollowerOptions, type PullApi, type PullRead, type PullState, type UnreadablePulls } from '../src/pi/pulls.ts'
+import { ABSENT_REASON, followedPulls, parsePull, parseThread, PullFollower, threadOfPull, threadUrl, UNREADABLE_PULLS, type FollowerOptions, type PullApi, type PullRead, type PullState, type UnreadablePulls } from '../src/pi/pulls.ts'
 import { REPLY_MARKER, type IssueComment, type PrReview } from '../src/pi/source-github.ts'
 import type { Ticket, Trigger } from '../src/core/index.ts'
 
@@ -94,12 +94,14 @@ describe('following a ticket\'s pull requests', () => {
     expect(t.calls).toEqual([])
   })
 
-  it('a merged pull request is reported merged at its merge time, and a vanished one closed', async () => {
+  it('a merged pull request is reported merged at its merge time, and a vanished one is named, not closed', async () => {
     const t = follower({
       pull: async (_r, n) => n === 9 ? found({ open: false, merged: true, createdAt: created, closedAt: later }) : absent,
     })
     await t.f.reconcile(t.following('#9', '#10'))
-    expect(t.closed).toEqual([{ id: '#9', outcome: 'merged', at: later }, { id: '#10', outcome: 'closed', at: expect.any(String) }])
+    expect(t.closed, 'a number GitHub has none of is not a close it watched: #10 keeps its ticket open')
+      .toEqual([{ id: '#9', outcome: 'merged', at: later }])
+    expect(t.warned).toEqual(['pull.absent'])
   })
 
   it('waits for the first look at the watched repository before deciding anything', async () => {
@@ -207,13 +209,17 @@ describe('following a ticket\'s pull requests', () => {
     expect(t.unreadable(), 'so the count in health.json goes back to nothing').toEqual({})
   })
 
-  it('a pull request GitHub has none of, in a repository it does answer for, ends the wait', async () => {
-    // The other half of the 404: gh-api answers `absent` only after the SAME token read the repository, so
-    // this is GitHub saying it has no such pull request, and a pull that cannot exist can never be merged.
+  it('a pull request GitHub has none of, in a repository it does answer for, is named and counted, never closed', async () => {
+    // The other half of the 404: gh-api answers `absent` only after the SAME token read the repository, so this
+    // is GitHub saying it has no such number. That is a fact about the number, not a close the router watched,
+    // and the ask is explicit: a ticket's wait ends on `state: closed` with GitHub's own `closed_at`, and the
+    // router does not date an ending from its own clock. A deleted pull request parks its ticket, named.
     const t = follower({ pull: async () => absent })
     await t.f.reconcile(t.following('other/lib#5'))
-    expect(t.closed).toEqual([{ id: 'other/lib#5', outcome: 'closed', at: expect.any(String) }])
-    expect(t.warned, 'and the reason is said out loud, because the close time here is the detection time').toEqual(['pull.absent'])
+    expect(t.closed, 'no close, and no closedAt invented from the tick').toEqual([])
+    expect(t.warned).toEqual(['pull.absent'])
+    expect(t.unreadable()['other/lib#5'], 'countable from health.json, and the reason the receipt will print')
+      .toMatchObject({ reason: ABSENT_REASON, reads: 1, escalated: false })
   })
 
   it('reads the pull requests it follows side by side, and never more than four at a time', async () => {
