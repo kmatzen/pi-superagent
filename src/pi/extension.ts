@@ -333,6 +333,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const closedKey = 'closed-issues'
   /** Which (ticket, pull request) pairs have already been told their pull request is unreadable — see `blind` below. */
   const blindKey = 'pull-blind-notices'
+  const closedNoticeKey = 'conversation-closed-notices'
   const closedHere = (): Record<string, string> => repos.kv.get<Record<string, string>>(closedKey) ?? {}
   const closing: string[] = []
   const finishIssue = (ticketId: string): void => {
@@ -787,23 +788,46 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const openThreads = github?.openThreads()
     enter('conversations')
     if (openThreads) {
+      // One closed conversation says it ONCE. A thread can carry more than one ticket — a re-dispatch leaves the
+      // first row bound to the same issue — and the notice was keyed per ticket, so measured 2026-11-09 on board
+      // #314 the board read "Stopped: this conversation closed on GitHub" twice in 46 ms (20:08:40.0, twice) and a
+      // third time at 20:09:10, three sentences for one fact. Every ticket is still stopped; only the speech is
+      // keyed by the thread, which is the thing that closed.
+      const closedSaid = repos.kv.get<Record<string, string>>(closedNoticeKey) ?? {}
+      const closedAt = deps.now?.() ?? new Date().toISOString()
+      let closedSpoke = false
       for (const ticket of repos.tickets.open()) {
         const channel = ticket.channels[0]
-        if (!channel || channel.source !== 'github' || !channel.thread.startsWith('#') || openThreads.has(channel.thread)) continue
+        if (!channel || channel.source !== 'github' || !channel.thread.startsWith('#')) continue
+        if (openThreads.has(channel.thread)) {
+          // The conversation is open again, so its next close is a new fact: drop the mark, do not let a 30-day
+          // window be the reason a reopened issue that closes again is silent.
+          if (closedSaid[channel.thread]) { delete closedSaid[channel.thread]; closedSpoke = true }
+          continue
+        }
         // A merge closes the issue it names: the ticket ends with its pull request once the work finishes, not as a stop.
         if (ticket.follows?.some(f => f.own && f.closed)) continue
         try {
           engine.stopTicket(ticket.id, 'the conversation closed on GitHub')
-          outbox.send({
-            id: `closed:${ticket.id}`,
-            channel,
-            kind: 'notice', ticketId: ticket.id,
-            text: 'Stopped: this conversation closed on GitHub. Reopen it to run the request again.',
-          })
-          log.line('info', 'ticket.conversation_closed', { ticket: ticket.id, thread: channel.thread })
+          const said = Boolean(closedSaid[channel.thread])
+          if (!said) {
+            closedSaid[channel.thread] = closedAt
+            closedSpoke = true
+            outbox.send({
+              id: `closed:${ticket.id}`,
+              channel,
+              kind: 'notice', ticketId: ticket.id,
+              text: 'Stopped: this conversation closed on GitHub. Reopen it to run the request again.',
+            })
+          }
+          log.line('info', 'ticket.conversation_closed', { ticket: ticket.id, thread: channel.thread, said })
         } catch {
           // A stop raced with this poll; the ticket is already ended, which is the same outcome.
         }
+      }
+      if (closedSpoke) {
+        repos.kv.set(closedNoticeKey, Object.fromEntries(Object.entries(closedSaid)
+          .filter(([, when]) => Date.parse(when) > Date.parse(closedAt) - 30 * 86_400_000)))
       }
     }
     // evaluateDue runs on every pass: it is the only thing that expires a stuck eval, and gating it once left

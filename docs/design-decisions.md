@@ -98,6 +98,15 @@ the fix the notice asks for is a grant a human makes: the first "addressed" I me
 (the collaborator list of both repositories named only their owner), and had it landed, a process-lifetime cache would
 have kept answering 404 until the next restart — the door named, the running router unable to walk through it.
 
+**One closed conversation says it once.** The stop a closed issue produces is keyed by ticket, and a thread can carry
+more than one ticket — a re-dispatch leaves the first row bound to the same issue, and the board has those rows
+already. Measured 2026-11-09 on #314: the board read "Stopped: this conversation closed on GitHub" twice within 46 ms
+(20:08:40, twice) and a third time at 20:09:10, three sentences for one fact, on a thread whose issue was closed and
+whose work was done. Every ticket is still stopped; only the speech is keyed by the thread, journaled per thread in kv,
+and the mark is dropped while the thread is open — a reopen is a person changing their mind, and its next close is a
+new fact, not an echo. (#311 stops the duplicate rows being created in the first place; this is what the board hears
+about the ones it already has.)
+
 **Say an outcome only when it was seen.** A terminal end reads the ticket’s follow records, and a record written
 by a read that failed is not an observation. Measured 2026-11-09 on board #309: the ticket’s follow on
 `kmatzen/pi-superagent#31` held `closed` written by the pre-fix reader, the pull request merged in a repository the

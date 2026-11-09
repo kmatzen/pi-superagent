@@ -852,6 +852,52 @@ describe('a pull request per ticket', () => {
     expect(f.receipts('492').split('I cannot follow'), 'once per ticket, not once per poll').toHaveLength(2)
   })
 
+  it('a conversation that closed says it once, whatever number of tickets are bound to it', async () => {
+    // Measured 2026-11-09 on board #314: the board read "Stopped: this conversation closed on GitHub" twice within
+    // 46 ms (20:08:40, twice) and again at 20:09:10 — three sentences for one fact, because the notice was keyed by
+    // ticket and a re-dispatch leaves the first row bound to the same issue. Both tickets still stop; the thread is
+    // the thing that closed, so the thread gets the sentence.
+    const f = fixture()
+    const ticket = await working(f, '500')
+    const first = ticket().id
+    const repos = new SqliteRepositories(`${f.dir}/tickets.db`)
+    const twin = { ...repos.tickets.get(first)!, id: 'twin-of-500', assignments: [] }
+    repos.tickets.save(twin as never)
+    f.feed.issues = f.feed.issues.filter(i => i.issue !== 500)
+    await f.running.tick()
+    expect(repos.tickets.get(first)!.ended, 'the first ticket stops').toBeTruthy()
+    expect(repos.tickets.get('twin-of-500')!.ended, 'the duplicate stops too').toBeTruthy()
+    expect(f.receipts('500').split('Stopped: this conversation closed'), 'one notice for one closed thread').toHaveLength(2)
+    await f.running.tick()
+    expect(f.receipts('500').split('Stopped: this conversation closed'), 'and it is not said again next pass').toHaveLength(2)
+  })
+
+  it('a conversation reopened and closed again is said again', async () => {
+    // The 30-day mark must not be the reason a second close is silent: a reopen is a person changing their mind.
+    const f = fixture()
+    const ticket = await working(f, '501')
+    const id = ticket().id
+    const repos = new SqliteRepositories(`${f.dir}/tickets.db`)
+    f.feed.issues = f.feed.issues.filter(i => i.issue !== 501)
+    await f.running.tick()
+    expect(repos.tickets.get(id)!.ended).toBeTruthy()
+    expect(f.receipts('501')).toContain('Stopped: this conversation closed')
+    // Reopen it the way the board does: the issue is open again and carries the label that asks for work, so the
+    // router binds a live ticket to the thread. Its next close is a new fact, not an echo of the first.
+    f.addComment('501', 'octocat', 'reopened, and it still needs doing')
+    const reopened = f.feed.issues.find(i => i.issue === 501)!
+    reopened.author = 'octocat'
+    reopened.labels = ['agent-requested']
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(repos.tickets.list().filter(t => !t.ended).map(t => t.channels[0]?.thread), 'the reopen bound a live ticket to the thread').toEqual(['#501'])
+    f.feed.issues = f.feed.issues.filter(i => i.issue !== 501)
+    await f.running.tick()
+    expect(f.receipts('501').split('Stopped: this conversation closed'), 'the second close is a new fact').toHaveLength(3)
+  })
+
   it('a ticket with two pull requests ends only when both are done, and each is named by what it did', async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
