@@ -313,10 +313,9 @@ export class PiExecutor {
   private enqueue(run: () => Promise<void>): void {
     this.queued += 1
     this.tail = this.tail.then(async () => {
-      const max = this.options.maxConcurrent ?? 4
       // A slot frees when a session ends, which needs the event loop. Awaiting an already-resolved promise
       // never yields to it: the process spun at 100% with the panel dead as soon as a fifth ticket queued.
-      while (this.running >= max) await new Promise(resolve => setTimeout(resolve, this.options.slotPollMs ?? 1000))
+      while (this.gateClosed) await new Promise(resolve => setTimeout(resolve, this.options.slotPollMs ?? 1000))
       try { await run() } finally { this.queued -= 1 }
     }).catch(() => {
       // A rejected tail skips every later launch; the only throw left here (a report on an ended ticket) is moot.
@@ -335,14 +334,25 @@ export class PiExecutor {
    */
   idle(): Promise<void> { return this.tail }
 
+  /** The slot gate the head of the launch queue stands in: closed, no launch can start on this pass. */
+  private get gateClosed(): boolean { return this.running >= this.capacity }
+
   /**
    * Wait for the queued launches to run, but at most `budgetMs` of wall clock, and say which of the two
    * happened. `pending` is the launches still waiting — normally on a free worker slot, which is the
    * router's steady state under load and is not this pass's business: the next pass finds them running.
+   *
+   * A closed gate answers immediately. The launch is already enqueued and the gate re-checks capacity on its
+   * own timer, so a waiting caller starts nothing it would not start anyway; the budget only buys the launch
+   * that capacity is holding. Measured on the deployed router 2026-11-09, the day after #303 shipped: the pass
+   * paid the whole 5 s budget on 66 of 66 ticks (`drainMs=5001`, 47% of all tick time) against `running=8
+   * cap=8` — the bounded form of the same capacity wait that made the loop enterable hourly, costing 5 s of
+   * every 30 s and rising back toward that stall as the board grows.
    */
   async drain(budgetMs: number): Promise<{ settled: boolean; pending: number }> {
     if (this.queued === 0) return { settled: true, pending: 0 }
     if (budgetMs <= 0) return { settled: false, pending: this.queued }
+    if (this.gateClosed) return { settled: false, pending: this.queued }
     const tail = this.tail
     let timer: ReturnType<typeof setTimeout> | undefined
     const expired = new Promise<'timeout'>(resolve => {

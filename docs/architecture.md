@@ -53,7 +53,10 @@ workers and flushes replies. Three consecutive GitHub poll failures set an error
 The pass never waits for a free worker slot: the launch queue is gated on capacity, and awaiting it made the
 loop enterable only when the fleet went quiet (measured 2026-11-09: 7 passes in 6.6 h against a 30 s timer,
 each one then paying the full PR fan-out because the 120 s read budget had expired). It takes a bounded start
-on the launches it queued instead, and the loop's own liveness is published: every pass logs `tick n=…` with
+on the launches it queued instead — and gives that wait up at once when the gate is closed, because the queue
+re-checks capacity on its own timer and a caller standing next to it starts nothing (measured 2026-11-09, the
+day after: `drainMs=5001` on 66 of 66 passes at `running=8 cap=8`, 47% of all tick time, the capacity wait on a
+shorter leash) — and the loop's own liveness is published: every pass logs `tick n=…` with
 `gapMs` and per-stage times and `gh` call count, and writes `tick` into `health.json`, so a pass parked for
 longer than `PI_SUPERAGENT_TICK_STALL_MS` fails `superagent status` naming its stage, and one past
 `PI_SUPERAGENT_TICK_ABANDON_MS` is abandoned and replaced. Abandoning gives up the guard's place, not the pass,

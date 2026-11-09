@@ -239,7 +239,10 @@ A router paused on purpose keeps writing, one line per beat, so a pause never re
 
 **The board is busy and nothing starts.** `tick n=…` carries `launchPending` (launches waiting for a free
 worker slot) and `open`/`running`/`parked`. Waiting launches are the queue doing its job, not a stall; the
-router no longer waits a pass on them.
+router no longer waits a pass on them. `drainMs=0 drained=false launchPending=22` is that reading: the pass
+asked for the launches, found the cap full, and left them to the queue, which starts them on the pass that
+finds a slot. A `drainMs` at your `PI_SUPERAGENT_LAUNCH_DRAIN_MS` on every pass means the pass is spending its
+budget on a gate that cannot open — check `running` against `cap`.
 
 Read the backlog per pass, not the fleet size. Measured on the live router over 1,690 tickets' worth of
 `engine.log` (2026-11-09, #303): the 35 runs that queued at most one launch per pass beat every **30.0 s**,
