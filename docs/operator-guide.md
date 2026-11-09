@@ -129,6 +129,15 @@ by one for each request it dropped this way.
 that PR to finish the ticket. The router checks the watched repository on each poll and other
 repositories every two minutes.
 
+**`health.json` lists a pull request under `pulls` and its ticket never ends.** The router's GitHub account
+cannot read that repository. GitHub answers HTTP 404 — the same answer it gives for a deleted pull request —
+and a ticket whose pull request nobody can read stays open instead of ending, because the alternative is a
+receipt that says “closed without merging” about a pull request that is open. `grep 'pull.unreadable'
+~/.pi/superagent/engine.log` names the thread and the reason; the ticket's end receipt says the same thing.
+Grant read access to the account the router reads pulls as (its `gh` login, and the worker token when
+GitHub rate-limits it), and the next pass reads the pull request, clears the count, and says
+`pull.readable` once.
+
 **Status exits 2.** Read `~/.pi/superagent/health.json` to identify the failing component. For a
 GitHub source error, check `gh auth status`. The next successful poll clears the error.
 

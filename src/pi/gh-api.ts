@@ -2,12 +2,14 @@
 import { spawn } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState, type PrReview } from './source-github.ts'
-import type { PullApi } from './pulls.ts'
+import type { PullApi, PullRead } from './pulls.ts'
 
 export interface GhOptions {
   bin?: string
   /** A file holding the token of the account to act as; unset, gh acts as the account it is signed in as. */
   tokenFile?: string
+  /** How long a repository's readability probe is believed (default 10 min); 0 re-probes every 404. */
+  repoProbeMs?: number
 }
 
 export interface GithubApiOptions extends GhOptions {
@@ -30,9 +32,10 @@ export interface GithubApiOptions extends GhOptions {
 
   /**
    * Called when a followed pull request's reviews go unreadable (a string) or readable again (null). A 404
-   * is permanent — the pull is deleted, moved, or private to this account — and a ticket that follows it
-   * waits for a review nobody will ever read. Silence is the defect: measured 2026-11-07 with a ghost pull
-   * that stalled a ticket with no reason a person could see.
+   * here is a review read nobody can make — the pull is deleted, moved, or invisible to this account, which
+   * GitHub does not distinguish — and a ticket that follows it waits for a review nobody will ever read.
+   * Silence is the defect: measured 2026-11-07 with a ghost pull that stalled a ticket with no reason a
+   * person could see. Unreadable is never a close: see `PullRead` for why the same 404 ends nothing.
    */
   onPullUnreadable?: (ref: string, problem: string | null) => void
 }
@@ -183,18 +186,44 @@ export function ghApi(options: GithubApiOptions): GithubApi {
 }
 
 /** Pull requests in any repository the operator's gh can read, by number: the ones tickets follow. */
+/** GitHub's "not there" answer, which is also its "none of your business" answer. */
+const notFound = (error: unknown): boolean => /HTTP 404|Not Found/i.test(String(error))
+const statusOf = (error: unknown): string => `http-${/HTTP (\d{3})/.exec(String(error))?.[1] ?? 'unknown'}`
+
 export function ghPulls(options: GhOptions = {}): PullApi {
   const call = ghCall(options)
+  // An invisible repository is steady state, not a blip: a followed pull in one is read on every budget tick,
+  // and the probe costs one call per repository per window, not one per pull per tick.
+  const probes = new Map<string, { at: number; answer: { read: 'readable' } | { read: 'unreadable'; reason: string } }>()
+  const probeRepo = async (repo: string): Promise<{ read: 'readable' } | { read: 'unreadable'; reason: string }> => {
+    const ttl = options.repoProbeMs ?? 600_000
+    const hit = probes.get(repo)
+    if (hit && Date.now() - hit.at < ttl) return hit.answer
+    let answer: { read: 'readable' } | { read: 'unreadable'; reason: string }
+    try {
+      await call(['api', `repos/${repo}`])
+      answer = { read: 'readable' }
+    } catch (error) {
+      answer = notFound(error) ? { read: 'unreadable', reason: 'repo-invisible' } : { read: 'unreadable', reason: `repo-read-${statusOf(error)}` }
+    }
+    probes.set(repo, { at: Date.now(), answer })
+    return answer
+  }
   return {
-    async pull(repo, number) {
+    async pull(repo, number): Promise<PullRead> {
       try {
         const r = JSON.parse(await call(['api', `repos/${repo}/pulls/${number}`])) as
           { state: string; merged_at?: string | null; closed_at?: string | null; created_at: string }
         const closedAt = r.merged_at ?? r.closed_at
-        return { open: r.state === 'open', merged: Boolean(r.merged_at), createdAt: r.created_at, ...(closedAt ? { closedAt } : {}) }
+        return { read: 'found', pull: { open: r.state === 'open', merged: Boolean(r.merged_at), createdAt: r.created_at, ...(closedAt ? { closedAt } : {}) } }
       } catch (error) {
-        if (/HTTP 404|Not Found/i.test(String(error))) return undefined
-        throw error
+        // Measured 2026-11-09: a 404 is GitHub's answer for a pull request that is gone AND for one the token
+        // cannot see — `matzenbot_adobe` got 404 on `repos/kmatzen/pi-superagent` and on #29/#30/#31, all open
+        // to the owner. So ask the repository the same question with the same token: a repository this token
+        // cannot read cannot answer about a pull inside it, and the read reports itself, never a close.
+        if (!notFound(error)) throw error
+        const readable = await probeRepo(repo)
+        return readable.read === 'readable' ? { read: 'absent' } : { read: 'unreadable', reason: `${readable.reason}:${statusOf(error)}` }
       }
     },
     async comments(repo, number, since) {

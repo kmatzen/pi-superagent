@@ -41,4 +41,19 @@ describe('what the thread reads when a run ends', () => {
     expect(mixed).toMatch(/pull\/9 merged and https:\/\/github.com\/o\/r\/pull\/12 closed without merging/)
     expect(mixed).toMatch(/ends with the work that landed/)
   })
+
+  it('names the pull request the router could not read, on the receipt that ends the ticket', () => {
+    // Measured 2026-11-09: board ticket #303 read "closed without merging" three times for a pull request the
+    // router's token gets 404 on. An ending is a claim about GitHub, so the receipt says which part it read.
+    const pr = (n: number, outcome: 'merged' | 'closed') => ({ url: `https://github.com/o/r/pull/${n}`, outcome })
+    const blind = [{ url: 'https://github.com/kmatzen/pi-superagent/pull/29', reason: 'repo-invisible:http-404' }]
+    const text = pullEndText('#303', [pr(9, 'closed')], blind)
+    expect(text).toMatch(/closed without merging/)
+    expect(text).toMatch(/could NOT read https:\/\/github\.com\/kmatzen\/pi-superagent\/pull\/29 \(repo-invisible:http-404\)/)
+    expect(text).toMatch(/nothing above is verified against that pull request: it may be open/)
+    expect(pullEndText('#303', [pr(9, 'merged')], blind), 'a merge is not verified by a pull request it could not read either')
+      .toMatch(/This ticket is done\.[\s\S]*could NOT read/)
+    expect(pullEndText('#303', [pr(9, 'merged')]), 'nothing added when every follow was readable')
+      .toBe('#303 merged: https://github.com/o/r/pull/9. This ticket is done.')
+  })
 })

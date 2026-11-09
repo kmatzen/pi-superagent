@@ -11,7 +11,7 @@ import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type Out
 import { SqliteRepositories } from './store.ts'
 import {GithubSource, REPLY_MARKER, type GithubApi, REQUEST_LABEL} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
-import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi } from './pulls.ts'
+import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, UNREADABLE_PULLS, type PullApi, type UnreadablePulls } from './pulls.ts'
 import { CommentOutbox } from './outbox.ts'
 import { PiExecutor } from './executor.ts'
 import { renderCandidateFor, SessionAssessor, type SessionPilot } from './assessor.ts'
@@ -86,12 +86,40 @@ export interface RunningRouter {
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] })
 
 /** `superagent status` greps health.json for "state": "error"; the router rewrites it as the GitHub source
- *  fails and recovers. */
-function writeHealth(dir: string, source: { state: string; detail?: string } | null): void {
+ *  fails and recovers, and names the followed pull requests its token cannot read.
+ *
+ *  The pulls part is `degraded`, never `error`, on purpose: `status` answers 2 for an error part and the
+ *  five-minute launchd check answers a non-zero status with `superagent start`, which on a running router
+ *  fails every five minutes forever. A repository the token will never see is a fact to read, not a router
+ *  to restart; the count and the reasons are here so they are countable without reading the log.
+ */
+function writeHealth(dir: string, source: { state: string; detail?: string } | null, pulls: PullHealth | null = null): void {
   writeFileSync(`${dir}/health.json`, JSON.stringify({
     runtime: { state: 'ready', at: new Date().toISOString() },
     ...(source ? { source } : {}),
+    ...(pulls ? { pulls } : {}),
   }, null, 2))
+}
+
+interface PullHealth {
+  state: 'degraded'
+  unreadable: number
+  escalated: number
+  at: string
+  refs: Array<{ thread: string; reason: string; reads: number; escalated: boolean; since: string }>
+  refsTruncated: boolean
+}
+
+/** The followed pull requests the token cannot read, in the shape `health.json` and `superagent status` publish. */
+function pullsHealth(list: UnreadablePulls, at = new Date().toISOString()): PullHealth | null {
+  const refs = Object.entries(list)
+    .map(([thread, p]) => ({ thread, reason: p.reason.slice(0, 120), reads: p.reads, escalated: p.escalated, since: p.at }))
+    .sort((a, b) => b.reads - a.reads)
+  if (!refs.length) return null
+  return {
+    state: 'degraded', unreadable: refs.length, escalated: refs.filter(r => r.escalated).length, at,
+    refs: refs.slice(0, 20), refsTruncated: refs.length > 20,
+  }
 }
 
 export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningRouter {
@@ -101,6 +129,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // The router owns health.json from its first moment: a router that has not polled yet is ready, and the
   // health check must find a file, not an absence.
   writeHealth(cfg.dataDir, null)
+  // Both parts of health.json are written from one place: the source's error and the pulls' count must never
+  // overwrite each other, and a tick every 30 s does not need to rewrite a file that says the same thing.
+  let sourceProblem: { state: string; detail?: string } | null = null
+  let lastPullsHealth = 'null'
+  const unreadablePulls = (): UnreadablePulls => repos.kv.get<UnreadablePulls>(UNREADABLE_PULLS) ?? {}
+  const health = (source?: { state: string; detail?: string } | null): void => {
+    if (source !== undefined) sourceProblem = source
+    writeHealth(cfg.dataDir, sourceProblem, pullsHealth(unreadablePulls()))
+  }
   log.line('info', 'router.start', {
     dataDir: cfg.dataDir, panelPort: cfg.panelPort ?? 0,
     sdkPath: cfg.sdkPath ?? 'package-name', githubRepo: cfg.githubRepo ?? '',
@@ -286,7 +323,14 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const pulls = (ticket.follows ?? []).filter(f => f.own && f.closed)
       .flatMap(f => { const pull = parseThread(f.thread.replace(/^github:/, ''), home)
         return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome }] : [] })
-    outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, pulls) })
+    // Say what the router could not read, on the same receipt: an ending is a claim about GitHub, and a token
+    // that gets 404 cannot make it. Measured 2026-11-09: #303 read "closed without merging" three times for
+    // a pull request the router never saw, because the message did not say that.
+    const followed = new Set((ticket.follows ?? []).map(f => f.thread.replace(/^github:/, '')))
+    const unread = Object.entries(unreadablePulls())
+      .filter(([thread]) => followed.has(thread))
+      .flatMap(([thread, p]) => { const ref = parseThread(thread, home); return ref ? [{ url: pullUrl(ref), reason: p.reason.slice(0, 120) }] : [] })
+    outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, pulls, unread) })
   }
   const follower = new PullFollower({
     home, api: deps.pullApi ?? ghPulls(accounts.pulls),
@@ -511,10 +555,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       } catch (error) {
         pollFailures += 1
         log.line('error', 'github.poll_failed', { error: String(error).slice(0, 200), failures: pollFailures })
-        if (pollFailures >= 3) writeHealth(cfg.dataDir, { state: 'error', detail: `github polls failing (${pollFailures}): ${String(error).slice(0, 160)}` })
+        if (pollFailures >= 3) health({ state: 'error', detail: `github polls failing (${pollFailures}): ${String(error).slice(0, 160)}` })
         return
       }
-      if (pollFailures) { pollFailures = 0; writeHealth(cfg.dataDir, null) }
+      if (pollFailures) { pollFailures = 0; health(null) }
     }
     for (const trigger of triggers) engine.receive(trigger)
     try {
@@ -523,6 +567,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // The rest of the pass still runs: judgements, launches and replies must not wait on one pull request.
       log.line('error', 'pull.reconcile_failed', { error: String(error).slice(0, 200) })
     }
+    // Publish the followed pulls this token cannot read, on change only. Escalated ones have been unreadable
+    // for a whole window: 2880 polls a day is not a log, and the count in health.json is what an operator
+    // reads to see how many tickets are parked on a permission the router was never given.
+    const pullsPart = JSON.stringify(pullsHealth(unreadablePulls()))
+    if (pullsPart !== lastPullsHealth) { lastPullsHealth = pullsPart; health() }
     // The conversation a ticket lives in can end on GitHub: a merge closes the issue it names, and
     // closing without merging is a person saying no. Either way the ticket stops and says so, unless it
     // follows its own pull request, whose close ends it (above).

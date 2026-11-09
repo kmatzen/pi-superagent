@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { followedPulls, parsePull, parseThread, PullFollower, threadOfPull, threadUrl, type PullApi, type PullState } from '../src/pi/pulls.ts'
+import { followedPulls, parsePull, parseThread, PullFollower, threadOfPull, threadUrl, UNREADABLE_PULLS, type PullApi, type PullRead, type PullState, type UnreadablePulls } from '../src/pi/pulls.ts'
 import { REPLY_MARKER, type IssueComment, type PrReview } from '../src/pi/source-github.ts'
 import type { Ticket, Trigger } from '../src/core/index.ts'
 
@@ -48,7 +48,7 @@ const HOUR = 3_600_000
 const created = new Date(Date.now() - HOUR).toISOString()
 const later = new Date(Date.now() - HOUR / 2).toISOString()
 
-function follower(api: Partial<PullApi>, open: string[] | null = []) {
+function follower(api: Partial<PullApi>, open: string[] | null = [], options: { escalateAfter?: number } = {}) {
   const kv = new Map<string, unknown>()
   const calls: string[] = []
   const closed: Array<{ id: string; outcome: string; at: string }> = []
@@ -56,7 +56,7 @@ function follower(api: Partial<PullApi>, open: string[] | null = []) {
   const warned: string[] = []
   let clock = Date.now()
   const full: PullApi = {
-    pull: async (repo, n) => { calls.push(`pull ${repo}#${n}`); return api.pull?.(repo, n) },
+    pull: async (repo, n) => { calls.push(`pull ${repo}#${n}`); return api.pull ? api.pull(repo, n) : absent },
     comments: async (repo, n, since) => { calls.push(`comments ${repo}#${n} since ${since === created ? 'created' : since}`); return api.comments?.(repo, n, since) ?? [] },
     reviews: async (repo, n) => { calls.push(`reviews ${repo}#${n}`); return api.reviews?.(repo, n) ?? [] },
   }
@@ -67,13 +67,19 @@ function follower(api: Partial<PullApi>, open: string[] | null = []) {
     closed: (thread, _pull, outcome, at) => closed.push({ id: thread.id, outcome, at }),
     receive: t => received.push(t),
     warn: event => warned.push(event),
-    now: () => clock, everyMs: 120_000,
+    now: () => clock, everyMs: 120_000, ...(options.escalateAfter ? { escalateAfter: options.escalateAfter } : {}),
   })
   const following = (...threads: string[]) => [{ follows: threads.map(t => ({ thread: `github:${t}`, own: true })) }] as unknown as Ticket[]
-  return { f, kv, calls, closed, received, warned, following, tick: (ms: number) => { clock += ms } }
+  // The durable list the follower publishes for health.json, as the router reads it out of the kv store.
+  const unreadable = () => (kv.get(UNREADABLE_PULLS) ?? {}) as UnreadablePulls
+  return { f, kv, calls, closed, received, warned, following, unreadable, tick: (ms: number) => { clock += ms } }
 }
 
-const openPull: PullState = { open: true, merged: false, createdAt: created }
+// The three answers a pull read returns (see `PullRead`): GitHub's body, "no such pull in a repository I
+// answer for", and "the read said nothing".
+const found = (pull: PullState): PullRead => ({ read: 'found', pull })
+const openPull: PullRead = found({ open: true, merged: false, createdAt: created })
+const absent: PullRead = { read: 'absent' }
 const comment = (over: Partial<IssueComment> = {}): IssueComment =>
   ({ issue: 5, author: 'reviewer', association: 'MEMBER', at: later, body: 'please rename the flag', ...over })
 const review = (over: Partial<PrReview> = {}): PrReview =>
@@ -88,14 +94,14 @@ describe('following a ticket\'s pull requests', () => {
 
   it('a merged pull request is reported merged at its merge time, and a vanished one closed', async () => {
     const t = follower({
-      pull: async (_r, n) => n === 9 ? { open: false, merged: true, createdAt: created, closedAt: later } : undefined,
+      pull: async (_r, n) => n === 9 ? found({ open: false, merged: true, createdAt: created, closedAt: later }) : absent,
     })
     await t.f.reconcile(t.following('#9', '#10'))
     expect(t.closed).toEqual([{ id: '#9', outcome: 'merged', at: later }, { id: '#10', outcome: 'closed', at: expect.any(String) }])
   })
 
   it('waits for the first look at the watched repository before deciding anything', async () => {
-    const t = follower({ pull: async () => ({ open: false, merged: true, createdAt: created, closedAt: later }) }, null)
+    const t = follower({ pull: async () => found({ open: false, merged: true, createdAt: created, closedAt: later }) }, null)
     await t.f.reconcile(t.following('#9'))
     expect(t.calls).toEqual([])
   })
@@ -126,7 +132,7 @@ describe('following a ticket\'s pull requests', () => {
   })
 
   it("another repository's closed pull request is reported, and its talk is not read", async () => {
-    const t = follower({ pull: async () => ({ open: false, merged: false, createdAt: created, closedAt: later }) })
+    const t = follower({ pull: async () => found({ open: false, merged: false, createdAt: created, closedAt: later }) })
     await t.f.reconcile(t.following('other/lib#5'))
     expect(t.closed).toEqual([{ id: 'other/lib#5', outcome: 'closed', at: later }])
     expect(t.calls).toEqual(['pull other/lib#5'])
@@ -139,6 +145,56 @@ describe('following a ticket\'s pull requests', () => {
     t.tick(120_000)
     await t.f.reconcile(t.following('other/lib#5'))
     expect(t.calls).toHaveLength(2)
+    expect(t.unreadable()['other/lib#5']!.reads, 'a thrown read is an unreadable read, counted like a 404').toBe(2)
+  })
+
+  it('a pull request the token cannot read never ends the ticket: one warning, the follow kept, the read repeated', async () => {
+    // The bug, measured 2026-11-09: the router's account matzenbot_adobe gets HTTP 404 on
+    // repos/kmatzen/pi-superagent and on its pull requests #29/#30/#31, which the owner read as open. GitHub
+    // answers 404 for "invisible" and for "gone" alike, and src/pi read both as "closed, as of now" — board
+    // ticket #303 ended "closed without merging" three times, seven sessions, two false endings.
+    const t = follower({ pull: async () => ({ read: 'unreadable', reason: 'repo-invisible:http-404' }) })
+    for (let pass = 0; pass < 3; pass++) {
+      await t.f.reconcile(t.following('other/lib#5'))
+      t.tick(120_000)
+    }
+    expect(t.closed, 'an unreadable read ends nothing: no close, no invented closedAt').toEqual([])
+    expect(t.warned, 'named once per pull request, not once per poll (2880 polls a day)').toEqual(['pull.unreadable'])
+    expect(t.unreadable()).toEqual({
+      'other/lib#5': { reason: 'repo-invisible:http-404', reads: 3, at: expect.any(String), escalated: false },
+    })
+  })
+
+  it('escalates a pull request that stays unreadable once per window, not once per poll', async () => {
+    const t = follower({ pull: async () => ({ read: 'unreadable', reason: 'repo-invisible:http-404' }) }, [], { escalateAfter: 4 })
+    for (let pass = 0; pass < 9; pass++) {
+      await t.f.reconcile(t.following('other/lib#5'))
+      t.tick(120_000)
+    }
+    expect(t.warned, 'reads 1, 4 and 8: nine polls, three lines').toEqual(['pull.unreadable', 'pull.unreadable_escalated', 'pull.unreadable_escalated'])
+    expect(t.closed).toEqual([])
+    expect(t.unreadable()['other/lib#5'], 'the count an operator reads from health.json')
+      .toMatchObject({ reads: 9, escalated: true, reason: 'repo-invisible:http-404' })
+  })
+
+  it('says so once when a pull request it could not read answers again, and drops it from the count', async () => {
+    let answer: PullRead = { read: 'unreadable', reason: 'repo-invisible:http-404' }
+    const t = follower({ pull: async () => answer })
+    await t.f.reconcile(t.following('other/lib#5'))
+    t.tick(120_000)
+    answer = openPull
+    await t.f.reconcile(t.following('other/lib#5'))
+    expect(t.warned, 'the pair the reviews read already reports: unreadable, then readable again').toEqual(['pull.unreadable', 'pull.readable'])
+    expect(t.unreadable(), 'so the count in health.json goes back to nothing').toEqual({})
+  })
+
+  it('a pull request GitHub has none of, in a repository it does answer for, ends the wait', async () => {
+    // The other half of the 404: gh-api answers `absent` only after the SAME token read the repository, so
+    // this is GitHub saying it has no such pull request, and a pull that cannot exist can never be merged.
+    const t = follower({ pull: async () => absent })
+    await t.f.reconcile(t.following('other/lib#5'))
+    expect(t.closed).toEqual([{ id: 'other/lib#5', outcome: 'closed', at: expect.any(String) }])
+    expect(t.warned, 'and the reason is said out loud, because the close time here is the detection time').toEqual(['pull.absent'])
   })
 
   it('reads the pull requests it follows side by side, and never more than four at a time', async () => {
@@ -171,6 +227,15 @@ describe('following a ticket\'s pull requests', () => {
     api.comments = async () => []
     await t.f.reconcile(t.following('other/lib#5'))
     expect(t.warned, 'and a pull request that becomes readable says so').toEqual(['pull.listen_failed', 'pull.listen_readable'])
+  })
+
+  it('drops the count of a follow no ticket holds open any more', async () => {
+    const t = follower({ pull: async () => ({ read: 'unreadable', reason: 'repo-invisible:http-404' }) })
+    await t.f.reconcile(t.following('other/lib#5'))
+    expect(t.unreadable()['other/lib#5'], 'counted while a ticket waits on it').toBeDefined()
+    await t.f.reconcile([{ follows: [{ thread: 'github:other/lib#5', own: true, closed: { at: later, outcome: 'merged' } }] }] as unknown as Ticket[])
+    expect(t.unreadable(), 'health.json names the pull requests a ticket is waiting on now, not the ones that ended last month')
+      .toEqual({})
   })
 
   it('a closed follow is history: nothing is read for it', async () => {
