@@ -135,7 +135,11 @@ GitHub source error, check `gh auth status`. The next successful poll clears the
 **Status exits 2 and `health.json` names a `tick`.** The loop is not beating: a pass has been running longer
 than `PI_SUPERAGENT_TICK_STALL_MS`, and `tick.stage` names where it is parked (`poll`, `reconcile`,
 `recovery`, `drain`). `engine.log` repeats it as `tick.stalled`, with the stage's own time, and a pass that
-never finishes is given up on (`tick.abandoned`) so the loop keeps its beat. The line `tick n=…` is the
+never finishes is given up on (`tick.abandoned`) so the loop keeps its beat. A replacement that wedges in the
+same place stops the replacing (`tick.abandon_skipped`, `3 passes in flight`): three passes are allowed live at
+once, because an abandoned pass keeps its `gh` children and those have no timeout, and past that the alarm is
+the product. The stage `tick.abandon_skipped` names is what to fix; a restart clears a router wedged this way,
+which is the one case where it does. The line `tick n=…` is the
 liveness line: its `gapMs` is the time since the last pass finished, read against `PI_SUPERAGENT_TICK_MS`.
 
 **The board is busy and nothing starts.** `tick n=…` carries `launchPending` (launches waiting for a free
