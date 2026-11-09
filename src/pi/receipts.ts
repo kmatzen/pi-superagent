@@ -38,12 +38,21 @@ export function receiptText(thread: string, origin: ReportOrigin, run: ReportedR
  * The engine ends a ticket with its pull requests without a word; this is the word, on the issue. Each pull
  * carries its own outcome, because a ticket can open several: the engine ends it on the LAST close, and
  * naming every pull by that one outcome told the person that a merged pull request had been closed.
+ *
+ * `unreadable` names the followed pull requests the router's GitHub token cannot read (HTTP 404 to an account
+ * it gives no access — measured 2026-11-09, board ticket #303 ended "closed without merging" three times
+ * while its pull request sat open and unread). An ending is a claim about GitHub, so the message says which
+ * part of it the router verified and which part it could not read.
  */
-export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; outcome: 'merged' | 'closed' }>): string {
+export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; outcome: 'merged' | 'closed' }>,
+                           unreadable: ReadonlyArray<{ url: string; reason: string }> = []): string {
   const urls = (list: string[]): string => list.join(', ') || 'its pull request'
   const merged = pulls.filter(p => p.outcome === 'merged').map(p => p.url)
   const closed = pulls.filter(p => p.outcome === 'closed').map(p => p.url)
-  if (!closed.length) return `${thread} merged: ${urls(merged)}. This ticket is done.`
-  if (!merged.length) return `${thread}: ${urls(closed)} closed without merging, so this ticket ends. A comment here starts the work again.`
-  return `${thread}: ${urls(merged)} merged and ${urls(closed)} closed without merging, so this ticket ends with the work that landed. A comment here starts the work again.`
+  const body = !closed.length ? `${thread} merged: ${urls(merged)}. This ticket is done.`
+    : !merged.length ? `${thread}: ${urls(closed)} closed without merging, so this ticket ends. A comment here starts the work again.`
+    : `${thread}: ${urls(merged)} merged and ${urls(closed)} closed without merging, so this ticket ends with the work that landed. A comment here starts the work again.`
+  if (!unreadable.length) return body
+  const list = unreadable.map(p => `${p.url} (${p.reason})`).join(', ')
+  return `${body}\n\nThe router could NOT read ${list} with its GitHub token, so nothing above is verified against that pull request: it may be open. Look for \`pull.unreadable\` in the router's engine.log, and grant the router's GitHub account read access to that repository.`
 }

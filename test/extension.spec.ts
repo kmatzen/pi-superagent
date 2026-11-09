@@ -723,18 +723,31 @@ describe('a pull request per ticket', () => {
   /** GitHub's pull requests as a test sets them: open until the test merges or closes one, at a time it names. */
   function pullsFake() {
     const states = new Map<string, PullState>()
+    const blinds = new Map<string, string>()
     const comments = new Map<string, IssueComment[]>()
     const created = new Date(Date.now() - 60_000).toISOString()
     const api: PullApi = {
-      pull: async (repo, n) => states.get(`${repo}#${n}`),
+      // A state the test never set is an UNREADABLE read, not an absent pull: `absent` means GitHub has no
+      // such number in a repository it will answer for, and a fake that guesses it closes tickets.
+      pull: async (repo, n) => {
+        const blind = blinds.get(`${repo}#${n}`)
+        if (blind) return { read: 'unreadable', reason: blind }
+        const s = states.get(`${repo}#${n}`)
+        return s ? { read: 'found', pull: s } : { read: 'unreadable', reason: 'test fake holds no state' }
+      },
       comments: async (repo, n) => comments.get(`${repo}#${n}`) ?? [],
       reviews: async () => [],
     }
     return {
       api, comments,
-      open: (repo: string, n: number) => states.set(`${repo}#${n}`, { open: true, merged: false, createdAt: created }),
-      end: (repo: string, n: number, merged: boolean, closedAt = new Date().toISOString()) =>
-        states.set(`${repo}#${n}`, { open: false, merged, createdAt: created, closedAt }),
+      // GitHub's answer to a token it gives no access: 404, the same bytes it answers a deleted pull with.
+      blind: (repo: string, n: number, reason = 'repo-invisible:http-404') => blinds.set(`${repo}#${n}`, reason),
+      // Naming a state is GitHub answering again: it clears the blind answer, so a test can show a recovery.
+      open: (repo: string, n: number) => { blinds.delete(`${repo}#${n}`); return states.set(`${repo}#${n}`, { open: true, merged: false, createdAt: created }) },
+      end: (repo: string, n: number, merged: boolean, closedAt = new Date().toISOString()) => {
+        blinds.delete(`${repo}#${n}`)
+        return states.set(`${repo}#${n}`, { open: false, merged, createdAt: created, closedAt })
+      },
     }
   }
   async function working(f: ReturnType<typeof fixture>, issue: string) {
@@ -816,6 +829,53 @@ describe('a pull request per ticket', () => {
     await f.running.tick()
     expect(ticket().ended).toMatchObject({ outcome: 'merged', by: 'executor' })
     expect(f.receipts('492')).toContain('#492 merged: https://github.com/o/r/pull/79. This ticket is done.')
+  })
+
+  it('a pull request the token cannot read keeps the ticket open, and health.json counts it', async () => {
+    // The bug, measured 2026-11-09: the router's account matzenbot_adobe gets HTTP 404 on
+    // repos/kmatzen/pi-superagent and on its open pull requests #29/#30/#31; src/pi read that as
+    // "closed, as of now" and board ticket #303 ended "closed without merging" three times over seven sessions.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '496')
+    pulls.blind('o/r', 88)
+    f.workers[0]!.report!({ state: 'ready', summary: 'pushed it', pullRequests: ['https://github.com/o/r/pull/88'] })
+    await f.running.tick()
+    expect(ticket().ended, 'an unreadable read ends nothing: the follow stays open and the next pass asks again').toBeUndefined()
+    expect(f.receipts('496')).toContain('stays open until the pull request is merged or closed')
+    expect(f.receipts('496'), 'and the ticket is not told it closed').not.toMatch(/closed without merging/)
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8'), 'the watched repository\'s pull request is its #N thread')
+      .toMatch(/pull\.unreadable thread=#88 reason=repo-invisible:http-404/)
+    const health = JSON.parse(readFileSync(join(f.dir, 'health.json'), 'utf8'))
+    expect(health.pulls, 'countable from health.json, where `superagent status` and the operator look')
+      .toMatchObject({ state: 'degraded', unreadable: 1, escalated: 0, refs: [{ thread: '#88', reads: 1, escalated: false }] })
+    expect(JSON.stringify(health), 'a pull the token will never see is not an outage: it must not make status exit 2')
+      .not.toMatch(/"state": ?"error"/)
+    // And the read recovers: the count goes away when GitHub answers.
+    pulls.open('o/r', 88)
+    await f.running.tick()
+    expect(JSON.parse(readFileSync(join(f.dir, 'health.json'), 'utf8')).pulls, 'readable again, so nothing is reported').toBeUndefined()
+    expect(ticket().ended, 'and the ticket is still open, waiting for a review it can now read').toBeUndefined()
+  })
+
+  it('the receipt that ends a ticket names the pull request the router could not read', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '497')
+    pulls.open('o/r', 89)
+    pulls.blind('other/lib', 5)
+    f.workers[0]!.report!({ state: 'ready', summary: 'both changes', pullRequests: ['https://github.com/o/r/pull/89'] })
+    // A follow the ticket did not open: its own pull request merging ends the ticket while that one is unread,
+    // and the receipt must not read as if the router had looked at both.
+    f.running.engine.bindThread(ticket().id, { source: 'github', id: 'other/lib#5' }, false)
+    await f.running.tick()
+    pulls.end('o/r', 89, true, '2026-11-09T09:00:00Z')
+    await f.running.tick()
+    expect(ticket().ended).toMatchObject({ outcome: 'merged', by: 'executor' })
+    const receipt = f.receipts('497')
+    expect(receipt).toMatch(/merged: https:\/\/github\.com\/o\/r\/pull\/89\. This ticket is done\./)
+    expect(receipt, 'the unverified part is said on the issue, not only in engine.log')
+      .toMatch(/could NOT read https:\/\/github\.com\/other\/lib\/pull\/5 \(repo-invisible:http-404\)[\s\S]*it may be open/)
   })
 
   it('a ready report with no pull request completes the ticket: an answer or an operation changes no repository', async () => {
