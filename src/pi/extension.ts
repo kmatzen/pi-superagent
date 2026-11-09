@@ -796,6 +796,19 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         summary: `the worker sent no event for ${Math.round(quiet.quietSeconds / 60)} minutes in ${quiet.workspace}`,
         question: 'steer it, stop it, or accept the work it has done',
       } as never)
+      // The silence became a question, and a question is what frees an agent (the operator's rule 2026-11-08): a
+      // worker that has said nothing for 15 minutes is a tab, an agent and a slot waiting on a person. Measured
+      // 2026-11-09, minutes after the release rule shipped: 6 tickets still held finished workers whose only
+      // report predated the deploy, because this sweep — the one report they were going to file — went straight
+      // to the ticket and left the Session in place. The report goes first: it belongs to the running Assignment
+      // that the release then ends.
+      const ticket = repos.tickets.get(quiet.ticketId)
+      const running = ticket?.assignments.at(-1)
+      if (ticket && running && running.state === 'running') {
+        engine.release(ticket.id, running.id)
+        executorRef?.release(ticket)
+        log.line('info', 'worker.released', { ticket: ticket.id, assignment: running.id, state: 'quiet' })
+      }
     }
     // The operator's deadline, not the router's: report and let a person decide. A worker mid-legitimate
     // work must never be terminated by a clock the router owns, so this speaks and does not kill.
