@@ -1,12 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- The health check. Every five minutes it asks `superagent status` and starts the router when the
-     answer is "down"; the respect-stop flag leaves a router that was stopped on purpose alone.
+<!-- The health check. Every five minutes it runs `superagent remedy`, which reads the status contract and
+     applies the remedy each code names: START a router that is down (code 1), RESTART one that is up and not
+     beating (code 2, the stalled tick loop; `start` refuses a running router, so a stall needs a restart and
+     nothing else clears it), and NOTHING to a router that is healthy (0), waiting for setup (3), has a part in
+     error (4, a restart will not fix it) or was stopped on purpose. `remedy` respects the manual stop marker on
+     its own, so a deliberate stop stays deliberate, and it restarts at most once per
+     PI_SUPERAGENT_RESTART_COOLDOWN_MIN (30 min), so a fault a restart cannot fix cannot restart the router
+     forever. Every line it logs carries its own date, so a remedy that repeats every five minutes reads as one.
      Install it by replacing every __HOME__ with your home directory (launchd does not expand ~):
        sed "s|__HOME__|$HOME|g" com.example.superagent-health.plist \
          > ~/Library/LaunchAgents/com.example.superagent-health.plist
        launchctl load ~/Library/LaunchAgents/com.example.superagent-health.plist
-     From a checkout, replace superagent below with the full path of scripts/superagent. -->
+     It runs the INSTALLED `superagent`, the one the package puts on your PATH. Never rewrite the command as
+     `cd $HOME/git/CHECKOUT` followed by `./scripts/superagent ...`, because the job then checks, and heals,
+     whatever repository that path names today; the repo test rejects that form. From a checkout, put the
+     script's FULL PATH in front of `respect-stop` (one path, no `cd`), and reload the job every upgrade. A job
+     installed before this one runs `status ... || ... start`, which heals nothing on a stall: `launchctl print
+     gui/$(id -u)/com.example.superagent-health` shows the command it runs. Re-render the file above and reload
+     the job to move it. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.example.superagent-health</string>
@@ -14,7 +26,7 @@
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>superagent --respect-stop status &gt;/dev/null 2&gt;&amp;1 || superagent --respect-stop start</string>
+    <string>superagent --respect-stop remedy 2&gt;&amp;1 | while IFS= read -r line; do printf '%s %s\n' "$(date -u +%FT%TZ)" "$line"; done</string>
   </array>
   <!-- launchd starts a job with a bare PATH, and the job needs superagent, herdr, node and pi: Homebrew's
        directories and npm's usual global bin directories. Add yours if it is elsewhere (nvm's is). -->

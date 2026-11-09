@@ -152,6 +152,9 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(r.status).toBe(1)
     expect(r.stderr).toMatch(/herdr is not reachable/)
     expect(run(['status'], { FAKE_HERDR_DOWN: '1' }).status).toBe(1)
+    const healed = run(['remedy'], { FAKE_HERDR_DOWN: '1' })
+    expect(healed.stdout + healed.stderr).toMatch(/herdr is not reachable/)
+    expect(healed.status, 'a remedy that could not bring the router back is a failing health job').toBe(1)
   })
 
   it('reads deployment settings from the state dir, so the health check and a hand restart agree', () => {
@@ -199,12 +202,20 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(r.stderr).toMatch(/already running/)
   })
 
-  it('reports a failing part with 2, and a setup requirement with 3', () => {
+  it('reports a failing part with 4, and a setup requirement with 3', () => {
     started()
     writeFileSync(join(state, 'health.json'), '{"github":{"state":"error","detail":"cli offline"}}')
-    expect(run(['status']).status).toBe(2)
+    expect(run(['status']).status, 'a part a restart cannot fix is not the stall a restart fixes').toBe(4)
     writeFileSync(join(state, 'setup.json'), '{"problem":{"code":"state-missing","place":"Deployment"}}')
     expect(run(['status']).status).toBe(3)
+  })
+
+  it('a stalled tick block is 2: up, and not beating, which is the fault a restart clears', () => {
+    started()
+    writeFileSync(join(state, 'health.json'), '{"runtime":{"state":"ready"},"tick":{"state":"error","stage":"poll","detail":"stalled in poll 240000ms"},"source":{"state":"ok"}}')
+    const r = run(['status'])
+    expect(r.status).toBe(2)
+    expect(r.stderr).toMatch(/running and not beating:.*stalled in poll/)
   })
 
   it('a health.json the router stopped writing is a failing part: a wedged loop reports nothing', () => {
@@ -220,6 +231,96 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(r.status).toBe(2)
     expect(r.stderr).toMatch(/health.json is 20 min old: the tick loop that writes it is not running/)
     expect(run(['status'], { PI_SUPERAGENT_HEALTH_STALE_MIN: '60' }).status, 'the dial is the operator\'s').toBe(0)
+  })
+
+  it('remedy starts a router that is down, and leaves a healthy one untouched', () => {
+    const up = run(['--respect-stop', 'remedy'])
+    expect(up.stdout, up.stderr).toMatch(/not running: superagent start; starting the router/)
+    expect(existsSync(join(herdrDir, 'agent.superagent'))).toBe(true)
+    const before = readFileSync(join(herdrDir, 'calls'), 'utf8')
+    const healthy = run(['--respect-stop', 'remedy'])
+    expect(healthy.stdout).toMatch(/running: herdr agent superagent.*nothing to do/)
+    expect(healthy.status).toBe(0)
+    // status asks herdr one question; a healthy router costs the health check no change to herdr at all.
+    const mutations = (s: string) => (s.match(/tab create|tab close|agent start|send-keys/g) ?? []).length
+    expect(mutations(readFileSync(join(herdrDir, 'calls'), 'utf8')), 'no tab, no keys, no start').toBe(mutations(before))
+    expect(existsSync(join(state, 'watchdog-restart')), 'no restart, so no restart record').toBe(false)
+  })
+
+  it('remedy restarts a router that is up and not beating: start refuses it, so only a restart recovers', () => {
+    // The gap this closes: with the tick loop parked, `status` failed and the job's one remedy, `start`,
+    // answered "already running" — every five minutes, forever, with the board stopped.
+    started()
+    writeFileSync(join(state, 'health.json'), '{"runtime":{"state":"ready"},"tick":{"state":"error","stage":"poll","detail":"stalled in poll 240000ms"}}')
+    const r = run(['--respect-stop', 'remedy'])
+    expect(r.stdout).toMatch(/running and not beating.*restarting the router/)
+    const calls = readFileSync(join(herdrDir, 'calls'), 'utf8')
+    expect(calls).toContain('tab close w1:t1')
+    expect(calls.match(/agent start superagent/g), 'stopped, then started again').toHaveLength(2)
+    expect(existsSync(join(herdrDir, 'agent.superagent')), 'and a router is running for the next pass').toBe(true)
+    // The fake router writes no health of its own, so this pass ends on the old file and reports 2; a real
+    // router rewrites health.json on its first beat, and the next pass reads 0 with no restart to make.
+    expect(r.status).toBe(2)
+    writeFileSync(join(state, 'health.json'), '{"runtime":{"state":"ready"},"tick":{"state":"ok","n":1}}')
+    expect(run(['status']).status, 'the stall is gone, so the remedy is over').toBe(0)
+  })
+
+  it('a health.json nobody rewrote restarts too: the loop that writes it is the loop that died', () => {
+    started()
+    const file = join(state, 'health.json')
+    writeFileSync(file, '{"runtime":{"state":"ready"},"tick":{"state":"ok","n":12}}')
+    const old = new Date(Date.now() - 20 * 60_000 - 5_000)
+    utimesSync(file, old, old)
+    const r = run(['--respect-stop', 'remedy'])
+    expect(r.stdout).toMatch(/health.json is 20 min old: the tick loop that writes it is not running.*restarting the router/)
+    expect(existsSync(join(state, 'watchdog-restart'))).toBe(true)
+  })
+
+  it('the stall restart is rate limited, so a fault a restart cannot fix cannot restart the router forever', () => {
+    started()
+    const stalled = '{"runtime":{"state":"ready"},"tick":{"state":"error","stage":"poll"}}'
+    writeFileSync(join(state, 'health.json'), stalled)
+    expect(run(['--respect-stop', 'remedy']).stdout).toMatch(/restarting the router/)
+    writeFileSync(join(state, 'health.json'), stalled)   // the new router never came up beating
+    const second = run(['--respect-stop', 'remedy'])
+    expect(second.stdout).toMatch(/restart suppressed, the last one was 0 min ago \(cooldown 30 min\)/)
+    expect(second.status, 'a suppressed restart is not a failing health job').toBe(0)
+    expect(readFileSync(join(herdrDir, 'calls'), 'utf8').match(/agent start superagent/g)).toHaveLength(2)
+    writeFileSync(join(state, 'health.json'), stalled)
+    expect(run(['--respect-stop', 'remedy'], { PI_SUPERAGENT_RESTART_COOLDOWN_MIN: '0' }).stdout)
+      .toMatch(/restarting the router/)
+  })
+
+  it('remedy names a part a restart cannot fix and leaves it alone: code 4 is an alarm, not a restart', () => {
+    started()
+    writeFileSync(join(state, 'health.json'), '{"runtime":{"state":"ready"},"source":{"state":"error","detail":"github poll failed 3x"}}')
+    const r = run(['--respect-stop', 'remedy'])
+    expect(r.stdout).toMatch(/running with 1 failing part\(s\):.*github poll failed.*nothing to do, a restart will not fix it/)
+    expect(readFileSync(join(herdrDir, 'calls'), 'utf8').match(/agent start superagent/g)).toHaveLength(1)
+  })
+
+  it('remedy keeps a deliberate stop deliberate, with no flag to remind it', () => {
+    started(); run(['stop'])
+    const calls = readFileSync(join(herdrDir, 'calls'), 'utf8')
+    const r = run(['remedy'])
+    expect(r.status).toBe(0)
+    expect(r.stdout).toMatch(/manual stop marker present, leaving the router stopped/)
+    expect(readFileSync(join(herdrDir, 'calls'), 'utf8')).toBe(calls)
+    expect(existsSync(join(herdrDir, 'agent.superagent'))).toBe(false)
+  })
+
+  it('a remedy whose restart fails leaves no stop marker, so the next pass sees a router that is down', () => {
+    // `stop` writes the manual-stop marker as a matter of record. Left behind by a start that failed, it reads
+    // as "the operator stopped this on purpose": code 0, and the health check goes quiet on a router that is
+    // simply not running.
+    started()
+    writeFileSync(join(state, 'health.json'), '{"runtime":{"state":"ready"},"tick":{"state":"error","stage":"poll"}}')
+    rmSync(join(state, 'ready'))   // so the start this restart performs cannot finish on the old ready file
+    const r = run(['--respect-stop', 'remedy'], { PI_SUPERAGENT_READY_WAIT: '1', FAKE_HERDR_READY: state })
+    expect(r.stdout + r.stderr).toMatch(/the router did not report ready/)
+    expect(r.status, 'a pass that leaves the router not beating is not a clean bill of health').toBe(2)
+    expect(existsSync(join(state, 'stopped'))).toBe(false)
+    expect(run(['status']).status, 'the next pass keeps working on it, instead of honouring a stop nobody made').toBe(2)
   })
 
   it('a stop asks pi to exit, closes the router tab, leaves a marker, and the check respects it', () => {
