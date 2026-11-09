@@ -21,9 +21,9 @@ export interface PullState {
  * merging". So a read reports three things, and only the first two end a ticket's wait.
  */
 export type PullRead =
-  /** GitHub's body: `open`, and `closed_at`/`merged_at` when it stopped. The only positive signal there is. */
+  /** GitHub's body: `open`, and `closed_at`/`merged_at` when it stopped. The only signal that ends a ticket's wait. */
   | { read: 'found'; pull: PullState }
-  /** GitHub has no such pull request, and this token can read the repository, so the answer is about the pull. */
+  /** GitHub has no such pull request, and this token can read the repository. Named and counted — never a close. */
   | { read: 'absent' }
   /** The read said nothing about the pull request: a 404 from a token that cannot see the repository, a rate-limit account's 404, a 5xx, a dead token. */
   | { read: 'unreadable'; reason: string }
@@ -43,6 +43,12 @@ export type UnreadablePulls = Record<string, UnreadablePull>
 
 /** The durable position store key the follower keeps that list under, so a router restart does not forget it. */
 export const UNREADABLE_PULLS = 'pulls:unreadable'
+
+/**
+ * The reason recorded for `absent`: GitHub answered for the repository and has no such number. It is counted and
+ * named exactly like an unreadable read, because neither of them is a close the router watched happen.
+ */
+export const ABSENT_REASON = 'github-has-no-such-pull'
 
 // URLs only: `#5` or `owner/repo#5` may be an issue, whose thread never merges, so its ticket would wait forever.
 export function parsePull(text: string): PullRef | undefined {
@@ -175,14 +181,16 @@ export class PullFollower {
       this.countUnreadable(id, result.reason, 'pull.unreadable')
       return
     }
-    this.readableAgain(id)
-    // A pull request GitHub has no more cannot be merged, so the ticket's wait ends: `absent` is only ever
-    // reported for a repository this token CAN read (see `ghPulls.pull`), which is what makes it an answer.
     if (result.read === 'absent') {
-      this.options.warn('pull.absent', { thread: id, reason: 'repository readable, GitHub has no such pull request' })
-      this.options.closed({ source: 'github', id }, pull, 'closed', new Date(now).toISOString())
+      // Also not a close. The ask is a positive signal and nothing less: `state: closed` with GitHub's own
+      // `closed_at`. A number GitHub has none of in a repository it answers for is almost always a deleted pull
+      // request, which cannot merge — but it is a fact about the NUMBER, not a close the router watched, and the
+      // pre-fix code dated that ending from the tick's own clock. So it is named and counted, not acted on:
+      // a person closes the ticket when the deletion is the answer they were waiting for.
+      this.countUnreadable(id, ABSENT_REASON, 'pull.absent')
       return
     }
+    this.readableAgain(id)
     const state = result.pull
     // The only path that ends a ticket's wait: GitHub's body, saying `state: closed`, with its own `closed_at`.
     if (!state.open) {
@@ -193,9 +201,10 @@ export class PullFollower {
   }
 
   /**
-   * One more read of this pull request that said nothing. Warned once, then once per escalation window —
-   * 2880 polls a day is not a log — and kept in the durable list, which is what makes it countable from
-   * health.json and sayable on the ticket's receipt.
+   * One more read of this pull request that ended nothing: `unreadable` (the read said nothing), a read that
+   * threw, or `absent` (GitHub answered for the repository and has no such number). Warned once, then once per
+   * escalation window -- 2880 polls a day is not a log -- and kept in the durable list, which is what makes it
+   * countable from health.json and sayable on the ticket's receipt.
    */
   private countUnreadable(id: string, reason: string, event: string): void {
     const reads = (this.unreadReads.get(id) ?? 0) + 1
