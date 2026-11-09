@@ -89,7 +89,10 @@ checks for tabs with no owning record or no corresponding herdr agent.
 the report. That order matters. A ready report on a ticket with an open PR leaves it awaiting review.
 When the PR leaves the watched repository’s open list, the follower checks whether it merged or
 closed and calls `threadClosed`. For another repository it checks every two minutes and routes
-comments and reviews through the qualified thread ID, `owner/repo#N`.
+comments and reviews through the qualified thread ID, `owner/repo#N`. A close GitHub denies — the
+pull request is open — is a close a failed read wrote down, so the follower re-binds it once per start
+for the tickets still waiting (`pull.reopened`); tickets that already ended stay ended, for the operator
+to reopen.
 
 `receipts.ts` formats reports, questions, crashes and launch failures for the GitHub thread.
 `outbox.ts` queues messages by ID. Failed posts remain pending, and a recurring launch failure

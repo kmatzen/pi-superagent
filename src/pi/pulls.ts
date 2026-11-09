@@ -73,6 +73,11 @@ export interface FollowerOptions {
   self: string
   bots?: ReadonlySet<string>
   closed(thread: ThreadRef, pull: PullRef, outcome: 'merged' | 'closed', at: string): void
+  /** A follow records a close GitHub denies: the pull request is open. Reopen the follow on the tickets waiting on
+   *  it and return how many it reopened. Called on every read that finds a pull request open, so it is a no-op
+   *  unless a recorded close is false; it posts nothing, because the router writing on a thread is what recruits a
+   *  session (#309), and a repair of the router's own bookkeeping is not news to anyone. */
+  reopened(thread: ThreadRef, pull: PullRef): number
   receive(trigger: Trigger): void
   warn(event: string, fields: Record<string, unknown>): void
   now?: () => number
@@ -89,6 +94,9 @@ export class PullFollower {
   /** Threads whose state read has already been complained about: a follow in a repository the account cannot see
    *  fails every interval, and 720 identical lines a day is how the one real line gets buried. */
   private readonly unread = new Set<string>()
+  /** Threads whose recorded close this process has already re-checked. A close is a fact about the past, so one
+   *  look per start is enough to catch the ones a failed read wrote; re-checking them every poll would buy nothing. */
+  private readonly probed = new Set<string>()
 
   constructor(private readonly options: FollowerOptions) {}
 
@@ -106,7 +114,7 @@ export class PullFollower {
       }
     }
     const open = this.options.openThreads()
-    const due: Array<{ id: string; pull: PullRef; local: boolean }> = []
+    const due: Array<{ id: string; pull: PullRef; local: boolean; reopen?: boolean }> = []
     for (const [id, pull] of followed) {
       const local = id.startsWith('#')
       if (local && (!open || open.has(id))) continue
@@ -116,14 +124,53 @@ export class PullFollower {
       }
       due.push({ id, pull, local })
     }
+    // A follow recorded closed is not in `followed`, so nothing reads it again: a close a read *failed* to make —
+    // the 404 GitHub answers for a repository this account cannot see — is written into the ticket for good.
+    // Measured 2026-11-09 on the live board: 21 live tickets hold a closed follow on a pull request that is open,
+    // with no open follow left, so they are followed by nothing, end by nothing, and no review on their own pull
+    // request is ever read; 39 ended tickets took the same false close as their terminal end. A close recorded as
+    // `merged` is not a suspect: that outcome needs a read that succeeded and read `merged_at`. Re-check each thread
+    // once, on the first pass that sees it, and reopen the ones GitHub denies.
+    const recorded = new Map<string, PullRef>()
+    for (const ticket of tickets) {
+      for (const follow of ticket.follows ?? []) {
+        if (follow.closed?.outcome !== 'closed' || !follow.thread.startsWith('github:')) continue
+        const id = follow.thread.slice('github:'.length)
+        const pull = this.probed.has(id) || followed.has(id) ? undefined : parseThread(id, home)
+        if (pull) recorded.set(id, pull)
+      }
+    }
+    for (const [id, pull] of recorded) {
+      this.probed.add(id)
+      // The watched repository answers this from the poll already in hand: a thread open there denies the close, so
+      // that reopen costs no API call. Its absence proves nothing — the list answers issues, and a pull request
+      // thread missing from it is not a closed pull request — so the rest are read, once each.
+      if (id.startsWith('#') && open?.has(id)) { this.heal(id, pull); continue }
+      due.push({ id, pull, local: id.startsWith('#'), reopen: true })
+    }
     // Side by side, because serially seven follows serialized one tick out to 20 s (measured live 2026-11-07, every 120 s) and every worker launch in that window waited on GitHub.
     const queue = [...due]
     await Promise.all(Array.from({ length: Math.min(READS_AT_ONCE, queue.length) }, async () => {
-      for (let next = queue.shift(); next !== undefined; next = queue.shift()) await this.read(next.id, next.pull, next.local, now)
+      for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+        await this.read(next.id, next.pull, next.local, now, next.reopen)
+      }
     }))
   }
 
-  private async read(id: string, pull: PullRef, local: boolean, now: number): Promise<void> {
+  /** The tickets holding a close on this thread that GitHub says is open get their wait back. */
+  private heal(id: string, pull: PullRef): void {
+    const thread = threadOfPull(pull, this.options.home)
+    const tickets = this.options.reopened(thread, pull)
+    if (tickets <= 0) return
+    // The wait just changed, so the next pass reads it: `polled` holds the throttle of the read that recorded the
+    // false close, and holding a ticket to that clock would leave its reopened pull request unread for the interval.
+    this.polled.delete(thread.id)
+    this.options.warn('pull.reopened', { thread: thread.id, url: pullUrl(pull), tickets })
+  }
+
+  /** `reopen` marks a thread read only because its recorded close is suspect: finding it closed confirms that
+   *  close, so it ends nothing — the wait was already ended when it was written down. */
+  private async read(id: string, pull: PullRef, local: boolean, now: number, reopen = false): Promise<void> {
     let state: PullState | undefined
     try {
       state = await this.options.api.pull(pull.repo, pull.number)
@@ -142,10 +189,14 @@ export class PullFollower {
     // answer for one *to a reader that can see the repository*: a repository this account cannot read throws above
     // and returns here as an untouched follow, because 404 is also what GitHub says about a private repository.
     if (!state || !state.open) {
-      this.options.closed({ source: 'github', id }, pull, state?.merged ? 'merged' : 'closed', state?.closedAt ?? new Date(now).toISOString())
+      if (!reopen) this.options.closed({ source: 'github', id }, pull, state?.merged ? 'merged' : 'closed', state?.closedAt ?? new Date(now).toISOString())
       return
     }
-    if (!local) await this.listen(id, pull, state.createdAt)
+    // Open: any ticket holding a close on this thread holds one that never happened.
+    this.heal(id, pull)
+    // The reopened follow is in `followed` from the next pass; reading its talk here as well would read it twice.
+    if (reopen || local) return
+    await this.listen(id, pull, state.createdAt)
   }
 
   private async listen(id: string, pull: PullRef, createdAt: string): Promise<void> {
