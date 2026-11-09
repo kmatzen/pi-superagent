@@ -271,10 +271,34 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     // guard costs one directory listing at start, not a walk of a 2 GB tree.
     mkdirSync(join(state, 'work', 'TK-12', 'repo', 'vendor', 'dep', '.git'), { recursive: true })
     writeFileSync(join(state, 'work', 'TK-12', 'repo', 'vendor', 'dep', '.git', 'config'), `[remote "origin"]\n\turl = https://x-access-token:${secret}@github.com/o/r.git\n`)
-    rmSync(join(state, 'work', 'TK-11', 'repo', '.git', 'config'), { force: true })
-    mkdirSync(join(state, 'work', 'TK-11', 'repo', '.git'), { recursive: true })
+    // With the ticket checkout's own URL cleaned, the tree deploys — the nested leak above is the depth bound.
     writeFileSync(join(state, 'work', 'TK-11', 'repo', '.git', 'config'), '[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
     expect(run(['start']).status, 'a clean tree of checkouts deploys').toBe(0)
+  })
+
+  it('a restart on a box that leaked mid-life leaves the fleet down: the guard refuses to bring it back', () => {
+    // The consequence of putting the guard in `start` has to be written down and pinned, because `restart` is
+    // `stop; start` and the scheduled health check is `status || start`. A checkout that gains a credential
+    // while the router runs therefore ENDS the fleet: the router is stopped, then the start is refused. That
+    // is the intended posture — do not wake ~20 workers over a disclosed credential — but the operator has to
+    // know the fix is the URL, not a second restart.
+    const secret = `ghp_${'q'.repeat(36)}`
+    mkdirSync(join(state, 'work', 'TK-14', 'repo', '.git'), { recursive: true })
+    writeFileSync(join(state, 'work', 'TK-14', 'repo', '.git', 'config'), '[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
+    expect(run(['start']).status, 'the fleet comes up clean').toBe(0)
+    expect(existsSync(join(herdrDir, 'agent.superagent'))).toBe(true)
+    // A worker bakes the token into the remote while the router is live.
+    writeFileSync(join(state, 'work', 'TK-14', 'repo', '.git', 'config'), `[remote "origin"]\n\turl = https://x-access-token:${secret}@github.com/kmatzen/pi-superagent.git\n`)
+    const out = run(['restart'])
+    expect(out.status).toBe(1)
+    expect(out.stderr).toMatch(/carries a git credential in the clear/)
+    expect(out.stderr).not.toContain(secret)
+    expect(existsSync(join(herdrDir, 'agent.superagent')), 'the router is stopped, and the refusal is the whole message').toBe(false)
+    const calls = readFileSync(join(herdrDir, 'calls'), 'utf8')
+    expect(calls.match(/agent start superagent/g), 'no second start: the fleet stays down until the URL is fixed').toHaveLength(1)
+    // Fix the URL and the same restart brings it back, so the guard is a door and not a wall.
+    writeFileSync(join(state, 'work', 'TK-14', 'repo', '.git', 'config'), '[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
+    expect(run(['restart']).status, 'a clean URL restarts').toBe(0)
   })
 })
 
