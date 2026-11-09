@@ -53,7 +53,8 @@ workers and flushes replies. Three consecutive GitHub poll failures set an error
 `source-github.ts` tracks issues, comments and submitted reviews. It recognizes the router’s own
 comments by the bot login or a hidden marker. The `agent-requested` label is the board’s way of
 handing one issue over, so the router spends that grant: it journals the ask, takes the label off,
-and hears the issue again only when the label comes back on. `scopeOf` in `router.ts` checks each
+and hears the issue again only when the label comes back on — and, after a journal it cannot read,
+only when the label is newer than its own last reply on that issue. `scopeOf` in `router.ts` checks each
 author’s GitHub association or the configured login list before the trigger can reach a judge or
 worker. `gh-api.ts` runs the CLI asynchronously, paginates issue and PR lists, and reads comments
 forward from the saved position.

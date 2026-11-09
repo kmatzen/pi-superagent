@@ -190,6 +190,22 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       }
     },
 
+    // The newest `labeled` event naming this label: GitHub records the actor of every label write, and the
+    // events feed is the only read that answers "who asked, and when". Rows come oldest first, so the scan
+    // keeps the last match; five pages (500 events) covers a board issue by a wide margin, and an ask older
+    // than that is history the reader has no duty to replay.
+    async labelEvent(issue, label) {
+      let found: { actor: string, at: string } | undefined
+      for (let page = 1; page <= 5; page += 1) {
+        const rows = JSON.parse((await call(['api', `repos/${options.repo}/issues/${issue}/events?per_page=100&page=${page}`])) || '[]') as
+          Array<{ event: string; label?: { name?: string }; actor?: { login?: string }; created_at?: string }>
+        for (const r of rows) if (r.event === 'labeled' && r.label?.name === label && r.created_at)
+          found = { actor: r.actor?.login ?? 'anonymous', at: r.created_at }
+        if (rows.length < 100) break
+      }
+      return found
+    },
+
     // Idempotent at GitHub: closing a closed issue answers with the closed issue.
     async closeIssue(issue) {
       await call(['api', '-X', 'PATCH', `repos/${options.repo}/issues/${issue}`, '-f', 'state=closed'])

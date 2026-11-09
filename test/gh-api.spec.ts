@@ -337,4 +337,30 @@ echo '{}'
     await expect(api.removeLabel!(7, 'gone')).resolves.toBeUndefined()
     await expect(api.removeLabel!(7, 'forbidden')).rejects.toThrow(/403/)
   })
+
+  it('reads who applied a label, and when, from the newest labeled event naming it', async () => {
+    // Issue #309's second lock: the events feed is GitHub's only answer to "who labelled this", and the label
+    // path needs it after a lost grant journal, where a receipt older than the label must not read as a new ask.
+    const dir = tmp()
+    const ev = (name: string, actor: string, at: string) => ({ event: 'labeled', label: { name }, actor: { login: actor }, created_at: at })
+    // Page 1 is full, so the read has to ask for page 2, and the newest match across pages is the answer.
+    const page1 = [...Array(99).keys()].map(i => ev('bug', `user${i}`, '2026-11-08T00:00:00Z'))
+      .concat([ev('agent-requested', 'matzen_adobe', '2026-11-09T05:51:21Z')])
+    writeFileSync(join(dir, 'events.7.1.json'), JSON.stringify(page1))
+    writeFileSync(join(dir, 'events.7.2.json'), JSON.stringify([
+      ev('needs-decision', 'matzenbot_adobe', '2026-11-09T06:00:00Z'),
+      ev('agent-requested', 'octocat', '2026-11-09T07:00:00Z'),
+    ]))
+    writeFileSync(join(dir, 'gh'), `#!/bin/bash
+n="$(printf '%s' "$2" | sed -e 's|.*issues/||' -e 's|/events.*||')"
+p="$(printf '%s' "$2" | sed -e 's|.*page=||')"
+f="$(dirname "$0")/events.$n.$p.json"
+if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
+`)
+    chmodSync(join(dir, 'gh'), 0o755)
+    const api = ghApi({ repo: 'o/r', bin: join(dir, 'gh'), followed: () => [] })
+    expect(await api.labelEvent!(7, 'agent-requested'), 'the newest labeled event for that label, across pages')
+      .toEqual({ actor: 'octocat', at: '2026-11-09T07:00:00Z' })
+    expect(await api.labelEvent!(7, 'agent-ready'), 'a label the issue never carried is no event').toBeUndefined()
+  })
 })
