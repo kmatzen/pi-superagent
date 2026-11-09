@@ -179,12 +179,61 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       const rows = JSON.parse((await call(['api', `repos/${repo ?? options.repo}/issues/${issue}/comments?per_page=100&sort=created&direction=desc`])) || '[]') as CommentRow[]
       return rows.map(r => ({ issue, author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
     },
+
+    // GitHub answers 404/422 for a label that is not on the issue, which is the state the caller wanted: not a
+    // failure. A permission answer is, and the source logs it and keeps the grant journal as the guard.
+    async removeLabel(issue, label) {
+      try { await call(['api', '-X', 'DELETE', `repos/${options.repo}/issues/${issue}/labels/${encodeURIComponent(label)}`]) }
+      catch (error) {
+        if (/HTTP 404|HTTP 422|not found|does not exist/i.test(String(error))) return
+        throw error
+      }
+    },
+
+    // The newest `labeled` event naming this label: GitHub records the actor of every label write, and the
+    // events feed is the only read that answers "who asked, and when". Rows come oldest first, so the scan
+    // keeps the last match; five pages (500 events) covers a board issue by a wide margin, and an ask older
+    // than that is history the reader has no duty to replay.
+    async labelEvent(issue, label) {
+      let found: { actor: string, at: string } | undefined
+      for (let page = 1; page <= 5; page += 1) {
+        const rows = JSON.parse((await call(['api', `repos/${options.repo}/issues/${issue}/events?per_page=100&page=${page}`])) || '[]') as
+          Array<{ event: string; label?: { name?: string }; actor?: { login?: string }; created_at?: string }>
+        for (const r of rows) if (r.event === 'labeled' && r.label?.name === label && r.created_at)
+          found = { actor: r.actor?.login ?? 'anonymous', at: r.created_at }
+        if (rows.length < 100) break
+      }
+      return found
+    },
+
+    // Idempotent at GitHub: closing a closed issue answers with the closed issue.
+    async closeIssue(issue) {
+      await call(['api', '-X', 'PATCH', `repos/${options.repo}/issues/${issue}`, '-f', 'state=closed'])
+    },
   }
 }
 
 /** Pull requests in any repository the operator's gh can read, by number: the ones tickets follow. */
 export function ghPulls(options: GhOptions = {}): PullApi {
   const call = ghCall(options)
+  /**
+   * Whether this account can read a repository at all, asked once per repository. GitHub answers **404**, not 403,
+   * for a private repository the token cannot see, and a caller that reads a 404 on a pull request as "GitHub has
+   * no such pull request" ends the ticket that waits on it. Measured 2026-11-09: the router's account cannot see
+   * the private repository its own code lives in, so it told the board twice in one day that an open, ready, mergeable
+   * pull request had "closed without merging, so this ticket ends" — a false terminal end on the live fix, posted
+   * in the router's own voice. Absent and unreadable are different answers, and only the first one ends a wait.
+   */
+  const visibility = new Map<string, boolean>()
+  const repoReadable = async (repo: string): Promise<boolean> => {
+    const known = visibility.get(repo)
+    if (known !== undefined) return known
+    // A probe that fails for any reason counts as unreadable: the safe reading of a repository the reader cannot
+    // confirm is that the pull request's state is unknown, which keeps the ticket waiting and says so.
+    const readable = await call(['api', `repos/${repo}`]).then(() => true, () => false)
+    visibility.set(repo, readable)
+    return readable
+  }
   return {
     async pull(repo, number) {
       try {
@@ -193,8 +242,10 @@ export function ghPulls(options: GhOptions = {}): PullApi {
         const closedAt = r.merged_at ?? r.closed_at
         return { open: r.state === 'open', merged: Boolean(r.merged_at), createdAt: r.created_at, ...(closedAt ? { closedAt } : {}) }
       } catch (error) {
-        if (/HTTP 404|Not Found/i.test(String(error))) return undefined
-        throw error
+        if (!/HTTP 404|Not Found/i.test(String(error))) throw error
+        if (await repoReadable(repo)) return undefined
+        throw new Error(`HTTP 404 reading pull request ${repo}#${number}, and this account cannot read ${repo} either: `
+          + 'GitHub answers 404 for a private repository it cannot see, so the pull request is unreadable, not absent')
       }
     },
     async comments(repo, number, since) {

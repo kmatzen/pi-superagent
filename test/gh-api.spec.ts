@@ -148,6 +148,7 @@ function fakePullsGh() {
   writeFileSync(bin, `#!/bin/bash
 printf '%s\n' "$*" >> "$(dirname "$0")/calls.log"
 case "$*" in
+  "api repos/x/y") echo '{"full_name":"x/y","private":false}' ;;
   "api repos/x/y/pulls/9") echo '{"state":"closed","merged_at":"2026-11-06T10:00:00Z","closed_at":"2026-11-06T10:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/10") echo '{"state":"closed","merged_at":null,"closed_at":"2026-11-06T11:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/11") echo '{"state":"open","merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z"}' ;;
@@ -171,6 +172,34 @@ describe('ghPulls', () => {
     expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, createdAt: '2026-11-05T09:00:00Z' })
     expect(await api.pull('x/y', 404)).toBeUndefined()
     await expect(api.pull('x/y', 502), 'any other failure is an error, not a closed pull request').rejects.toThrow(/502/)
+  })
+
+  it('a repository this account cannot see is an unreadable pull request, never a vanished one', async () => {
+    // GitHub answers 404 for a private repository, the same answer it gives for a pull request that does not exist,
+    // and a reader that takes 404 as "absent" ends the ticket waiting on it. Measured 2026-11-09: the router's
+    // account cannot read the private repository its own code lives in, and it posted "closed without merging, so
+    // this ticket ends" twice in one day about an open, ready, mergeable pull request.
+    const dir = tmp()
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+printf '%s\n' "$*" >> "$(dirname "$0")/calls.log"
+echo 'gh: Not Found (HTTP 404)' >&2
+exit 1
+`)
+    chmodSync(bin, 0o755)
+    const api = ghPulls({ bin })
+    await expect(api.pull('private/secret', 31)).rejects.toThrow(/cannot read private\/secret/)
+    await expect(api.pull('private/secret', 32), 'every read of it stays an error').rejects.toThrow(/unreadable, not absent/)
+    const calls = readFileSync(join(dir, 'calls.log'), 'utf8').trim().split('\n')
+    expect(calls.filter(c => c === 'api repos/private/secret'), 'the repository is asked once, not once per pull').toHaveLength(1)
+  })
+
+  it('a repository the account CAN see is probed once, and its 404 pull request stays absent', async () => {
+    const gh = fakePullsGh()
+    const api = ghPulls({ bin: gh.bin })
+    expect(await api.pull('x/y', 404)).toBeUndefined()
+    expect(await api.pull('x/y', 404), 'asked twice, because the follower reads on its interval').toBeUndefined()
+    expect(gh.calls().filter(c => c === 'api repos/x/y'), 'visibility is asked once per repository').toHaveLength(1)
   })
 
   it("reads one pull request's comments from a time, and its submitted reviews, with each author's standing", async () => {
@@ -311,5 +340,56 @@ describe('paged GitHub reads', () => {
     expect((await api.issues('open')).length).toBe(120)
     expect((await api.pullsOpen!()).length).toBe(120)
     expect((await api.reviews!(0)).length).toBe(120)
+  })
+
+  it('spends the intake label and closes the issue a ticket finished on', async () => {
+    // Issue #309: the label is the operator handing one issue over, so the router takes it off after hearing
+    // it, and a ticket that ends with nothing to wait on closes the issue intake was reading.
+    const dir = tmp()
+    writeFileSync(join(dir, 'gh'), `#!/bin/bash
+echo "$*" >> "$(dirname "$0")/calls.log"
+case "$*" in
+  *labels/gone*) echo 'gh: Label does not exist (HTTP 422)' >&2; exit 1 ;;
+  *labels/forbidden*) echo 'gh: HTTP 403 (Forbidden)' >&2; exit 1 ;;
+esac
+echo '{}'
+`)
+    chmodSync(join(dir, 'gh'), 0o755)
+    const api = ghApi({ repo: 'o/r', bin: join(dir, 'gh'), followed: () => [] })
+    await api.removeLabel!(7, 'agent-requested')
+    await api.closeIssue!(7)
+    const calls = readFileSync(join(dir, 'calls.log'), 'utf8')
+    expect(calls).toContain('api -X DELETE repos/o/r/issues/7/labels/agent-requested')
+    expect(calls).toContain('api -X PATCH repos/o/r/issues/7 -f state=closed')
+    // A label that is already off is the state the caller wanted; a token without rights is a real failure,
+    // and the source's grant journal is what stops the re-ask when the write cannot be made.
+    await expect(api.removeLabel!(7, 'gone')).resolves.toBeUndefined()
+    await expect(api.removeLabel!(7, 'forbidden')).rejects.toThrow(/403/)
+  })
+
+  it('reads who applied a label, and when, from the newest labeled event naming it', async () => {
+    // Issue #309's second lock: the events feed is GitHub's only answer to "who labelled this", and the label
+    // path needs it after a lost grant journal, where a receipt older than the label must not read as a new ask.
+    const dir = tmp()
+    const ev = (name: string, actor: string, at: string) => ({ event: 'labeled', label: { name }, actor: { login: actor }, created_at: at })
+    // Page 1 is full, so the read has to ask for page 2, and the newest match across pages is the answer.
+    const page1 = [...Array(99).keys()].map(i => ev('bug', `user${i}`, '2026-11-08T00:00:00Z'))
+      .concat([ev('agent-requested', 'matzen_adobe', '2026-11-09T05:51:21Z')])
+    writeFileSync(join(dir, 'events.7.1.json'), JSON.stringify(page1))
+    writeFileSync(join(dir, 'events.7.2.json'), JSON.stringify([
+      ev('needs-decision', 'matzenbot_adobe', '2026-11-09T06:00:00Z'),
+      ev('agent-requested', 'octocat', '2026-11-09T07:00:00Z'),
+    ]))
+    writeFileSync(join(dir, 'gh'), `#!/bin/bash
+n="$(printf '%s' "$2" | sed -e 's|.*issues/||' -e 's|/events.*||')"
+p="$(printf '%s' "$2" | sed -e 's|.*page=||')"
+f="$(dirname "$0")/events.$n.$p.json"
+if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
+`)
+    chmodSync(join(dir, 'gh'), 0o755)
+    const api = ghApi({ repo: 'o/r', bin: join(dir, 'gh'), followed: () => [] })
+    expect(await api.labelEvent!(7, 'agent-requested'), 'the newest labeled event for that label, across pages')
+      .toEqual({ actor: 'octocat', at: '2026-11-09T07:00:00Z' })
+    expect(await api.labelEvent!(7, 'agent-ready'), 'a label the issue never carried is no event').toBeUndefined()
   })
 })
