@@ -415,6 +415,35 @@ describe('draining the launch queue', () => {
     expect(f.sessions).toHaveLength(2)
   })
 
+  it('answers at once when the gate is closed: a queue is not a place to wait for a slot', async () => {
+    // Measured on the deployed router 2026-11-09, the day after #303 shipped: `drainMs=5001` on 66 of 66 ticks
+    // — 47% of all tick time, 5 s of every 30 s — against `running=8 cap=8`. The bounded wait had become the
+    // steady cost of a fleet at its cap, and the shape that made the loop enterable hourly in #303 is a
+    // tick that outgrows the interval, so the residue of it is the same bug on a shorter leash.
+    const f = fixture({ maxConcurrent: 1, slotPollMs: 5 })
+    f.executor.start(ticket({ id: 'T1' }), assignment('A1'))
+    expect(await f.executor.drain(500)).toEqual({ settled: true, pending: 0 })
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    const began = Date.now()
+    expect(await f.executor.drain(5_000)).toEqual({ settled: false, pending: 1 })
+    expect(Date.now() - began, 'no capacity: the answer is immediate, not the budget').toBeLessThan(250)
+    expect(f.executor.pendingLaunches, 'the launch is still queued, and counted').toBe(1)
+  })
+
+  it('starts the launch it gave up on: the gate opens on its own timer, with nobody waiting', async () => {
+    // The reason the early answer costs nothing: the launch is already enqueued and the gate re-reads capacity
+    // on `slotPollMs`, so a caller that stops watching starts no launch later. A slot frees, T2 runs.
+    const f = fixture({ maxConcurrent: 1, slotPollMs: 5 })
+    f.executor.start(ticket({ id: 'T1' }), assignment('A1'))
+    expect(await f.executor.drain(500)).toEqual({ settled: true, pending: 0 })
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    expect(await f.executor.drain(5_000)).toMatchObject({ settled: false, pending: 1 })
+    f.executor.stop(ticket({ id: 'T1' }), assignment('A1'), 'done')
+    for (let i = 0; i < 200 && f.executor.pendingLaunches > 0; i++) await new Promise(r => setTimeout(r, 10))
+    expect(f.executor.pendingLaunches, 'the queue drained itself').toBe(0)
+    expect(f.sessions.map(s => s.sessionId), 'the launch abandoned by the drain ran anyway').toEqual(['s0', 's1'])
+  })
+
   it('a launch that throws still leaves the queue drained, not parked', async () => {
     const f = fixture({}, { launch: 'T1' })
     f.executor.start(ticket(), assignment())
