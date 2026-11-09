@@ -183,10 +183,22 @@ directory. All writes from an engine command commit together. Recovery reopens t
 The router role is tied to the appointed process because pi also loads the extension in worker
 and judge sessions. Previously those sessions could each start a router.
 
-**Report health through exit codes.** A scheduled check can act on `superagent status`. Code 0
-means healthy or intentionally stopped. Code 1 indicates a router failure that a restart may fix.
-Code 2 directs the operator to a failing component, including a GitHub source that failed three
-polls in a row. Code 3 identifies a setup problem.
+**Report health through exit codes.** A scheduled check can act on `superagent status`, and each
+code names its remedy: 0 means healthy or intentionally stopped, do nothing. Code 1 indicates a
+router failure that a restart may fix, so the check starts it. Code 2 means the router is up and
+not beating, its tick loop stalled, so the check restarts it: only `start` refuses a running
+router, so a stall with `start` as its only remedy is a loud no-op every five minutes. Code 3
+identifies a setup problem, and code 4 directs the operator to a failing component, including a
+GitHub source that failed three polls in a row; a restart fixes neither, so the check reports and
+does not restart. `superagent remedy` is that mapping as a command, and it honours the stop marker
+without being told to, so a deliberate stop stays deliberate.
+
+**Restart the beat, not the parts.** Letting a scheduled job restart the router is a policy call, so it is
+narrow: the job restarts only the fault a restart cures, a tick loop wedged inside a pass, and never a part
+that reports an error, because restarting a router does not bring a GitHub source back. A restart ends one
+per `PI_SUPERAGENT_RESTART_COOLDOWN_MIN` (30) for the same reason: a fault a restart cannot fix would
+otherwise restart the router every five minutes forever. It is a survivable act, which is what makes it
+allowed at all: the workers are their own herdr sessions, and the new router adopts them on its first pass.
 
 **Limit panel access to local callers.** The panel binds to loopback, validates the Host header
 and requires `x-superagent-request: 1` for API calls. These checks prevent a page on another
