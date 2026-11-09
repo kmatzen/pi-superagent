@@ -1109,9 +1109,12 @@ describe('a pull request per ticket', () => {
     ])
     f.workers[0]!.report!({ state: 'ready', summary: 'opened it', pullRequests: ['https://github.com/other/lib/pull/5'] })
     await f.running.tick()
-    await until(() => f.workers[0]!.prompts.some(p => p.includes('rename the flag too')))
-    expect(f.workers[0]!.prompts.join('\n')).toContain('reviewer: rename the flag too')
-    expect(f.workers[0]!.prompts.join('\n')).not.toContain('example.invalid')
+    expect(f.workers[0]!.disposed, 'a finished worker whose pull request awaits a merge gives up its agent').toBe(true)
+    // The reviewer's comment is a request, so it starts the worker that reads it; the stranger's is never taken in.
+    await until(() => f.workers.some(w => w.prompts.some(p => p.includes('rename the flag too'))))
+    const carrier = f.workers.find(w => w.prompts.some(p => p.includes('rename the flag too')))!
+    expect(carrier.prompts.join('\n')).toContain('reviewer: rename the flag too')
+    expect(carrier.prompts.join('\n')).not.toContain('example.invalid')
   })
 
   it('a reply for a conversation in another repository is posted there, never on the watched repository', async () => {
