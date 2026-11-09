@@ -9,6 +9,7 @@ import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from
 import { SqliteRepositories } from '../src/pi/store.ts'
 import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
 import type { PullApi, PullState } from '../src/pi/pulls.ts'
+import { paneKeysScrubbed, scrubPaneEnv } from './setup.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ext-')); dirs.push(d); return d }
@@ -654,6 +655,19 @@ describe('startup and recovery', () => {
     expect(run.stderr).toContain('tests never call the real herdr')
   })
 
+  it("the suite cannot reach the real herdr by path either: a worker pane's HERDR_* reaches every spawn", () => {
+    // The test above proves `herdr` *by name* is the stub. A pane's HERDR_BIN_PATH is an absolute path to the
+    // real binary, which walks past PATH, and the specs spread process.env into the script under test — so a
+    // leak is invisible to a PATH guard, and the live herdr's stale-tab sweep closes the running router's tabs.
+    const realBin = process.execPath   // a real executable, standing in for the pane's /opt/homebrew/bin/herdr
+    const scrubbed = scrubPaneEnv({ HERDR_BIN_PATH: realBin, HERDR_SOCKET_PATH: '/run/herdr.sock', PATH: '/bin' })
+    expect(scrubbed.sort(), 'a HERDR_BIN_PATH pointing at a real binary is scrubbed, not stubbed')
+      .toEqual(['HERDR_BIN_PATH', 'HERDR_SOCKET_PATH'])
+    const seen = spawnSync(process.execPath,
+      ['-e', 'console.log(Object.keys(process.env).filter(k=>k.startsWith("HERDR_")).join(" "))'], { encoding: 'utf8' })
+    expect(seen.stdout.trim(), `no pane environment survives into a spawned process (this run scrubbed ${paneKeysScrubbed.length})`).toBe('')
+  })
+
   it('a herdr failure during the startup sweep does not stop the router from working', async () => {
     const m = memoryHerdr()
     const broken: Herdr = { ...m.herdr, workspaces: async () => { throw new Error('herdr server unreachable') } }
@@ -1088,12 +1102,31 @@ describe('a pull request per ticket', () => {
     expect(f.judge.prompts.filter(p => p.includes('merge pi-superagent pull request 6')).length).toBe(1)
   })
 
-  it('a reference that is not a pull request URL holds nothing open', async () => {
+  it('a reference that is not a pull request URL is refused to the worker, and completes nothing', async () => {
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pullsFake().api })
     const ticket = await working(f, '494')
-    f.workers[0]!.report!({ state: 'ready', summary: 'done', pullRequests: ['#77'] })
+    const verdict = f.workers[0]!.report!({ state: 'ready', summary: 'done', pullRequests: ['#77'] }) as
+      { isError?: boolean; content: { text: string }[] }
+    expect(verdict.isError, 'the worker is told in its own run, where it can report the URL gh pr create printed').toBe(true)
+    expect(verdict.content[0]!.text).toContain('#77')
     await f.running.tick()
-    expect(ticket().ended).toMatchObject({ outcome: 'completed' })
+    expect(ticket().ended, 'a refused report is no report: a reference that tracks nothing cannot close a ticket').toBeUndefined()
+  })
+
+  it('a report that reaches the router with an unreadable reference still warns there, and completes the ticket', async () => {
+    // The router's warn is the backstop for the reports this boundary did not screen: an old worker build, a
+    // hand-written reports.jsonl. Keep it, so the order stays: the worker is told first, the router logs second.
+    const h = memoryHerdr()
+    const f = fixture(true, undefined, undefined, h.herdr, { pullApi: pullsFake().api })
+    f.addComment('496', 'octocat', 'rename the Export button to Ship')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    const bridge = join(f.dir, 'workers', readdirSync(join(f.dir, 'workers')).find(d => d.length === 36)!)
+    appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"ready","summary":"done","pullRequests":["#77"]}\n')
+    await until(() => f.receipts('496').includes('ready: done'))
+    expect(f.receipts('496'), 'nothing waited on #77, so the ticket completes').toContain('ready: done')
     expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/pull\.unreadable .*ref=#77/)
   })
 

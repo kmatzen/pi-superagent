@@ -1,22 +1,53 @@
-import { spawnSync, execFileSync } from 'node:child_process'
+import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeEach, describe, expect, it } from 'vitest'
+import { createServer, type AddressInfo } from 'node:net'
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const dirs: string[] = []
 const SCRIPT = join(import.meta.dirname, '..', 'scripts', 'superagent')
 const FAKE = join(import.meta.dirname, 'fixtures', 'fake-herdr')
 chmodSync(FAKE, 0o755)
 
+// One panel port for this run of the file, taken from the ephemeral range the way scripts/check-packed takes
+// its own. 8799 was a box-wide constant, so every case wanted the same port: a second run of this file on the
+// box — a gate and a worker, which is the normal case here — collided with the squatter case, which owns the
+// port for its whole duration by design, and the loser's start cases failed the refuse-to-start path in ~200 ms.
+// A green commit read red, and no reader could tell that from a broken start script.
+const PANEL_PORT = await new Promise<number>(resolve => {
+  const probe = createServer()
+  probe.listen(0, '127.0.0.1', () => {
+    const port = (probe.address() as AddressInfo).port
+    probe.close(() => resolve(port))
+  })
+})
+// Who holds the panel's port right now, for a failing start to name: "pid 4242 is holding it" reads as a
+// second run on this box, where exit code 1 alone reads as "the commit broke the start script".
+const portHolders = () => spawnSync('lsof', ['-nP', '-ti', `tcp:${PANEL_PORT}`], { encoding: 'utf8' }).stdout.trim().replace(/\s+/g, ' ') || 'nobody'
+const portHint = () => `panel port ${PANEL_PORT} is held by pid(s): ${portHolders()}`
+const portFree = () => vi.waitFor(() => new Promise<void>((resolve, reject) => {
+  const probe = createServer()
+  probe.once('error', e => reject(new Error(`${portHint()}: ${(e as NodeJS.ErrnoException).code}`)))
+  probe.listen(PANEL_PORT, '127.0.0.1', () => probe.close(() => resolve()))
+}), { timeout: 5000 })
+
 let state: string, herdrDir: string
+// Every run of this file takes its env through here, so a case that needs its own setting says so in one
+// place — and so the guard's cases can run the same command from a binary of their choosing.
 const envFor = (extra: Record<string, string> = {}) => ({
   ...process.env, PI_SUPERAGENT_STATE: state, PI_SUPERAGENT_HERDR: FAKE, PI_SUPERAGENT_GRACE: '1', FAKE_HERDR_DIR: herdrDir,
-  PI_SUPERAGENT_PANEL_PORT: '8799', FAKE_HERDR_READY: join(state, 'ready'), ...extra,
+  PI_SUPERAGENT_PANEL_PORT: String(PANEL_PORT), FAKE_HERDR_READY: join(state, 'ready'), ...extra,
 })
 const run = (args: string[], extra: Record<string, string> = {}) => spawnSync(SCRIPT, args, { encoding: 'utf8', env: envFor(extra) })
 /** The same command from a binary of the test's choosing: the guard must hold when `superagent` is a symlink. */
 const runFrom = (bin: string, args: string[], extra: Record<string, string> = {}) => spawnSync(bin, args, { encoding: 'utf8', env: envFor(extra) })
+// Every case that needs a router: a start that failed says what it hit, port and pid included.
+const started = (extra: Record<string, string> = {}) => {
+  const r = run(['start'], extra)
+  expect(r.status, `${portHint()}\n${r.stderr}`).toBe(0)
+  return r
+}
 const routerTab = () => readFileSync(join(herdrDir, 'tab.1.args'), 'utf8')
 const routerStart = () => readFileSync(join(herdrDir, 'start.superagent.args'), 'utf8')
 
@@ -31,17 +62,37 @@ afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true 
 // Each run starts several processes (bash, node for herdr's JSON, the fake herdr): seconds under a full suite.
 describe('scripts/superagent', { timeout: 30_000 }, () => {
   it('refuses to kill a process on the panel port that is not this router', async () => {
-    // The scheduled health check runs `start`, and `start` frees the panel's port. A dev server that owns
-    // 8799 is the operator's work, not a stale panel, so killing it is the defect this guards.
-    const { spawn } = await import('node:child_process')
-    const squatter = spawn(process.execPath, ['-e', "require('http').createServer((_q,r)=>r.end('mine')).listen(8799)"], { stdio: 'ignore' })
-    await new Promise(r => setTimeout(r, 700))
-    const out = run(['start'])
-    expect(out.status, out.stderr).not.toBe(0)
-    expect(out.stderr).toMatch(/not this router/)
-    const alive = spawnSync(process.execPath, ['-e', "fetch('http://127.0.0.1:8799').then(r=>r.text()).then(t=>process.exit(t==='mine'?0:1))"], { encoding: 'utf8' })
-    expect(alive.status, 'the squatter stayed alive and answered').toBe(0)
-    squatter.kill()
+    // The scheduled health check runs `start`, and `start` frees the panel's port. A dev server that owns the
+    // port is the operator's work, not a stale panel, so killing it is the defect this guards. It squats this
+    // run's port, so the squat cannot reach a concurrent run of this file — the port was the only shared name
+    // these cases had, and the case that owns it is the one a second run used to trip over.
+    const squatter = spawn(process.execPath,
+      ['-e', `require('http').createServer((_q,r)=>r.end('mine')).listen(${PANEL_PORT},'127.0.0.1')`], { stdio: 'ignore' })
+    try {
+      await vi.waitFor(async () => {
+        const r = await fetch(`http://127.0.0.1:${PANEL_PORT}`).catch(() => null)
+        expect(r?.status, 'the squatter is listening').toBe(200)
+      }, { timeout: 5000 })
+      const out = run(['start'])
+      expect(out.status, out.stderr).not.toBe(0)
+      expect(out.stderr).toMatch(/not this router/)
+      expect(out.stderr, 'the refusal names the port and the pid, so a worker reads "second run on this box"')
+        .toMatch(new RegExp(`port ${PANEL_PORT} .*pid (\\d+)`))
+      const alive = spawnSync(process.execPath, ['-e', `fetch('http://127.0.0.1:${PANEL_PORT}').then(r=>r.text()).then(t=>process.exit(t==='mine'?0:1))`], { encoding: 'utf8' })
+      expect(alive.status, 'the squatter stayed alive and answered').toBe(0)
+    } finally {
+      // Kill it and wait for the port: a case that starts while the squatter is still closing hits the same
+      // refusal this file guards, and under a parallel load the close is not instantaneous.
+      squatter.kill()
+      await new Promise<void>(resolve => squatter.once('exit', () => resolve()))
+      await portFree()
+    }
+  })
+
+  it('every case starts on a port this run took, so two runs of this file cannot collide on one box', () => {
+    expect(PANEL_PORT, 'an ephemeral port, not the box-wide constant the runs collided on').toBeGreaterThan(1024)
+    started()
+    expect(routerTab()).toContain(`--env PI_SUPERAGENT_PANEL_PORT=${PANEL_PORT}`)
   })
 
   it('treats a ready-wait of 0 as one second, not as a start that always fails', () => {
@@ -82,7 +133,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
   })
 
   it('starts the router as a pi agent in a herdr tab, and reports it healthy', () => {
-    expect(run(['start']).status).toBe(0)
+    started()
     expect(routerStart()).toMatch(/^agent start superagent --kind pi --pane w1:p1 /)
     expect(routerTab()).toContain('--label engine')
     expect(routerTab()).toContain('--env PI_SUPERAGENT_ROLE=router')
@@ -106,7 +157,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
   it('reads deployment settings from the state dir, so the health check and a hand restart agree', () => {
     writeFileSync(join(state, 'config.env'), '# deployment\nPI_SUPERAGENT_GITHUB_REPO=o/spike\nPI_SUPERAGENT_GITHUB_SELF=bot\nPI_SUPERAGENT_GITHUB_TOKEN_FILE=/s/github-token\n'
       + 'PI_SUPERAGENT_MAX_WORKERS=2\nPI_SUPERAGENT_BLOCKED=gh,ssh\nPI_SUPERAGENT_JUDGE_THINKING=high\nPI_SUPERAGENT_ALLOWED=alice,bob\n')
-    expect(run(['start']).status).toBe(0)
+    started()
     expect(routerTab()).toContain('--env PI_SUPERAGENT_GITHUB_REPO=o/spike')
     expect(routerTab()).toContain('--env PI_SUPERAGENT_GITHUB_SELF=bot')
     expect(routerTab(), 'the path travels, never the token').toContain('--env PI_SUPERAGENT_GITHUB_TOKEN_FILE=/s/github-token')
@@ -119,20 +170,20 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
   })
 
   it('starts the panel and hands the router herdr itself, but no SDK path: pi supplies its own', () => {
-    expect(run(['start']).status).toBe(0)
-    expect(routerTab()).toContain('--env PI_SUPERAGENT_PANEL_PORT=8799')
+    started()
+    expect(routerTab()).toContain(`--env PI_SUPERAGENT_PANEL_PORT=${PANEL_PORT}`)
     expect(routerTab()).toContain(`--env PI_SUPERAGENT_HERDR_BIN=${FAKE}`)
     // A path from `npm root -g` named a second copy of pi, and a missing file for a pi installed any other way.
     expect(routerTab()).not.toContain('PI_SUPERAGENT_SDK_PATH')
   })
 
   it('an SDK entry file the operator sets still reaches the router', () => {
-    expect(run(['start'], { PI_SUPERAGENT_SDK_PATH: '/opt/pi/dist/index.js' }).status).toBe(0)
+    expect(run(['start'], { PI_SUPERAGENT_SDK_PATH: '/opt/pi/dist/index.js' }).status, portHint()).toBe(0)
     expect(routerTab()).toContain('--env PI_SUPERAGENT_SDK_PATH=/opt/pi/dist/index.js')
   })
 
   it('starts pi in one stable session, because a router on the session picker answers nothing', () => {
-    expect(run(['start']).status).toBe(0)
+    started()
     const id = /-- --session-id ([0-9a-f-]{36})/.exec(routerStart())?.[1]
     expect(id).toBeTruthy()
     // The extension refuses to be the router in any process whose command line lacks this id.
@@ -142,14 +193,14 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
   })
 
   it('refuses to start a second router over a live one', () => {
-    run(['start'])
+    started()
     const r = run(['start'])
     expect(r.status).toBe(1)
     expect(r.stderr).toMatch(/already running/)
   })
 
   it('reports a failing part with 2, and a setup requirement with 3', () => {
-    run(['start'])
+    started()
     writeFileSync(join(state, 'health.json'), '{"github":{"state":"error","detail":"cli offline"}}')
     expect(run(['status']).status).toBe(2)
     writeFileSync(join(state, 'setup.json'), '{"problem":{"code":"state-missing","place":"Deployment"}}')
@@ -159,7 +210,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
   it('a health.json the router stopped writing is a failing part: a wedged loop reports nothing', () => {
     // The tick loop rewrites health.json on every pass, so the file going quiet is the same fault as a stalled
     // tick — and the only form visible when the router itself is the wedged thing, unable to report its stall.
-    run(['start'])
+    started()
     const file = join(state, 'health.json')
     writeFileSync(file, '{"runtime":{"state":"ready"},"tick":{"state":"ok","n":12}}')
     expect(run(['status']).status, 'a fresh file that says ok is healthy').toBe(0)
@@ -172,7 +223,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
   })
 
   it('a stop asks pi to exit, closes the router tab, leaves a marker, and the check respects it', () => {
-    run(['start'])
+    started()
     expect(run(['stop']).status).toBe(0)
     const calls = readFileSync(join(herdrDir, 'calls'), 'utf8')
     expect(calls).toContain('agent send-keys superagent ctrl+c ctrl+c')
@@ -184,7 +235,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
   })
 
   it('a router that will not exit loses its tab: its workers are their own sessions and stay', () => {
-    run(['start'])
+    started()
     const r = run(['stop'], { FAKE_HERDR_STUCK: '1' })
     expect(r.stderr).toMatch(/did not exit/)
     expect(readFileSync(join(herdrDir, 'calls'), 'utf8')).toContain('tab close w1:t1')
@@ -192,8 +243,8 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
   })
 
   it('start clears an intentional stop, so a human restart works', () => {
-    run(['start']); run(['stop'])
-    expect(run(['start']).status).toBe(0)
+    started(); run(['stop'])
+    expect(run(['start']).status, portHint()).toBe(0)
     expect(existsSync(join(state, 'stopped'))).toBe(false)
   })
 
@@ -204,7 +255,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     writeFileSync(join(other, 'config.env'), 'PI_SUPERAGENT_GITHUB_REPO=o/other\n')
     writeFileSync(join(state, 'config.env'), 'PI_SUPERAGENT_GITHUB_REPO=o/live\n')
     const flags = ['--state', other]
-    expect(run([...flags, 'start'], { FAKE_HERDR_READY: join(other, 'ready') }).status).toBe(0)
+    expect(run([...flags, 'start'], { FAKE_HERDR_READY: join(other, 'ready') }).status, portHint()).toBe(0)
     expect(routerTab()).toContain('--env PI_SUPERAGENT_GITHUB_REPO=o/other')
     expect(existsSync(join(other, 'router.herdr'))).toBe(true)
     expect(run([...flags, 'stop']).status).toBe(0)
