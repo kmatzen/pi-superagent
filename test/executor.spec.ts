@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { PiExecutor, type WorkerEvent, type WorkerSession } from '../src/pi/executor.ts'
+import type { Reporter } from '../src/pi/report-tool.ts'
 import type { Assignment, Ticket, TicketInput } from '../src/core/index.ts'
 
 class FakeSession implements WorkerSession {
@@ -7,7 +8,7 @@ class FakeSession implements WorkerSession {
   events: WorkerEvent[] = []
   aborted = 0
   disposed = 0
-  report!: (state: string, summary: string, question?: string | null, origin?: 'worker' | 'silent', pullRequests?: string[]) => void
+  report!: Reporter
   private listeners: Array<(e: WorkerEvent) => void> = []
   constructor(readonly sessionId: string) {}
   prompt(text: string, mode: 'steer' | 'followUp'): void { this.prompts.push({ text, mode }) }
@@ -22,7 +23,8 @@ class FakeSession implements WorkerSession {
 
 interface Call { fn: string; args: unknown[] }
 
-function fixture(extra: { maxConcurrent?: number; slotPollMs?: number; follow?: (t: Ticket, urls: readonly string[]) => readonly string[] } = {},
+function fixture(extra: { maxConcurrent?: number; slotPollMs?: number; follow?: (t: Ticket, urls: readonly string[]) => readonly string[];
+                          reportDropped?: (fields: Record<string, unknown>) => void } = {},
                  fail: { launch?: string; report?: string } = {}) {
   const calls: Call[] = []
   const sessions: FakeSession[] = []
@@ -49,6 +51,7 @@ function fixture(extra: { maxConcurrent?: number; slotPollMs?: number; follow?: 
     briefFor: t => `brief for ${t.id}`,
     renderInput: i => (i.kind === 'text' ? i.text : i.kind === 'trigger' ? `trigger:${i.triggerId}` : `[${i.kind}]`),
     reported: (t, a, origin, r) => calls.push({ fn: 'reported', args: [t.id, a, origin, r] }),
+    reportDropped: fields => calls.push({ fn: 'reportDropped', args: [fields] }),
     ...extra,
     ...extra.follow ? { follow: (t: Ticket, urls: readonly string[]) => { calls.push({ fn: 'follow', args: [t.id, urls] }); return extra.follow!(t, urls) } } : {},
   })
@@ -308,6 +311,45 @@ describe('PiExecutor', () => {
     await f.executor.idle()
     expect(f.sessions, 'T2 still gets its worker').toHaveLength(1)
     expect(f.calls_of('reported'), 'a report the engine refused is not announced').toEqual([])
+  })
+
+  it('a report landing after its worker was freed is said out loud, not swallowed', async () => {
+    // Measured 2026-11-09 on matzen_adobe/superagent-board-spike#255: its worker reported at 08:59:23Z, the ticket
+    // released the worker, a queued copy of the same mandate surfaced in the still-open tab at ~09:01Z, and the
+    // worker's second `ticket_report` answered `reported` while the issue gained no comment. Three later runs of
+    // that ticket re-proved a two-day-old merge starting from that receipt. Silence is what cost the sessions.
+    const f = fixture()
+    f.executor.start(ticket(), assignment())
+    await f.executor.idle()
+    const s = f.sessions[0]!
+    expect(s.report('ready', 'the merge landed')).toBe('recorded')
+    f.executor.release(ticket())
+    expect(s.report('ready', 'the merge landed, again'), 'the pane is told the truth').toBe('dropped')
+    expect(f.calls_of('report').length, 'the second report filed nothing').toBe(1)
+    expect(f.calls_of('reportDropped').map(c => c.args[0])).toEqual([
+      { ticket: 'T1', origin: 'worker', state: 'ready', reason: 'the ticket has no live worker', summary: 'the merge landed, again' },
+    ])
+  })
+
+  it('a report from a worker the domain replaced is said out loud', async () => {
+    const f = fixture()
+    f.executor.start(ticket(), assignment('A1'))
+    f.executor.start(ticket(), assignment('A2'))
+    await f.executor.idle()
+    expect(f.sessions).toHaveLength(2)
+    expect(f.sessions[0]!.report('ready', 'my run is the one it replaced')).toBe('dropped')
+    expect(f.calls_of('reportDropped')[0]!.args[0]).toMatchObject({ ticket: 'T1', assignment: 'A2', reason: 'its worker was replaced' })
+    expect(f.calls_of('report'), 'a replaced worker files no ticket write').toEqual([])
+  })
+
+  it('a report the engine refuses is said out loud, and still throws', async () => {
+    const f = fixture({}, { report: 'T1' })
+    f.executor.start(ticket(), assignment())
+    await f.executor.idle()
+    expect(() => f.sessions[0]!.report('ready', 'done')).toThrow('ticketEnded')
+    expect(f.calls_of('reportDropped')[0]!.args[0])
+      .toMatchObject({ ticket: 'T1', assignment: 'A1', origin: 'worker', reason: 'the engine refused it: ticketEnded' })
+    expect(f.calls_of('reported'), 'a refused report announces nothing').toEqual([])
   })
 
   it('a worker between runs frees its slot for the queue, and takes it back when a new run starts', async () => {

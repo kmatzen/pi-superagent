@@ -19,6 +19,81 @@ when the operator connected a repository. The source now saves the initial set o
 seeds the review cursor. Closing and reopening an issue makes it eligible again. Its updated
 timestamp distinguishes the new trigger from the earlier one. See `Intake.tla` C1 and C2.
 
+**Spend the intake label, and close the issue a ticket finished on.** That timestamp is GitHub's
+`updated_at`, and GitHub moves it when a comment lands — including the router's own receipt. A
+labelled issue therefore re-asked on every poll, and the router's speech was what recruited the next
+worker: measured 2026-11-09, 26-31 label triggers in a burst at every completed tick, one ticket
+reporting the same sentence 93 times in 20 hours, another waking a fourth worker nine hours after
+its merge. The label is an act, not a state, so the source journals the grant it takes
+(`source:github:<repo>:label-grants`), takes the label off, and hands the grant back only when the
+label comes off. A finished ticket then closes its issue, because intake hears open issues and a
+`ready` report with no pull request leaves nothing to wait on. A person's comment, or a reopen,
+still starts the work: that is new inbound speech, and the only thing that is.
+
+**Check the label's author and its moment, not just the journal.** The journal above is per-repository
+state, so it does not survive a rebuilt database, and a label a token without rights cannot take off is a
+standing ask with nothing behind it. The second lock asks GitHub who applied the label — the issue events
+feed, the only read that answers — and compares that moment with the router's own last reply on the
+issue. A label older than the router's last reply is an ask it heard and answered; a label newer than it is
+a person asking a second time, which is the door intake keeps open. The check is deliberately *not* "a
+human applied it": `superagent intake` labels with the deployment's own token, so a real ask and the
+router's speech carry the same login (measured 2026-11-09: one board issue labelled by `matzen_adobe`,
+another by `matzenbot_adobe`, both deliberate). An unreadable answer fails open, because losing intake costs
+more than the loop the journal already stops. The trigger now names the label's author too: it used to
+credit the issue's author and hardcode `human: true`, which is what made every one of the 8 label triggers
+on one ticket read as the operator asking again.
+
+**Stop a ticket that repeats itself.** The Nth report that lands with nothing new on the thread recruits
+a worker that can only report it again, so at `PI_SUPERAGENT_REPORT_CAP` (3) the ticket says so on itself
+and stops recruiting. The signature is the quiet thread, not the sentence: #255 wrote “Nothing to merge:
+this pull request landed…”, then “The mandate is already satisfied…”, then “Close this ticket: its pull
+request merged…”, and #227 wrote “eighty-sixth identical dispatch”, “Still waiting on one click”,
+“Resumed run: state is unchanged” — a fingerprint over the wording matches none of it, and their states
+flipped between `ready` and `blocked`. So the streak is the same report state with no new inbound speech
+between the reports, where the router's own receipt and the intake label are not speech. A person's
+comment, or a report that changed state, restarts the count. The journal is the router's, not the
+aggregate's: an Assignment keeps its last report, so the 93 receipts of one worker session are one
+report in the ticket.
+
+**A 404 from a repository you cannot see is not a vanished pull request.** GitHub answers 404,
+not 403, for a private repository a token cannot read, and the pull-request reader returned
+`undefined` for every 404. A follow whose read returns `undefined` is finished: the engine ends
+the ticket and the router posts "closed without merging, so this ticket ends". Measured
+2026-11-09, the router's account cannot read the private repository its own code lives in, so it
+told the board twice in one day that an open, ready, mergeable pull request had closed without
+merging, and ended the ticket that was fixing the board. The reader now asks the repository
+(once, cached): visible means the pull request is absent and the wait ends, invisible means the
+read is unreadable, the follow stays open, and the failure is said once per thread with the
+matching `pull.read_readable` when it recovers. Absent and unreadable are different answers; only
+the first one ends a wait.
+
+**Repair a close a failed read wrote down.** The fix above stops the next false close; it does not undo
+the ones already in the database, and a recorded close is permanent by design — a closed follow is not
+read again, so nothing is there to notice the truth. Measured 2026-11-09 on the live board: 21 **live**
+tickets hold a closed follow on a pull request that is open, with no open follow left, which means they
+are followed by nothing, can be ended by nothing, and never read a review on the pull request they are
+waiting for; 39 ended tickets took that same false close as their terminal end, and their pull requests
+are still open. So the follower re-checks a recorded close once per start (`pull.reopened` in the log,
+once per thread, no API call where the watched repository’s open-thread list already answers) and
+re-binds the thread on the tickets that are **live**, which clears the recorded close and gives the wait
+back. Tickets that already ended are left ended: reopening 39 of them in one start recruits 39 sessions
+unasked, and an end a person should undo is the operator’s door, not the router’s. The repair is silent,
+because the router writing on a thread is what recruits a session — the same reason its receipt is not
+inbound speech.
+
+**Say a report nobody received.** A worker's report travels: the pane appends it to
+`reports.jsonl`, the router reads the file and files it on the ticket. When the ticket has no
+live worker by then — it ended on the worker's own report, and a queued copy of its mandate
+started a second run in the same tab — the router drops the report, the report tool has already
+answered `reported`, and the file's cursor has moved past the line, so nothing retries it.
+Measured 2026-11-09 on #255: the report at 08:59:23Z ended the run, a queued copy of the same
+mandate woke the same tab at ~09:01Z, its `ticket_report` answered `reported`, and the issue's
+comment count never moved. Every later run of that ticket read the last receipt as proof the
+previous one had spoken. The drop is now said in the engine log (`worker.report_dropped`) and
+answered to the worker as `not recorded`, because a report nobody received is indistinguishable
+from a worker that went silent, and an operator who cannot tell the two keeps spending sessions
+on the same proof.
+
 **Save later read positions after delivery.** A poll stages its read position for the next poll to
 commit. If the router crashes after reading a comment but before the engine receives it, the old
 position lets the router read it again. Stable trigger IDs make that replay safe. The initial

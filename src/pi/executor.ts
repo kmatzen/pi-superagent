@@ -3,7 +3,7 @@
  * prompt into the running one, stop = abort. Reports arrive through a tool, never by parsing worker prose.
  */
 import type { Assignment, EngineForExecutor, Ticket, TicketInput } from '../core/index.ts'
-import type { Reporter, ReportOrigin } from './report-tool.ts'
+import type { Reporter, ReportOrigin, ReportOutcome } from './report-tool.ts'
 
 export interface WorkerSession {
   readonly sessionId: string
@@ -49,6 +49,14 @@ export interface ExecutorOptions {
   slotPollMs?: number
   /** Every report the engine accepted, with who ended the run: the deployment tells the person. */
   reported?(ticket: Ticket, assignmentId: string, origin: ReportOrigin, report: Filed & { pullRequests?: readonly string[] }): void
+  /**
+   * Every report that reached the executor and could not be filed, said once each: the worker's tool call
+   * answers `reported` in the pane, the ticket records nothing, and a run that spoke to nobody is indistinguishable
+   * from a worker that went silent. Measured 2026-11-09, #255: a released worker kept its herdr tab, a queued
+   * copy of its mandate surfaced after its report, its second report was dropped here, and three later runs of
+   * that ticket spent their whole lives re-proving a merge from the receipt the first one wrote.
+   */
+  reportDropped?(fields: Record<string, unknown>): void
   /** Runs before the engine reads the report, because a ready report completes a ticket that follows no open pull
    *  request yet. Returns the pull requests the ticket now follows. */
   follow?(ticket: Ticket, pullRequests: readonly string[]): readonly string[]
@@ -141,16 +149,37 @@ export class PiExecutor {
   // Bound to the session that owns the ticket: a report from a worker the domain has already replaced or
   // stopped is not a ticket write.
   private reporter(ticket: Ticket, own: () => WorkerSession | undefined): Reporter {
-    return (state, summary, question, origin = 'worker', pullRequests) => {
+    return (state, summary, question, origin = 'worker', pullRequests): ReportOutcome => {
       const live = this.live.get(ticket.id)
-      if (!live || live.session.sessionId !== own()?.sessionId) return
+      if (!live || live.session.sessionId !== own()?.sessionId) {
+        const reason = live ? 'its worker was replaced' : 'the ticket has no live worker'
+        // Nothing downstream can see this: the pane's tool answers `reported`, the reports.jsonl cursor has
+        // already moved past the line, so the report is not retried, and the ticket keeps its previous report.
+        // The log line and the tool's answer are the only two witnesses it ever had.
+        this.options.reportDropped?.({
+          ticket: ticket.id, assignment: live?.assignmentId, origin, state, reason, summary: summary.slice(0, 200),
+        })
+        return 'dropped'
+      }
       this.file(ticket, live.assignmentId, origin, report(state, summary, question), pullRequests)
+      return 'recorded'
     }
   }
 
   private file(ticket: Ticket, assignmentId: string, origin: ReportOrigin, filed: Filed, pullRequests?: readonly string[]): void {
     const followed = pullRequests?.length ? this.options.follow?.(ticket, pullRequests) ?? [] : []
-    this.engine.report(ticket.id, filed)
+    try {
+      this.engine.report(ticket.id, filed)
+    } catch (error) {
+      // The engine refuses a report on a ticket that ended (`ticketEnded`, `assignmentEnded`). Throwing keeps the
+      // contract the loop already relies on, and saying it first is what makes the run visible: without this the
+      // launch queue's catch swallows the whole event, and the operator reads a worker that never answered.
+      this.options.reportDropped?.({
+        ticket: ticket.id, assignment: assignmentId, origin, state: filed.state, reason: `the engine refused it: ${text(error)}`,
+        summary: filed.summary.slice(0, 200),
+      })
+      throw error
+    }
     this.options.reported?.(ticket, assignmentId, origin, followed.length ? { ...filed, pullRequests: followed } : filed)
   }
 

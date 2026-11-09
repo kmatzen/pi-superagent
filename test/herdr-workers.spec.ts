@@ -98,7 +98,7 @@ describe('herdr workers', () => {
     const dir = tmp()
     const origins: string[] = []
     const session = await new HerdrWorkers(options(dir, memoryHerdr().herdr))
-      .launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: (_s, _m, _q, origin) => origins.push(origin ?? 'none') })
+      .launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: (_s, _m, _q, origin) => { origins.push(origin ?? 'none') } })
     const off = session.subscribe(() => {})
     appendFileSync(join(dir, 'workers', session.sessionId, 'reports.jsonl'),
       '{"state":"blocked","summary":"need a key","question":"rotate prod too?"}\n{"state":"failed","summary":"no report","origin":"silent"}\n')
@@ -112,7 +112,7 @@ describe('herdr workers', () => {
     const m = memoryHerdr()
     const workers = new HerdrWorkers(options(dir, m.herdr))
     const reports: string[] = []
-    const session = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: (state, summary) => reports.push(`${state}: ${summary}`) })
+    const session = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: (state, summary) => { reports.push(`${state}: ${summary}`) } })
     const events: WorkerEvent[] = []
     const off = session.subscribe(e => events.push(e))
     const bridge = join(dir, 'workers', session.sessionId)
@@ -125,7 +125,7 @@ describe('herdr workers', () => {
     const record = await workers.find('abcd1234ef')
     expect(record?.sessionId).toBe(session.sessionId)
     const again: string[] = []
-    const adopted = workers.attach(record!, (state, summary) => again.push(`${state}: ${summary}`))
+    const adopted = workers.attach(record!, (state, summary) => { again.push(`${state}: ${summary}`) })
     const stop = adopted.subscribe(() => {})
     appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"ready","summary":"rotated"}\n')
     await until(() => again.length === 1)
@@ -137,7 +137,7 @@ describe('herdr workers', () => {
     const dir = tmp()
     const pulls: Array<readonly string[] | undefined> = []
     const session = await new HerdrWorkers(options(dir, memoryHerdr().herdr))
-      .launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: (_s, _m, _q, _o, p) => pulls.push(p) })
+      .launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: (_s, _m, _q, _o, p) => { pulls.push(p) } })
     const stop = session.subscribe(() => {})
     appendFileSync(join(dir, 'workers', session.sessionId, 'reports.jsonl'),
       '{"state":"ready","summary":"opened it","pullRequests":["https://github.com/o/r/pull/9"]}\n{"state":"ready","summary":"no repo"}\n')
