@@ -93,6 +93,29 @@ describe('the credential guard', () => {
     expect(findings[0]!.masked).not.toContain(SECRET)
   })
 
+  it('reports every credential in one config: two leaky remotes are two findings', () => {
+    // A global regex plus `.test()` carries `lastIndex` between calls, so the second value can be scanned
+    // from the middle of the file. Two remotes each holding the token is the shape the box had (origin plus
+    // the backup a worker added), and dropping the second one is the guard saying "clean" about a leak.
+    const first = `ghp_${'a'.repeat(36)}`
+    const second = `ghp_${'b'.repeat(36)}`
+    const dir = checkoutWith(
+      `[remote "origin"]\n\turl = https://${first}@github.com/kmatzen/pi-superagent.git\n`
+      + `[remote "backup"]\n\turl = https://${second}@github.com/kmatzen/b.git\n`,
+    )
+    const hits = scanGitConfig(join(dir, '.git', 'config'))
+    expect(hits.map(h => h.key)).toEqual(['remote "origin".url', 'remote "backup".url'])
+    const findings = findEmbeddedGitCredentials(dir)
+    expect(findings).toHaveLength(2)
+    expect(JSON.stringify(findings)).not.toContain(first)
+    expect(JSON.stringify(findings)).not.toContain(second)
+    // The order does not save it either: the helper line first, the URL second, is the deployment's shape.
+    expect(holdsCredential(`helper = !f(){ echo password=${first}; }; f`)).toBe(true)
+    expect(holdsCredential(`url = https://${second}@github.com/kmatzen/b.git`)).toBe(true)
+    expect(holdsCredential(CLEAN)).toBe(false)
+    expect(holdsCredential(`url = https://${second}@github.com/kmatzen/b.git`)).toBe(true)
+  })
+
   it('masks every credential shape it knows, and says so for the plain token case', () => {
     expect(maskSecret(LEAKY)).toBe('https://x-access-token:***@github.com/kmatzen/pi-superagent.git')
     expect(maskSecret(`token=github_pat_${'y'.repeat(40)}`)).not.toContain(`${'y'.repeat(40)}`)
@@ -129,6 +152,26 @@ describe('the guard where the router reads', () => {
     expect(problems[0]!.place).toBe('Deployment')
     expect(problems[0]!.detail).toContain(join(board, '.git', 'config'))
     expect(problems[0]!.detail).not.toContain(SECRET)
+  })
+
+  it('setupProblems reports a credential in the checkout a worker cloned itself, one level down', () => {
+    // The product clones into <root>/<ticket>/. A worker told "clone into your workspace" clones into
+    // <root>/<ticket>/repo/ — measured: 26 of the 29 live ticket checkouts are that shape, the 3 flat ones are
+    // the product's own. A guard that stops at the ticket directory calls every worker clone clean.
+    const root = tmp()
+    const work = join(root, 'work')
+    const state = join(root, 'state')
+    mkdirSync(join(work, 'TK-3', 'repo', '.git'), { recursive: true })
+    mkdirSync(state, { recursive: true })
+    writeFileSync(join(work, 'TK-3', 'repo', '.git', 'config'), poisonedConfig())
+    const problems = setupProblems({ root: work, stateDir: state })
+    expect(problems.map(p => p.code)).toEqual(['git-credential-in-url'])
+    expect(problems[0]!.detail).toContain(join('TK-3', 'repo', '.git', 'config'))
+    expect(problems[0]!.detail).not.toContain(SECRET)
+    // Depth is bounded: a node_modules tree full of nested `.git` dirs is not a deployment to walk.
+    mkdirSync(join(work, 'TK-4', 'repo', 'node_modules', 'pkg', '.git'), { recursive: true })
+    writeFileSync(join(work, 'TK-4', 'repo', 'node_modules', 'pkg', '.git', 'config'), poisonedConfig())
+    expect(setupProblems({ root: work, stateDir: state })).toHaveLength(1)
   })
 
   it('a poisoned clone is never published into the workspace the worker reads', async () => {

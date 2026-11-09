@@ -111,26 +111,60 @@ CREDENTIAL_IN_URL='://[^/[:space:]]*:[^/[:space:]]*@|gh[pousr]_[A-Za-z0-9_]{16,}
 mask_credential() { sed -E 's#(://[^/@[:space:]]*:)[^/@[:space:]]*(@)#\1***\2#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}#\1***#g'; }
 file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null || echo '?'; }
 
-# Every checkout this deployment reads: its own, the ones the operator named, and the ticket checkouts.
+# The config files that name a checkout's remotes. A linked worktree — 2 of the 86 directories under the live
+# worktree root — keeps its own `.git` as a FILE pointing at <repo>/.git/worktrees/<name>, and its remotes live
+# in the COMMON dir's config, so scanning `<checkout>/.git/config` walks straight past it. Same for a submodule.
+# Every file printed exists; a path that is not a checkout prints nothing.
+checkout_config_files() {
+  local dir="$1" gitdir common
+  if [ -d "$dir/.git" ]; then gitdir="$dir/.git"
+  elif [ -f "$dir/.git" ]; then
+    gitdir="$(sed -n 's/^gitdir:[[:space:]]*//p' "$dir/.git" | head -1)"
+    [ -n "$gitdir" ] || return 0
+    [ "${gitdir#/}" = "$gitdir" ] && gitdir="$(cd "$dir" 2>/dev/null && cd "$gitdir" 2>/dev/null && pwd)"
+  elif [ -f "$dir/HEAD" ] && [ -d "$dir/objects" ]; then gitdir="$dir"
+  else return 0; fi
+  [ -n "$gitdir" ] && [ -f "$gitdir/config" ] && printf '%s\n' "$gitdir/config"
+  [ -f "$gitdir/commondir" ] || return 0
+  common="$(head -1 "$gitdir/commondir")"
+  [ -n "$common" ] || return 0
+  [ "${common#/}" = "$common" ] && common="$(cd "$gitdir" 2>/dev/null && cd "$common" 2>/dev/null && pwd)"
+  [ -n "$common" ] && [ -f "$common/config" ] && printf '%s\n' "$common/config"
+  return 0
+}
+
+# Every checkout this deployment reads: its own, the ones the operator named, and the ticket checkouts. The
+# ticket checkouts are counted one level past the ticket directory, because the ticket prompt tells a worker to
+# clone into its workspace and the clone lands at <worktrees>/<ticket>/repo/ — measured: 26 of the 29 live
+# checkouts are that shape. Stopping at <worktrees>/<ticket>/.git reports a leaking deployment clean.
 watched_checkouts() {
   printf '%s\n' "$REPO_ROOT"
   printf '%s\n' "${PI_SUPERAGENT_WATCHED_CHECKOUTS:-}" | tr ':,' '\n\n' | sed '/^$/d'
-  local dir
-  for dir in "$WORKTREES"/*/; do [ -f "${dir}.git/config" ] && printf '%s\n' "${dir%/}"; done
+  local dir sub
+  for dir in "$WORKTREES"/*/; do
+    [ -d "$dir" ] || continue
+    if [ -e "${dir}.git" ]; then printf '%s\n' "${dir%/}"; continue; fi
+    for sub in "$dir"*/; do
+      [ -d "$sub" ] && [ -e "${sub}.git" ] && printf '%s\n' "${sub%/}"
+    done
+  done
   return 0
 }
 
 git_credential_guard() {
-  local dir file hit bad=0 line
+  local dir file hit bad=0 line seen=' '
   while IFS= read -r dir; do
-    [ -n "$dir" ] && [ -f "$dir/.git/config" ] || continue
-    file="$dir/.git/config"
-    hit="$(grep -m1 -nE "$CREDENTIAL_IN_URL" "$file" 2>/dev/null | mask_credential | cut -c1-200)"
-    [ -n "$hit" ] || continue
-    line="${hit%%:*}"
-    printf 'superagent: %s line %s carries a git credential in the clear, mode %s: %s\n' "$file" "$line" "$(file_mode "$file")" "${hit#*:}" >&2
-    printf '  every user on this box reads it and every `git remote -v` prints it. Fix: git -C %s remote set-url origin <the same URL with the user:token@ removed>, then supply the password from a 0600 file with a repo-local credential helper (docs/operator-guide.md).\n' "$dir" >&2
-    bad=1
+    [ -n "$dir" ] || continue
+    while IFS= read -r file; do
+      case "$seen" in *" $file "*) continue ;; esac
+      seen="$seen$file "
+      hit="$(grep -m1 -nE "$CREDENTIAL_IN_URL" "$file" 2>/dev/null | mask_credential | cut -c1-200)"
+      [ -n "$hit" ] || continue
+      line="${hit%%:*}"
+      printf 'superagent: %s line %s carries a git credential in the clear, mode %s: %s\n' "$file" "$line" "$(file_mode "$file")" "${hit#*:}" >&2
+      printf '  every user on this box reads it and every `git remote -v` prints it. Fix: git -C %s remote set-url origin <the same URL with the user:token@ removed>, then supply the password from a 0600 file with a repo-local credential helper (docs/operator-guide.md).\n' "$dir" >&2
+      bad=1
+    done < <(checkout_config_files "$dir")
   done < <(watched_checkouts)
   return $bad
 }
