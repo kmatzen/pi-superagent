@@ -144,6 +144,12 @@ workspace" clones into `<worktrees>/<ticket>/repo/` — measured, 26 of the 29 l
 shape. A linked worktree is read through its common dir, because that is where its remotes live. The scan
 descends one level and no deeper, so a `node_modules` full of nested `.git` directories costs nothing.
 
+"The deployment's own checkout" is the checkout the `superagent` command lives in, followed through a symlink:
+a link on your PATH (`npm install -g` leaves one, and a hand link into a checkout is the documented
+alternative) points at the same checkout it was written in, so the scan cannot be dodged by how the command
+is installed. Measured before that: through a link, the guard scanned the link's own directory, found no
+checkout, printed nothing, and `start` exited 0 over a checkout holding a `repo`-scoped token.
+
 Rotating a token a URL has exposed is a web-UI action: GitHub exposes no API for creating or rotating
 personal access tokens (a classic token asks 404), and a `ghp_` classic token cannot be scoped narrower than
 `repo`. Mint a fine-grained token for the one repository with `contents: write` and `pull_requests: read`,
