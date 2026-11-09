@@ -335,7 +335,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const followed: string[] = []
     for (const url of urls) {
       const pull = parsePull(url)
-      if (!pull) { log.line('warn', 'pull.unreadable', { ticket: ticket.id, ref: url.slice(0, 200) }); continue }
+      // `pull.parse_failed`, not `pull.unreadable`: the operator guide says to grep `pull.unreadable` for the
+      // follows this token cannot READ, and a worker that pasted an issue link is a different problem.
+      if (!pull) { log.line('warn', 'pull.parse_failed', { ticket: ticket.id, url: url.slice(0, 200) }); continue }
       try {
         engine.bindThread(ticket.id, threadOfPull(pull, home), true)
         followed.push(pullUrl(pull))

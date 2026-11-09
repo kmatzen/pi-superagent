@@ -57,6 +57,8 @@ itself said nothing — a 404 from an account the repository is invisible to, a 
 and for one the token cannot see with the same bytes. An unreadable read keeps the follow open, is named once
 per pull request per window (`pull.unreadable`, then `pull.unreadable_escalated`), and is counted under
 `pulls` in `health.json` as `degraded` — a repository the token will never see is not an outage to restart.
+The window's read count restarts with the router; the escalation and the first-seen time do not, because the
+measured incident is a router that restarts. A report URL that is not a pull request link is `pull.parse_failed`.
 
 `source-github.ts` tracks issues, comments and submitted reviews. It recognizes the router’s own
 comments by the bot login or a hidden marker. `scopeOf` in `router.ts` checks each author’s GitHub

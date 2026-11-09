@@ -893,7 +893,10 @@ describe('a pull request per ticket', () => {
     f.workers[0]!.report!({ state: 'ready', summary: 'done', pullRequests: ['#77'] })
     await f.running.tick()
     expect(ticket().ended).toMatchObject({ outcome: 'completed' })
-    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/pull\.unreadable .*ref=#77/)
+    // Named `pull.parse_failed`, not `pull.unreadable`: the operator guide tells a human to grep
+    // `pull.unreadable` for the follows this token cannot READ, and a worker that pasted `#77` instead of a
+    // pull URL is a different problem -- the two must not share the line an operator greps for.
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/pull\.parse_failed .*url=#77/)
   })
 
   it("a person's comment on the pull request in another repository reaches the worker; a stranger's does not", async () => {

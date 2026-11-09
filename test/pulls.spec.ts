@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { followedPulls, parsePull, parseThread, PullFollower, threadOfPull, threadUrl, UNREADABLE_PULLS, type PullApi, type PullRead, type PullState, type UnreadablePulls } from '../src/pi/pulls.ts'
+import { followedPulls, parsePull, parseThread, PullFollower, threadOfPull, threadUrl, UNREADABLE_PULLS, type FollowerOptions, type PullApi, type PullRead, type PullState, type UnreadablePulls } from '../src/pi/pulls.ts'
 import { REPLY_MARKER, type IssueComment, type PrReview } from '../src/pi/source-github.ts'
 import type { Ticket, Trigger } from '../src/core/index.ts'
 
@@ -60,7 +60,7 @@ function follower(api: Partial<PullApi>, open: string[] | null = [], options: { 
     comments: async (repo, n, since) => { calls.push(`comments ${repo}#${n} since ${since === created ? 'created' : since}`); return api.comments?.(repo, n, since) ?? [] },
     reviews: async (repo, n) => { calls.push(`reviews ${repo}#${n}`); return api.reviews?.(repo, n) ?? [] },
   }
-  const f = new PullFollower({
+  const opts: FollowerOptions = {
     home: 'o/r', api: full, openThreads: () => open === null ? undefined : new Set(open),
     positions: { get: <T,>(k: string) => kv.get(k) as T | undefined, set: (k, v) => { kv.set(k, v) } },
     self: 'agent-bot', bots: new Set(['ci-*']),
@@ -68,11 +68,13 @@ function follower(api: Partial<PullApi>, open: string[] | null = [], options: { 
     receive: t => received.push(t),
     warn: event => warned.push(event),
     now: () => clock, everyMs: 120_000, ...(options.escalateAfter ? { escalateAfter: options.escalateAfter } : {}),
-  })
+  }
+  const f = new PullFollower(opts)
   const following = (...threads: string[]) => [{ follows: threads.map(t => ({ thread: `github:${t}`, own: true })) }] as unknown as Ticket[]
   // The durable list the follower publishes for health.json, as the router reads it out of the kv store.
   const unreadable = () => (kv.get(UNREADABLE_PULLS) ?? {}) as UnreadablePulls
-  return { f, kv, calls, closed, received, warned, following, unreadable, tick: (ms: number) => { clock += ms } }
+  // A router restart: a new follower with fresh in-memory counters over the same durable store and the same log.
+  return { f, kv, calls, closed, received, warned, following, unreadable, restart: () => new PullFollower(opts), tick: (ms: number) => { clock += ms } }
 }
 
 // The three answers a pull read returns (see `PullRead`): GitHub's body, "no such pull in a repository I
@@ -163,6 +165,23 @@ describe('following a ticket\'s pull requests', () => {
     expect(t.unreadable()).toEqual({
       'other/lib#5': { reason: 'repo-invisible:http-404', reads: 3, at: expect.any(String), escalated: false },
     })
+  })
+
+  it('a router restart keeps an escalated pull request escalated, and warns once in the new window', async () => {
+    // The counters are in memory and the incident class is a router that restarts: every close in the
+    // 11:34:18Z block happened on the FIRST pass after a clean start. So the durable list keeps the escalation
+    // and the first-seen time, while the window's count legitimately starts again with the process.
+    const t = follower({ pull: async () => ({ read: 'unreadable', reason: 'repo-invisible:http-404' }) }, [], { escalateAfter: 2 })
+    await t.f.reconcile(t.following('other/lib#5')); t.tick(120_000)
+    await t.f.reconcile(t.following('other/lib#5')); t.tick(120_000)
+    const since = t.unreadable()['other/lib#5']!.at
+    expect(t.unreadable()['other/lib#5']).toMatchObject({ reads: 2, escalated: true })
+    await t.restart().reconcile(t.following('other/lib#5'))
+    expect(t.warned, 'the new window names it once, and does not re-escalate on its first read')
+      .toEqual(['pull.unreadable', 'pull.unreadable_escalated', 'pull.unreadable'])
+    expect(t.closed, 'and the restart closes nothing either').toEqual([])
+    expect(t.unreadable()['other/lib#5'], 'reads restarts with the process; the escalation and the age do not')
+      .toMatchObject({ reads: 1, escalated: true, at: since })
   })
 
   it('escalates a pull request that stays unreadable once per window, not once per poll', async () => {
