@@ -50,6 +50,16 @@ the router polls every 30 seconds and also wakes when its pi session goes idle. 
 triggers, reconciles PRs and closed threads, evaluates requests, starts pending work, checks for quiet
 workers and flushes replies. Three consecutive GitHub poll failures set an error in `health.json`.
 
+The pass never waits for a free worker slot: the launch queue is gated on capacity, and awaiting it made the
+loop enterable only when the fleet went quiet (measured 2026-11-09: 7 passes in 6.6 h against a 30 s timer,
+each one then paying the full PR fan-out because the 120 s read budget had expired). It takes a bounded start
+on the launches it queued instead, and the loop's own liveness is published: every pass logs `tick n=…` with
+`gapMs` and per-stage times and `gh` call count, and writes `tick` into `health.json`, so a pass parked for
+longer than `PI_SUPERAGENT_TICK_STALL_MS` fails `superagent status` naming its stage, and one past
+`PI_SUPERAGENT_TICK_ABANDON_MS` is abandoned and replaced. `PullFollower` bounds its own fan-out per pass
+(`PI_SUPERAGENT_PULL_READS_PER_TICK`, read least-recently-read first) so a late pass defers reads instead of
+spending a minute on them.
+
 `source-github.ts` tracks issues, comments and submitted reviews. It recognizes the router’s own
 comments by the bot login or a hidden marker. `scopeOf` in `router.ts` checks each author’s GitHub
 association or the configured login list before the trigger can reach a judge or worker.

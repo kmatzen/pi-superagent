@@ -75,7 +75,8 @@ afterEach(() => { for (const r of live.splice(0)) r.stop() })
 function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
                  options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number;
                    workerTiming?: { pollMs?: number; livenessMs?: number }; pullApi?: PullApi; blocked?: string[];
-                   judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean } = {}) {
+                   judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
+                   maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [] }
   const api: GithubApi = options.githubApi ?? {
@@ -95,6 +96,11 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', githubRepo: 'o/r', prepare: options.prepare ?? 'true',
     bots: new Set(['fleet-answer-loop']), tickMs: options.tickMs ?? 5, ...(herdr ? { workers: 'herdr' as const } : {}),
     ...(options.blocked ? { blockedCommands: options.blocked } : {}),
+    ...(options.maxConcurrent === undefined ? {} : { maxConcurrent: options.maxConcurrent }),
+    ...(options.launchDrainMs === undefined ? {} : { launchDrainMs: options.launchDrainMs }),
+    ...(options.tickStallMs === undefined ? {} : { tickStallMs: options.tickStallMs }),
+    ...(options.tickStallReportMs === undefined ? {} : { tickStallReportMs: options.tickStallReportMs }),
+    ...(options.tickAbandonMs === undefined ? {} : { tickAbandonMs: options.tickAbandonMs }),
     ...(options.watchRepoIsAsks ? { watchRepoIsAsks: true } : {}),
     ...(options.workerTokenFile ? { workerTokenFile: options.workerTokenFile } : {}),
   }
@@ -1037,5 +1043,98 @@ describe('the sweep of settled checkouts', () => {
       expect(sweepHomes(root, new Set(['tk-open']))).toBe(1)
       expect(readdirSync(root)).toEqual(['tk-open'])
     } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+})
+
+// The cadence of the loop, measured live 2026-11-09 (#303): a 30 s timer entered 7 ticks in 6.6 h. Every beat
+// fired, found `ticking === true`, and folded itself into `again` in silence. The pass was parked in
+// `await executor.idle()` — the launch queue's tail, which waits for a free worker slot — and a fleet at its
+// cap frees one only when the fleet goes quiet. These three pin the fix: the pass never waits on capacity, a
+// pass that stops moving says where, and a pass that never finishes is given up on.
+describe('the tick keeps its cadence', () => {
+  /** A tick that parks must fail here with a reason, not in the test runner's timeout. */
+  const withDeadline = async (p: Promise<void>, ms: number, what: string): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what}: the pass did not finish in ${ms}ms`)), ms)
+      timer.unref?.()
+    })
+    try { await Promise.race([p, expired]) } finally { clearTimeout(timer) }
+  }
+  const trailOf = (dir: string) => readFileSync(join(dir, 'engine.log'), 'utf8')
+  const healthOf = (dir: string) => readFileSync(join(dir, 'health.json'), 'utf8')
+
+  const gatedGithub = (gate: Promise<void>, open: () => void): GithubApi => ({
+    issues: async () => { open(); await gate; return [] },
+    comments: async () => [] as IssueComment[],
+    postComment: async () => {},
+  })
+
+  it('a fleet at its cap keeps the loop running: a pass never waits for a worker slot', async () => {
+    const f = fixture(true, undefined, undefined, undefined, { tickMs: 5, maxConcurrent: 1, launchDrainMs: 20 })
+    // Three accepted tickets against one slot: the first holds it (in-process workers emit no events, so it is
+    // busy for the life of the process), the other two queue behind it. That is the live shape, in miniature.
+    for (const issue of ['501', '502', '503']) {
+      f.addComment(issue, 'octocat', `do the thing ${issue}`)
+      await f.running.tick()
+      f.decide('accept')
+      await f.running.tick()
+    }
+    expect(f.workers).toHaveLength(1)
+    expect(f.running.load().queued, 'the other two are waiting for a slot').toBe(2)
+
+    for (let pass = 0; pass < 5; pass++) await withDeadline(f.running.tick(), 2_000, 'a pass with launches queued')
+    const trail = trailOf(f.dir)
+    expect((trail.match(/ tick n=/g) ?? []).length, 'the loop was entered every time').toBeGreaterThanOrEqual(5)
+    expect(trail, 'and the pass says the queue is still waiting, not that it drained').toMatch(/launchPending=1 drained=false/)
+    expect(f.workers.length, 'queued launches stay queued, they are not dropped').toBe(1)
+
+    const health = JSON.parse(healthOf(f.dir)) as { tick: { state: string; intervalMs: number } }
+    expect(health.tick.state, 'a saturated fleet is not a stalled router').toBe('ok')
+  })
+
+  it('a pass that stops moving names its stage, in the log and in health.json', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let polls = 0
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, tickStallMs: 40, tickStallReportMs: 10, tickAbandonMs: 600_000, githubApi: gatedGithub(gate, () => { polls += 1 }) })
+    await until(() => (trailOf(f.dir).match(/tick\.stalled/g) ?? []).length >= 2)
+    const trail = trailOf(f.dir)
+    expect(trail).toMatch(/tick\.stalled stage=poll stageMs=\d+ runningMs=\d+ intervalMs=5 stallMs=40/)
+    expect(polls, 'the parked pass holds the poll: the guard is why a second one never starts').toBe(1)
+    expect((trail.match(/tick\.stalled/g) ?? []).length, 'the timer kept firing, and said so twice').toBeGreaterThanOrEqual(2)
+
+    // Read it before the pass lands: health.json is the file a person reaches when the pane is the wedged thing.
+    const health = JSON.parse(healthOf(f.dir)) as { tick: { state: string; stage: string; detail: string; launchPending: number } }
+    expect(health.tick.state, 'a stalled tick is an error, which is what the health check counts').toBe('error')
+    expect(health.tick.stage).toBe('poll')
+    expect(health.tick.detail).toContain('stalled in poll')
+    // The contract `superagent status` reads: one "state": "error", and the file's first 200 characters carry it.
+    expect(healthOf(f.dir)).toContain('"state": "error"')
+    expect(healthOf(f.dir).replace(/\n/g, '').slice(0, 200)).toContain('stalled in poll')
+
+    release()
+    await until(() => (JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state === 'ok')
+    expect(healthOf(f.dir), 'a pass that finishes clears the alarm').not.toContain('"state": "error"')
+  })
+
+  it('a pass that never finishes is abandoned, and the beat survives it', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let polls = 0
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, tickStallMs: 30, tickAbandonMs: 90, githubApi: gatedGithub(gate, () => { polls += 1 }) })
+    await until(() => trailOf(f.dir).includes('tick.abandoned'))
+    expect(polls, 'the pass that replaced the abandoned one reached the poll too').toBeGreaterThanOrEqual(2)
+    release()
+    // The abandoned pass lands and says where; the loop is on its own beat by then, and finishes passes.
+    await until(() => trailOf(f.dir).includes('tick.late_finish'))
+    const trail = trailOf(f.dir)
+    expect(trail, 'the abandoned pass names the stage it was parked in').toMatch(/tick\.abandoned stage=poll/)
+    expect(trail, 'and reports when it finally lands, without claiming the live pass').toMatch(/tick\.late_finish runningMs=\d+ supersededBy=\d+/)
+    expect((trail.match(/ tick n=/g) ?? []).length, 'the loop is finishing passes again, not mourning the parked one').toBeGreaterThanOrEqual(2)
+    // One abandoned pass, not one per beat: the guard moved to the new pass, whose clock started fresh.
+    expect((trailOf(f.dir).match(/tick\.abandoned/g) ?? []).length).toBe(1)
   })
 })

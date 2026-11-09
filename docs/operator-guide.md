@@ -132,6 +132,16 @@ repositories every two minutes.
 **Status exits 2.** Read `~/.pi/superagent/health.json` to identify the failing component. For a
 GitHub source error, check `gh auth status`. The next successful poll clears the error.
 
+**Status exits 2 and `health.json` names a `tick`.** The loop is not beating: a pass has been running longer
+than `PI_SUPERAGENT_TICK_STALL_MS`, and `tick.stage` names where it is parked (`poll`, `reconcile`,
+`recovery`, `drain`). `engine.log` repeats it as `tick.stalled`, with the stage's own time, and a pass that
+never finishes is given up on (`tick.abandoned`) so the loop keeps its beat. The line `tick n=…` is the
+liveness line: its `gapMs` is the time since the last pass finished, read against `PI_SUPERAGENT_TICK_MS`.
+
+**The board is busy and nothing starts.** `tick n=…` carries `launchPending` (launches waiting for a free
+worker slot) and `open`/`running`/`parked`. Waiting launches are the queue doing its job, not a stall; the
+router no longer waits a pass on them.
+
 **Status exits 3.** Read `~/.pi/superagent/setup.json` for the missing prerequisite and its location.
 
 **A worker looks stuck.** Open its herdr tab to inspect the current command. Type a message to steer
