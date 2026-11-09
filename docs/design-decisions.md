@@ -30,10 +30,17 @@ label comes off. A finished ticket then closes its issue, because intake hears o
 `ready` report with no pull request leaves nothing to wait on. A person's comment, or a reopen,
 still starts the work: that is new inbound speech, and the only thing that is.
 
-**Stop a ticket that repeats itself.** The Nth report of the same conclusion recruits a worker that
-can only report it again, so at `PI_SUPERAGENT_REPORT_CAP` (3) the ticket says so on itself and
-stops recruiting. The count is the router's journal: an Assignment keeps its last report, so the 93
-receipts of one worker session are one report in the ticket.
+**Stop a ticket that repeats itself.** The Nth report that lands with nothing new on the thread recruits
+a worker that can only report it again, so at `PI_SUPERAGENT_REPORT_CAP` (3) the ticket says so on itself
+and stops recruiting. The signature is the quiet thread, not the sentence: #255 wrote “Nothing to merge:
+this pull request landed…”, then “The mandate is already satisfied…”, then “Close this ticket: its pull
+request merged…”, and #227 wrote “eighty-sixth identical dispatch”, “Still waiting on one click”,
+“Resumed run: state is unchanged” — a fingerprint over the wording matches none of it, and their states
+flipped between `ready` and `blocked`. So the streak is the same report state with no new inbound speech
+between the reports, where the router's own receipt and the intake label are not speech. A person's
+comment, or a report that changed state, restarts the count. The journal is the router's, not the
+aggregate's: an Assignment keeps its last report, so the 93 receipts of one worker session are one
+report in the ticket.
 
 **Save later read positions after delivery.** A poll stages its read position for the next poll to
 commit. If the router crashes after reading a comment but before the engine receives it, the old
