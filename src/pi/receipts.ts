@@ -11,6 +11,14 @@ export interface ReportedRun {
 
 const STILL_OPEN = 'The worker is still open: reply here to steer it, or close the issue to drop the ticket.'
 const IN_REVIEW = 'This ticket stays open until the pull request is merged or closed; comments and reviews on it go to the worker.'
+/**
+ * The terminal end, said out loud. A `ready` report with no pull request ends the ticket in the engine and
+ * left nothing to read on the issue: no merge to wait for, no door closed, so the board kept asking (measured
+ * 2026-11-09, #255 dispatched four workers after its merge). The router closes the issue with these words;
+ * `superagent restart` is not a door, and neither is a label that stays on.
+ */
+const FINISHED = 'This ticket ends with the report: no pull request is open on it, so nothing runs it now, and this issue closes with it. '
+  + 'A comment on the closed issue, or reopening it, starts the work again; nothing else does.'
 
 export function receiptText(thread: string, origin: ReportOrigin, run: ReportedRun, relaunched = false): string {
   const head = `${thread} ${run.state}: ${run.summary}`
@@ -29,6 +37,7 @@ export function receiptText(thread: string, origin: ReportOrigin, run: ReportedR
         return `${head}${pulls}\n\n${run.question ? `**Question:** ${run.question}\n\n` : ''}Reply here; the worker reads every comment.`
       }
       if (run.state === 'failed') return `${head}${pulls}\n\n${STILL_OPEN}`
+      if (run.state === 'ready' && !pulls) return `${head}\n\n${FINISHED}`
       return run.state === 'ready' && pulls ? `${head}${pulls}\n\n${IN_REVIEW}` : `${head}${pulls}`
     }
   }
@@ -46,4 +55,19 @@ export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; 
   if (!closed.length) return `${thread} merged: ${urls(merged)}. This ticket is done.`
   if (!merged.length) return `${thread}: ${urls(closed)} closed without merging, so this ticket ends. A comment here starts the work again.`
   return `${thread}: ${urls(merged)} merged and ${urls(closed)} closed without merging, so this ticket ends with the work that landed. A comment here starts the work again.`
+}
+
+/**
+ * The same conclusion, twice over. A worker that re-proves a finished job reports the same sentence, and the
+ * count in it is the only thing that changes: "merge PR 69, twelfth time asking" and "merge PR 69, thirteenth
+ * time asking" (measured on #227, 93 receipts in 20 hours) are one conclusion. Numbers, digits and the English
+ * words for them come out, the rest is the fingerprint.
+ */
+export function conclusionOf(state: string, summary: string): string {
+  const words = summary.toLowerCase()
+    .replace(/\d+[a-z]*/g, ' # ')
+    .replace(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|hundredth)\b/g, ' # ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return `${state}:${words.slice(0, 200)}`
 }

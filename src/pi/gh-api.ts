@@ -179,6 +179,21 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       const rows = JSON.parse((await call(['api', `repos/${repo ?? options.repo}/issues/${issue}/comments?per_page=100&sort=created&direction=desc`])) || '[]') as CommentRow[]
       return rows.map(r => ({ issue, author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
     },
+
+    // GitHub answers 404/422 for a label that is not on the issue, which is the state the caller wanted: not a
+    // failure. A permission answer is, and the source logs it and keeps the grant journal as the guard.
+    async removeLabel(issue, label) {
+      try { await call(['api', '-X', 'DELETE', `repos/${options.repo}/issues/${issue}/labels/${encodeURIComponent(label)}`]) }
+      catch (error) {
+        if (/HTTP 404|HTTP 422|not found|does not exist/i.test(String(error))) return
+        throw error
+      }
+    },
+
+    // Idempotent at GitHub: closing a closed issue answers with the closed issue.
+    async closeIssue(issue) {
+      await call(['api', '-X', 'PATCH', `repos/${options.repo}/issues/${issue}`, '-f', 'state=closed'])
+    },
   }
 }
 

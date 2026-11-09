@@ -78,11 +78,22 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
                    judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [] }
+  const closes: number[] = []
+  const spent: Array<{ issue: number; label: string }> = []
+  // One ordered log of the writes to GitHub, so a test can pin the order a person reads the thread in.
+  const calls: string[] = []
   const api: GithubApi = options.githubApi ?? {
     // The fakes deliver everything and let the source's own rules do the filtering, as server.spec does.
     issues: async () => [...feed.issues],
     comments: async () => [...feed.comments],
-    postComment: async (issue, body, repo) => { feed.posts.push({ issue, body, ...(repo ? { repo } : {}) }) },
+    postComment: async (issue, body, repo) => { calls.push(`post:${issue}`); feed.posts.push({ issue, body, ...(repo ? { repo } : {}) }) },
+    closeIssue: async issue => { calls.push(`close:${issue}`); closes.push(issue) },
+    // As GitHub does: the write moves the label out of the issue, so the router has no reason to write it again.
+    removeLabel: async (issue, label) => {
+      spent.push({ issue, label })
+      const row = feed.issues.find(i => i.issue === issue)
+      if (row) row.labels = row.labels.filter(l => l !== label)
+    },
   }
   const addComment = (n: string, author: string, body: string, at = '2026-11-05T09:00:00Z', association = 'OWNER') => {
     if (!feed.issues.some(i => String(i.issue) === n)) feed.issues.push({
@@ -134,7 +145,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     invoke0(pi, 'ticket_decide', { evalId, kind, reason: kind === 'accept' ? 'the operator asked' : 'not a request', title: 'Ship tonight', scope: 'the named change', acknowledgement: 'on it' })
   }
   const settleJudge = () => { for (const l of judgeListeners) l({ type: 'agent_settled' }) }
-  return { dir, feed, addComment, receipts, config, pi, running, workers, judge, judgeSessions, loaders, settleJudge, sdk, accept, decide }
+  return { dir, feed, addComment, receipts, config, pi, running, workers, judge, judgeSessions, loaders, settleJudge, sdk, accept, decide, closes, spent, calls }
 }
 
 describe('the router extension', () => {
@@ -747,8 +758,10 @@ describe('a pull request per ticket', () => {
         states.set(`${repo}#${n}`, { open: false, merged, createdAt: created, closedAt }),
     }
   }
-  async function working(f: ReturnType<typeof fixture>, issue: string) {
-    f.addComment(issue, 'octocat', 'rename the Export button to Ship')
+  /** The router's writes to one issue, in the order GitHub received them. */
+  const callsOf = (f: ReturnType<typeof fixture>, issue: string) => f.calls.filter(c => c.endsWith(`:${issue}`))
+
+  async function working(f: ReturnType<typeof fixture>, issue: string) {    f.addComment(issue, 'octocat', 'rename the Export button to Ship')
     await f.running.tick()
     await settle()
     f.decide('accept')
@@ -840,6 +853,117 @@ describe('a pull request per ticket', () => {
     await f.running.tick()
     expect(ticket().ended).toMatchObject({ outcome: 'completed' })
     expect(f.receipts('493')).not.toContain('Pull request')
+  })
+
+  it('a finished report with no pull request closes the issue: the ticket has a terminal end', async () => {
+    // Issue #309: a ready report ended the ticket inside the engine and left the issue open on GitHub, where
+    // intake hears an open labelled issue forever. Measured 2026-11-09: #255 was dispatched a fourth time nine
+    // hours after its merge landed. The close is what makes the end terminal for the front door.
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pullsFake().api })
+    const ticket = await working(f, '500')
+    f.workers[0]!.report!({ state: 'ready', summary: 'the staging keys rotate on Fridays' })
+    await f.running.tick()
+    expect(ticket().ended).toMatchObject({ outcome: 'completed' })
+    expect(f.receipts('500')).toMatch(/ends with the report[\s\S]*nothing runs it now/)
+    expect(f.closes, 'the issue leaves intake\'s hearing').toEqual([500])
+    expect(callsOf(f, '500').at(-1), 'the receipt is on the thread before the door closes').toBe('close:500')
+    expect(callsOf(f, '500').slice(0, -1).every(c => c === 'post:500'), callsOf(f, '500').join(',')).toBe(true)
+    await f.running.tick()
+    expect(f.closes, 'and it is closed once, not once per poll').toEqual([500])
+  })
+
+  it('a ticket waiting on an open pull request keeps its issue open, and closes it when the work lands', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '501')
+    pulls.open('o/r', 91)
+    f.workers[0]!.report!({ state: 'ready', summary: 'renamed it', pullRequests: ['https://github.com/o/r/pull/91'] })
+    await f.running.tick()
+    await f.running.tick()
+    expect(ticket().ended, 'the merge is owed').toBeUndefined()
+    expect(f.closes, 'so the ticket is not finished, and nothing closes').toEqual([])
+    // GitHub closes the issue it names in the merge; an ask board whose issue the pull request did not name
+    // stays open, which is the open-ended ticket #309 is about.
+    pulls.end('o/r', 91, true)
+    f.feed.issues.splice(f.feed.issues.findIndex(i => i.issue === 501), 1)
+    await f.running.tick()
+    expect(ticket().ended).toMatchObject({ outcome: 'merged' })
+    await f.running.tick()
+    expect(f.closes).toEqual([501])
+  })
+
+  it('the same conclusion reported three times stops the ticket and says so on it', async () => {
+    // #227 reported the same sentence 93 times in 20 hours, each report a fresh session's work on a thread the
+    // router had itself written on. The third identical conclusion is the last one, and the ticket says so.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '503')
+    pulls.open('o/r', 12)
+    const said = (count: string) => f.workers[0]!.report!({
+      state: 'ready', summary: `merge pull request 12 to close this ticket, ${count} time asking`,
+      pullRequests: ['https://github.com/o/r/pull/12'],
+    })
+    said('first')
+    await f.running.tick()
+    said('second')
+    await f.running.tick()
+    expect(ticket().ended, 'a ticket waiting on a merge stays open').toBeUndefined()
+    expect(f.receipts('503'), 'two reports are not yet a loop').not.toMatch(/reported \d+ times/)
+    said('third')
+    await f.running.tick()
+    expect(f.receipts('503')).toMatch(/the same result has been reported 3 times[\s\S]*no further session runs this ticket/)
+    expect(ticket().ended, 'it stops recruiting sessions').toMatchObject({ outcome: 'stopped' })
+    expect(f.workers.length).toBe(1)
+    expect(f.closes, 'a stop the router made leaves the issue to a person').toEqual([])
+  })
+
+  it('a report that changes the answer restarts the count', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '504')
+    pulls.open('o/r', 13)
+    const said = (count: string) => f.workers[0]!.report!({
+      state: 'ready', summary: `merge pull request 13 to close this ticket, ${count} time asking`,
+      pullRequests: ['https://github.com/o/r/pull/13'],
+    })
+    said('first')
+    await f.running.tick()
+    said('second')
+    await f.running.tick()
+    f.workers[0]!.report!({ state: 'blocked', summary: 'the release window moved to Friday', question: 'Deploy without it?' })
+    await f.running.tick()
+    said('third')
+    await f.running.tick()
+    expect(f.receipts('504'), 'the streak was broken by a report that said something new').not.toMatch(/reported \d+ times/)
+    expect(ticket().ended, 'the ticket is still the worker\'s to finish').toBeUndefined()
+  })
+
+  it('the intake label asks once: its grant is spent, and the router\'s own receipt recruits no second worker', async () => {
+    const at = new Date(Date.now() - 60_000).toISOString()
+    const issues: IssueState[] = []
+    const f = fixture(true, undefined, undefined, undefined, { issues, pullApi: pullsFake().api })
+    await f.running.tick()
+    // Intake's shape: the issue is authored by the engine's own account and carries `agent-requested`, which is
+    // what carries the authorization. The seed has already run, so the label path is the one that fires.
+    issues.push({ issue: 505, title: 'DO: merge pi-superagent pull request 6', body: 'Merge it.', labels: ['agent-requested'],
+      author: 'pi-superagent', association: 'OWNER', createdAt: at, updatedAt: at })
+    await f.running.tick()
+    await settle()
+    expect(f.judge.prompts.join('\n')).toContain('merge pi-superagent pull request 6')
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    expect(f.spent, 'the grant leaves the issue with the request').toEqual([{ issue: 505, label: 'agent-requested' }])
+
+    // The router's receipt lands on the issue, and GitHub moves the issue's update time when a comment lands.
+    // That moved time used to mint a new request id and recruit a second worker (measured: four, nine hours
+    // after the merge). Intake hears the grant once, so it mints nothing.
+    issues[0]!.labels = []
+    issues[0]!.updatedAt = new Date().toISOString()
+    await f.running.tick()
+    await f.running.tick()
+    expect(f.workers.length, 'the router\'s own speech is not the operator asking again').toBe(1)
+    expect(f.judge.prompts.filter(p => p.includes('merge pi-superagent pull request 6')).length).toBe(1)
   })
 
   it('a reference that is not a pull request URL holds nothing open', async () => {

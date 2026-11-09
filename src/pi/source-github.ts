@@ -35,6 +35,10 @@ export interface GithubApi {
   pullsOpen?(): Promise<number[]>
   /** Submitted reviews (approve / request changes) with ids above the cursor, oldest first. */
   reviews?(sinceId: number): Promise<PrReview[]>
+  /** Takes a label off an issue. The router uses it to spend the intake grant it has just heard. */
+  removeLabel?(issue: number, label: string): Promise<void>
+  /** Closes an issue: the terminal end of a ticket that finished with nothing left to wait on. */
+  closeIssue?(issue: number): Promise<void>
 }
 
 export interface PrReview {
@@ -57,6 +61,8 @@ export interface GithubSourceOptions {
   selfMarker?: string
   /** Label that turns an already-seen issue into a request; `superagent intake` puts it there. */
   requestLabel?: string
+  /** Says so when a label the router has spent cannot be taken off the issue. */
+  onWarn?: (event: string, fields: Record<string, unknown>) => void
 }
 
 export const REQUEST_LABEL = 'agent-requested'
@@ -66,6 +72,15 @@ const sinceKey = (repo: string) => `source:github:${repo}:since`
 const groupRows = <T,>(rows: readonly T[], key: (row: T) => string): Map<string, T[]> =>
   rows.reduce((map, row) => map.set(key(row), [...map.get(key(row)) ?? [], row]), new Map<string, T[]>())
 const issuesKey = (repo: string) => `source:github:${repo}:issues`
+/**
+ * Which `agent-requested` grants this router has already taken, as issue keys (`#255`). The label is intake
+ * handing one issue over — an act, not a state — so it asks once. Without this journal the label path is a
+ * standing order: the trigger id carries `updatedAt`, GitHub moves `updatedAt` when a comment lands, and the
+ * router's own receipt is a comment, so every receipt re-asked for the whole labelled backlog. Measured
+ * 2026-11-09 on matzen_adobe/superagent-board-spike: 26-31 label triggers in a burst, every completed tick,
+ * #255 waking to a fourth worker hours after its work merged, #227 posting its 93rd receipt.
+ */
+const grantsKey = (repo: string) => `source:github:${repo}:label-grants`
 const reviewsKey = (repo: string) => `source:github:${repo}:reviews`
 /** Where a source persists its read positions (the SQLite kv table in practice). */
 export interface PositionStore {
@@ -87,6 +102,10 @@ export class GithubSource {
    *  produced are in the engine — commit-at-emit + crash = cursor past a request never accepted. */
   private staged: Array<[string, unknown]> = []
   private lastOpen: ReadonlySet<string> | undefined
+  /** Issues to take the intake label off, staged with the positions so a crash re-fires, never drops. */
+  private spending: number[] = []
+  /** Issues whose label write has already been complained about: a token without rights fails every poll. */
+  private readonly labelWarned = new Set<number>()
 
   constructor(private readonly api: GithubApi, private readonly options: GithubSourceOptions,
               private readonly store: PositionStore, private readonly now: () => number = () => Date.now()) {}
@@ -104,6 +123,23 @@ export class GithubSource {
   async poll(): Promise<Trigger[]> {
     for (const [key, value] of this.staged) this.store.set(key, value)
     this.staged = []
+    // Spend the grant the previous poll heard, at the same deferral point as the positions: the engine has its
+    // trigger, so taking the label off now cannot lose a mandate. A removal that fails (a token without label
+    // rights) costs the label's visibility on GitHub only — the grant journal above is what stops the re-ask.
+    const spending = this.spending
+    this.spending = []
+    for (const issue of spending) {
+      try {
+        await this.api.removeLabel?.(issue, this.options.requestLabel ?? REQUEST_LABEL)
+        this.labelWarned.delete(issue)
+      } catch (error) {
+        // Said once per issue, retried every poll: a router that spent a grant it cannot take off leaves the
+        // label sitting on the issue, and the journal is what keeps that quiet from becoming a re-dispatch.
+        if (this.labelWarned.has(issue)) continue
+        this.labelWarned.add(issue)
+        this.options.onWarn?.('intake.label_failed', { issue: `#${issue}`, error: String(error).slice(0, 200) })
+      }
+    }
     return [...(await this.issueTriggers()), ...(await this.commentTriggers()), ...(await this.reviewTriggers())]
   }
 
@@ -136,6 +172,7 @@ export class GithubSource {
       if (open.length > 0) return []
     }
     const out: Trigger[] = []
+    const grants = new Set(this.store.get<string[]>(grantsKey(this.options.repo)) ?? [])
     const openKeys = new Set(open.map(i => `#${i.issue}`))
     // A closed issue leaves the seen set, so reopening it fires afresh: closing, then reopening, is a person saying go again.
     for (const key of [...seen]) if (!openKeys.has(key)) seen.delete(key)
@@ -152,12 +189,35 @@ export class GithubSource {
         // history and no worker ever took them. `superagent intake` labels them using the operator's
         // credentials, so the label carries the authorization and the author guard must not: every one of those
         // issues is authored by the engine's own account, and labelling needs write access to the repository.
+        //
+        // And it carries it once. The grant journal is what makes `intake` one ask per label: the label leaves
+        // the issue with the request, so the router's own receipt on that issue cannot be read as the operator
+        // asking again. Re-labelling is the way to ask a second time, and it works — the journal entry goes
+        // away with the label.
+        if (grants.has(key)) {
+          // The ask is spent. Ask GitHub once more to take the label off: a router that died between writing
+          // the journal and making the write would otherwise leave the label on the issue forever, and a label
+          // on an issue is how the board says "ask". An issue whose write keeps failing (a token without label
+          // rights) is tried once per process, not once per poll: 76 labelled issues is 76 calls a poll.
+          if (!this.spending.includes(issue.issue) && !this.labelWarned.has(issue.issue)) this.spending.push(issue.issue)
+          continue
+        }
+        grants.add(key)
+        this.spending.push(issue.issue)
         out.push(this.requestTrigger(issue, 'label', key))
       }
+    }
+    // A grant is spent while the label sits on the issue, and is handed back when the label comes off: taking
+    // it off is the board asking again, and the router takes the label off itself after each ask, so a spent
+    // grant never outlives the label that granted it.
+    if (this.options.requestLabel) {
+      const labelled = new Set(open.filter(i => i.labels.includes(this.options.requestLabel!)).map(i => `#${i.issue}`))
+      for (const key of [...grants]) if (!labelled.has(key)) grants.delete(key)
     }
     // The cap is a decision, not an accident: past 4000 open issues the oldest key is forgotten, and an issue
     // still open that far back fires once more as a request. The watched repository has tens, not thousands.
     this.staged.push([issuesKey(this.options.repo), [...seen].slice(-4000)])
+    this.staged.push([grantsKey(this.options.repo), [...grants].slice(-4000)])
     return out
   }
 
