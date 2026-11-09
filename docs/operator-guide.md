@@ -41,6 +41,15 @@ two minutes. An answer, investigation or operation can finish with the worker’
 A comment or submitted review on a PR without a ticket goes to the judge. The router replies in
 that PR’s conversation.
 
+A ticket that is waiting on your decision is quiet on purpose. Once its report is *ready* or
+*blocked* on a PR, the router re-reads that PR (state, head, comments) and the last person who
+answered the issue before it starts another worker. When neither has moved it starts nothing and
+logs `dispatch.stale` — your last receipt is still the truth. To run the ticket again anyway,
+comment on the issue; an answer is a change, and so is a push, a comment on the PR, a submitted
+review, a merge. Every settled ticket also gets one worker a day regardless
+(`PI_SUPERAGENT_FRESHNESS_REDISPATCH_HOURS`), and a PR the router cannot read is never a reason to
+withhold work: that says `dispatch.freshness_unreadable`, once per ticket, and starts the worker.
+
 ### Choose the GitHub accounts
 
 Workers open PRs as the account signed in through the local `gh` CLI. Blocking `gh` with
@@ -208,7 +217,8 @@ by one for each request it dropped this way.
 
 **A ticket stays open after a ready report.** Look for `review of #N` on the panel. Merge or close
 that PR to finish the ticket. The router checks the watched repository on each poll and other
-repositories every two minutes.
+repositories every two minutes. While it waits, nothing new runs on that ticket: `grep dispatch.stale
+~/.pi/superagent/engine.log | tail` names the ticket and the PR it is being held on.
 
 **Status exits 2.** Read `~/.pi/superagent/health.json` to identify the failing component. For a
 GitHub source error, check `gh auth status`. The next successful poll clears the error.

@@ -64,6 +64,10 @@ as where the shortcut is defined. For that, an answer on the issue can finish th
   work finishes with no PR to wait on — an answer, an operation — the router closes the issue too,
   because an open issue is a request the router hears again. Commenting on a closed issue starts the
   work again.
+- **Nothing re-runs a ticket while you decide.** Once its report is ready or blocked on a PR, the
+  router re-reads that PR and the issue before starting a worker, and starts none when neither has
+  moved — the last receipt is the current state. `dispatch.stale` in the engine log is that call.
+  Comment on the issue to run it anyway; a settled ticket also gets one worker a day regardless.
 - **In herdr**, open the tab with the issue number to see the worker’s commands and output. The
   **engine log** tab shows what the router picked up and which requests it accepted.
 - **In the local panel**, look under *Needs a person* to see who’s waiting for an answer. You can

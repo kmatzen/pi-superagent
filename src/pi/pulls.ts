@@ -11,6 +11,12 @@ export interface PullState {
   merged: boolean
   createdAt: string
   closedAt?: string
+  /** The head commit a review would be about: the same head is the same work. */
+  headSha?: string
+  /** Comments people left on it: the conversation count, inline review comments included. */
+  comments?: number
+  /** GitHub's own last-touch stamp, which a submitted review moves. */
+  updatedAt?: string
 }
 
 export interface PullApi {

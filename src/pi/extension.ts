@@ -7,12 +7,13 @@ import { promisify } from 'node:util'
 
 const runGit = promisify(execFile)
 import { join, resolve } from 'node:path'
-import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
+import { Engine, latestReport, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
 import {GithubSource, REPLY_MARKER, type GithubApi, REQUEST_LABEL} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type ReconcileReport } from './pulls.ts'
+import { FreshnessGate } from './freshness.ts'
 import { CommentOutbox } from './outbox.ts'
 import { PiExecutor } from './executor.ts'
 import { renderCandidateFor, SessionAssessor, type SessionPilot } from './assessor.ts'
@@ -70,6 +71,10 @@ export interface ExtensionDeps {
   pullApi?: PullApi
   /** Tests read worker files and check worker liveness in milliseconds, not seconds. */
   workerTiming?: { pollMs?: number; livenessMs?: number }
+  /** Tests set the freshness gate's read window to zero so one tick is one read; production leaves it alone. */
+  freshnessTiming?: { memoMs?: number }
+  /** Tests read a followed pull request every pass instead of every 120 s; production leaves it alone. */
+  pullTiming?: { everyMs?: number }
 }
 
 export interface RunningRouter {
@@ -236,12 +241,48 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const assessor: SessionAssessor = new SessionAssessor(() => engine, pilot, { render: renderCandidateFor(cfg.githubRepo) })
   // The engine calls its executor from inside its commands. Each call runs once the command has committed,
   // so a worker never acts on a write that could still roll back.
-  const afterCommit = (what: string, run: () => void): void => {
+  const afterCommit = (what: string, run: () => void | Promise<void>): void => {
     setImmediate(() => {
-      try { run() } catch (error) { log.line('error', 'executor.port_failed', { what, error: String(error).slice(0, 200) }) }
+      // A gate that reads GitHub is a promise: a rejection here must cost a dispatch, never the whole pass.
+      try { Promise.resolve(run()).catch(error => log.line('error', 'executor.port_failed', { what, error: String(error).slice(0, 200) })) }
+      catch (error) { log.line('error', 'executor.port_failed', { what, error: String(error).slice(0, 200) }) }
     })
   }
   const policy = (): Policy => ({ ...policyOf(cfg), ...(paused ? { paused: true } : {}) })
+
+  const home = cfg.githubRepo ?? ''
+  const pullApi = deps.pullApi ?? ghPulls(accounts.pulls)
+  /**
+   * The pre-dispatch freshness gate (#311): a ticket whose last receipt is `ready`/`blocked` on a pull request it
+   * opened gets two reads before it gets a session. Measured on the live router 2026-11-09: `#213` ran seven
+   * workers in 15 hours and `#289` thirteen, each woken by an intake trigger whose only novelty was the
+   * `updated_at` the router's own receipt had just written on the issue, with the pull request unreviewed at the
+   * same head and nobody answering the ask.
+   */
+  const freshness = new FreshnessGate({
+    home,
+    api: {
+      pull: (repo, number) => pullApi.pull(repo, number),
+      // The watched repository answers its own threads; a pull request in another answers its own comments.
+      comments: async (issue, repo) => !repo || repo.toLowerCase() === home.toLowerCase()
+        ? await githubApi?.commentsFor?.(issue, repo) ?? []
+        : await pullApi.comments(repo, issue),
+    },
+    positions: repos.kv, self: cfg.githubSelf ?? cfg.self, bots: cfg.bots,
+    warn: (event, fields) => log.line('warn', event, fields),
+    now: () => Date.parse((deps.now ?? (() => new Date().toISOString()))()),
+    ...(deps.freshnessTiming?.memoMs === undefined ? {} : { memoMs: deps.freshnessTiming.memoMs }),
+    ...(cfg.freshnessRedispatchHours ? { redispatchHours: cfg.freshnessRedispatchHours } : {}),
+  })
+  /** Whether to hold this dispatch, said in the log so a quiet ticket has a reason a person can read. */
+  const staleDispatch = async (ticket: Ticket, via: string): Promise<boolean> => {
+    if (!(await freshness.stale(ticket))) return false
+    log.line('info', 'dispatch.stale', {
+      ticket: ticket.id, thread: ticket.channels[0]?.thread ?? ticket.id, via,
+      state: latestReport(ticket)?.state, pulls: freshness.urls(ticket).join(','),
+    })
+    return true
+  }
 
   engine = new Engine({
     repo: repos,
@@ -249,11 +290,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     policy,
     assessor,
     executor: {
-      start: (ticket, assignment) => afterCommit('start', () => {
+      start: (ticket, assignment) => afterCommit('start', async () => {
         // A poll can launch the assignment before this callback, and a crash can already have replaced it.
         const fresh = repos.tickets.get(ticket.id)
         const latest = fresh?.assignments.at(-1)
-        if (fresh && !fresh.ended && latest?.id === assignment.id && latest.state === 'pending') executorRef?.start(fresh, latest)
+        if (!fresh || !latest || fresh.ended || latest.id !== assignment.id || latest.state !== 'pending') return
+        // Withheld, not dropped: the Assignment stays pending, the Inputs stay queued, and the first move on the
+        // pull request or a new answer on the ask starts it on a later pass.
+        if (await staleDispatch(fresh, 'engine')) return
+        executorRef?.start(fresh, latest)
       }),
       deliver: (ticket, assignment) => afterCommit('deliver', () => {
         const fresh = repos.tickets.get(ticket.id)
@@ -318,11 +363,18 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     pullEnded(ticket.id)
     // The report the person reads has gone out; these two bound what a finished ticket can do next.
     if (origin === 'worker') capRepeats(repos.tickets.get(ticket.id) ?? ticket, run)
+    // A settled report writes the freshness baseline down at the moment it lands, so the FIRST dispatch that
+    // repeats it is the withheld one. Measured 2026-11-09: #213's three sessions in 25 minutes and #289's
+    // thirteen were runs 2 and onward — a ticket whose receipt says "the pull request waits for a merge", with
+    // that pull request untouched and nobody answering, is in the state its own receipt reported.
+    if (origin === 'worker' && (awaitsAHuman(run.state) || run.state === 'ready')) {
+      // Synchronous on purpose: `note` registers the baseline it is about to read before it awaits anything, so a
+      // pass that lands in this same tick measures itself against this report and not against a missing record.
+      const settled = repos.tickets.get(ticket.id)
+      if (settled && !settled.ended) void freshness.note(settled)
+    }
     finishIssue(ticket.id)
   }
-  const home = cfg.githubRepo ?? ''
-  const pullApi = deps.pullApi ?? ghPulls(accounts.pulls)
-
   /**
    * The terminal end of a ticket that finished with nothing to wait on: its issue closes with it. A `ready`
    * report that opens no pull request ends the ticket inside the engine and left the issue open and labelled,
@@ -467,6 +519,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // cadence (measured 2026-11-09: 41 follows due at once, 12.1 s per pass).
     ...(cfg.pullReadsPerTick === undefined ? {} : { maxReads: cfg.pullReadsPerTick }),
     ...(cfg.pullReadBudgetMs === undefined ? {} : { budgetMs: cfg.pullReadBudgetMs }),
+    ...(deps.pullTiming?.everyMs === undefined ? {} : { everyMs: deps.pullTiming.everyMs }),
     receive: trigger => { engine.receive(trigger) },
     warn: (event, fields) => log.line('warn', event, fields),
     closed: (thread, pull, outcome, at) => {
@@ -780,11 +833,17 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     enter('launch')
     for (const ticket of repos.tickets.open()) {
       const assignment = ticket.assignments.at(-1)
-      if (assignment && assignment.state === 'pending') executor.start(ticket, assignment)
+      if (assignment && assignment.state === 'pending') {
+        if (!(await staleDispatch(ticket, 'poll'))) executor.start(ticket, assignment)
+      }
       // The answer to a released worker is the request that starts the next one (formal/Ticket.tla R2): wake
       // appends the fresh Assignment and the resumed marker, and the next poll launches it.
       else if (assignment && assignment.state === 'ended' && assignment.endedReason === 'released'
-        && ticket.undelivered.length && !executor.workers().some(w => w.ticketId === ticket.id)) engine.wake(ticket.id)
+        && ticket.undelivered.length && !executor.workers().some(w => w.ticketId === ticket.id)) {
+        // Asked and not answered, delivered and not moved: the ask is still what the last receipt said it was, so
+        // this pass does not wake it, and the Inputs wait where they are.
+        if (!(await staleDispatch(ticket, 'wake'))) engine.wake(ticket.id)
+      }
     }
     // A worker quiet for 15 minutes gets a question on the panel, not the issue: a long build is not news.
     for (const quiet of executor.quiet(cfg.workerQuietMinutes ?? 15)) {
@@ -1217,6 +1276,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const workerQuietMinutes = positiveNumber('PI_SUPERAGENT_WORKER_QUIET_MINUTES', env.PI_SUPERAGENT_WORKER_QUIET_MINUTES)
   const deadlineHours = positiveNumber('PI_SUPERAGENT_WORKER_DEADLINE_HOURS', env.PI_SUPERAGENT_WORKER_DEADLINE_HOURS)
   const reportCap = positiveNumber('PI_SUPERAGENT_REPORT_CAP', env.PI_SUPERAGENT_REPORT_CAP)
+  const freshnessHours = positiveNumber('PI_SUPERAGENT_FRESHNESS_REDISPATCH_HOURS', env.PI_SUPERAGENT_FRESHNESS_REDISPATCH_HOURS)
   return {
     dataDir, worktreeRoot: env.PI_SUPERAGENT_WORKTREES ?? `${dataDir}/work`,
     self: env.PI_SUPERAGENT_SELF ?? 'pi-superagent',
@@ -1235,6 +1295,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(deadlineHours === undefined ? {} : { workerDeadlineHours: deadlineHours }),
     ...(reportCap === undefined ? {} : { reportCap: Math.floor(reportCap) }),
     ...(env.PI_SUPERAGENT_KEEP_ISSUES_OPEN === '1' ? { keepIssuesOpen: true } : {}),
+    ...(freshnessHours === undefined ? {} : { freshnessRedispatchHours: freshnessHours }),
     ...(env.PI_SUPERAGENT_WATCH_REPO_ASKS === '1' ? { watchRepoIsAsks: true } : {}),
     bots: new Set((env.PI_SUPERAGENT_BOTS ?? 'pi-*,fleet-*').split(',').map(s => s.trim()).filter(Boolean)),
     ...(env.PI_SUPERAGENT_PREPARE ? { prepare: env.PI_SUPERAGENT_PREPARE } : {}),
