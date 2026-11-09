@@ -113,7 +113,21 @@ the account reaches — and one settled ticket checkout, written 18 hours later,
 
 `superagent start` refuses to deploy over one, `setupProblems` reports it (status code 3), and a worker is
 refused a clone that carries one. Every finding prints masked: a guard that echoed the token it found would
-publish it.
+publish it. A token carried in a config **section name** counts too —
+`[url "https://x-access-token:ghp_…@github.com/"] insteadOf = git@github.com:` is a documented way to make a
+token the credential store, and it puts the secret in a header rather than a `key = value` line. Measured
+before that was closed: the scanner returned no findings for exactly that file, so `status` and the panel
+called the box clean while `start` refused it. One file, one answer: `url (section name)`.
+
+**The router masks what it publishes.** A worker's report quotes what the worker printed, and `git remote -v`
+in a checkout that stores its token in the remote URL prints the token. Every issue comment the router posts
+passes through the same mask, so a token and a `://user:password@` URL leave the box as `ghp_***` and
+`://user:***@`, and the log records the count only (`github.credential_redacted`, `count: 2`) — never the
+value. A body with nothing to mask is posted byte for byte, and masking is idempotent, so a report quoting the
+guard's own masked line is not a finding. The mask sits on the write, not in a prompt, so no future wording
+skips it. It cannot cover what a worker publishes by itself — a worker's `gh pr create` body goes out of its
+own shell — which is why moving the credential out of the URL, and rotating one that URL exposed, stay the
+primary controls and this is the backstop.
 
 Move the credential out of the URL and into a file only you can read:
 
@@ -234,7 +248,6 @@ a median of **12 launches per pass** with 18 workers on a cap of 8 beat every **
 is not the fault — it is the condition that makes a queued launch slow, and the old code waited a whole pass on
 that queue. Startup takeover is one reason `running` can exceed `cap`: workers that outlived the previous
 router are adopted without checking the cap, which is a policy question the code does not decide.
-
 
 **Status exits 3.** Read `~/.pi/superagent/setup.json` for the missing prerequisite and its location. One
 prerequisite is a credential in a checkout's git config; see
