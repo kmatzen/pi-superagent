@@ -51,10 +51,13 @@ triggers, reconciles PRs and closed threads, evaluates requests, starts pending 
 workers and flushes replies. Three consecutive GitHub poll failures set an error in `health.json`.
 
 `source-github.ts` tracks issues, comments and submitted reviews. It recognizes the router’s own
-comments by the bot login or a hidden marker. `scopeOf` in `router.ts` checks each author’s GitHub
-association or the configured login list before the trigger can reach a judge or worker.
-`gh-api.ts` runs the CLI asynchronously, paginates issue and PR lists, and reads comments forward
-from the saved position.
+comments by the bot login or a hidden marker. The `agent-requested` label is the board’s way of
+handing one issue over, so the router spends that grant: it journals the ask, takes the label off,
+and hears the issue again only when the label comes back on — and, after a journal it cannot read,
+only when the label is newer than its own last reply on that issue. `scopeOf` in `router.ts` checks each
+author’s GitHub association or the configured login list before the trigger can reach a judge or
+worker. `gh-api.ts` runs the CLI asynchronously, paginates issue and PR lists, and reads comments
+forward from the saved position.
 
 ### Judge
 
@@ -86,7 +89,10 @@ checks for tabs with no owning record or no corresponding herdr agent.
 the report. That order matters. A ready report on a ticket with an open PR leaves it awaiting review.
 When the PR leaves the watched repository’s open list, the follower checks whether it merged or
 closed and calls `threadClosed`. For another repository it checks every two minutes and routes
-comments and reviews through the qualified thread ID, `owner/repo#N`.
+comments and reviews through the qualified thread ID, `owner/repo#N`. A close GitHub denies — the
+pull request is open — is a close a failed read wrote down, so the follower re-binds it once per start
+for the tickets still waiting (`pull.reopened`); tickets that already ended stay ended, for the operator
+to reopen.
 
 `receipts.ts` formats reports, questions, crashes and launch failures for the GitHub thread.
 `outbox.ts` queues messages by ID. Failed posts remain pending, and a recurring launch failure

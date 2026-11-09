@@ -31,6 +31,15 @@ export class CommentOutbox implements OutboxPort {
 
   private persist(): void { this.store.set(KEY, this.rows) }
 
+  /**
+   * Waits for the posts this process has in flight. A channel write that must follow a reply — closing the
+   * issue a ticket just answered — has to come after the reply lands, or the thread reads as a request that
+   * vanished rather than an answer that ended.
+   */
+  async drained(): Promise<void> {
+    while (this.posting.size) await new Promise<void>(resolve => setTimeout(resolve, 5))
+  }
+
   /** A failed post stays pending: marking it sent after an exception is success reported out of nothing. A channel
    *  that answers the same way every time (a 404 for a repository this account cannot see) is no transient fault:
    *  past the budget the reply is dropped, and the give-up is said once, out loud. */

@@ -23,6 +23,7 @@ import { herdrCli, type Herdr } from './herdr.ts'
 import { HerdrWorkers } from './herdr-workers.ts'
 import { reportTool, type ReportOrigin } from './report-tool.ts'
 import { pullEndText, receiptText, type ReportedRun } from './receipts.ts'
+import { isListed } from './authors.ts'
 import { workerRole } from './worker-role.ts'
 import { createPanelServer } from './server.ts'
 import { checkoutRepository, guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
@@ -144,7 +145,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     followed: () => followedPulls(repos.tickets.open(), cfg.githubRepo ?? ''),
   }) : undefined)
   const github = githubApi
-    ? new GithubSource(githubApi, { repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, requestLabel: REQUEST_LABEL }, repos.kv)
+    ? new GithubSource(githubApi, {
+        repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, requestLabel: REQUEST_LABEL,
+        onWarn: (event, fields) => log.line('warn', event, fields),
+      }, repos.kv)
     : undefined
   github?.bootstrap()
   let paused = false
@@ -282,8 +286,136 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       log.line('info', 'worker.released', { ticket: ticket.id, assignment: assignmentId, state: run.state })
     }
     pullEnded(ticket.id)
+    // The report the person reads has gone out; these two bound what a finished ticket can do next.
+    if (origin === 'worker') capRepeats(repos.tickets.get(ticket.id) ?? ticket, run)
+    finishIssue(ticket.id)
   }
   const home = cfg.githubRepo ?? ''
+  const pullApi = deps.pullApi ?? ghPulls(accounts.pulls)
+
+  /**
+   * The terminal end of a ticket that finished with nothing to wait on: its issue closes with it. A `ready`
+   * report that opens no pull request ends the ticket inside the engine and left the issue open and labelled,
+   * which is a request intake can hear forever — measured 2026-11-09, #255 was dispatched a fourth time nine
+   * hours after its merge landed. A closed issue is not in intake's hearing; a comment on it, or a reopen, is
+   * a person saying go again, and both doors stay open.
+   */
+  const closedKey = 'closed-issues'
+  const closedHere = (): Record<string, string> => repos.kv.get<Record<string, string>>(closedKey) ?? {}
+  const closing: string[] = []
+  const finishIssue = (ticketId: string): void => {
+    if (cfg.keepIssuesOpen) return
+    const ticket = repos.tickets.get(ticketId)
+    const channel = ticket?.channels[0]
+    if (!ticket?.ended || ticket.ended.by !== 'executor' || !channel || channel.source !== 'github') return
+    // Work still owed: a pull request that has not landed is the ticket waiting on a person, not finished.
+    if ((ticket.follows ?? []).some(f => !f.closed)) return
+    const address = channel.address as { issue?: string; repo?: string }
+    // Only the watched repository's issues: an issue in another repository belongs to that repository's board.
+    if (!address.issue || address.repo) return
+    if (closedHere()[ticket.id]) return
+    closing.push(ticket.id)
+  }
+  const flushCloses = async (): Promise<void> => {
+    if (!closing.length) return
+    // The words first, then the door: the receipt is posted (and awaited) before the issue closes, so the
+    // thread reads as an answer that ended, not as a request that vanished.
+    outbox.flush()
+    await outbox.drained()
+    for (const ticketId of closing.splice(0)) {
+      const ticket = repos.tickets.get(ticketId)
+      const issue = Number((ticket?.channels[0]?.address as { issue?: string } | undefined)?.issue)
+      if (!issue || !githubApi) continue
+      try {
+        // `#7` names an issue and a pull request in the same repository, and PATCH state=closed on the pull
+        // number closes the pull request: only a number GitHub does not know as a pull is safe to close here.
+        if (await pullApi.pull(home, issue)) {
+          log.line('info', 'issue.close_skipped', { ticket: ticketId, issue: `#${issue}`, why: 'the thread is a pull request' })
+          continue
+        }
+        await githubApi.closeIssue?.(issue)
+        repos.kv.set(closedKey, { ...closedHere(), [ticketId]: deps.now?.() ?? new Date().toISOString() })
+        log.line('info', 'issue.closed', { ticket: ticketId, issue: `#${issue}`, outcome: ticket?.ended?.outcome })
+      } catch (error) {
+        // The ticket is ended and its grant is spent, so a failed close costs tidiness, not quiet.
+        log.line('warn', 'issue.close_failed', { ticket: ticketId, issue: `#${issue}`, error: String(error).slice(0, 200) })
+      }
+    }
+  }
+
+  /**
+   * The blast-radius bound: a ticket that keeps reporting with nothing new to act on must stop recruiting.
+   * On 2026-11-09 #227 reported the same sentence 93 times in 20 hours, and #255 reported five times in nine
+   * hours — each time in new words, and flipping from `ready` to `blocked`: "Nothing to merge: this pull
+   * request landed…", "The mandate is already satisfied…", "Close this ticket: its pull request merged…".
+   * Wording is not the signature. The signature is a report that landed with **no new inbound speech on the
+   * thread since the previous report**: the worker was recruited by speech the router wrote itself, so it can
+   * only re-prove what it proved last time. N of those (`PI_SUPERAGENT_REPORT_CAP`, default 3) and the ticket
+   * says so on itself and stops recruiting sessions.
+   *
+   * Two things make the streak, and both must hold: the same report state, and quiet on the thread. A report
+   * that changed state, or a person's comment, restarts the count — three in a row is the loop, three spread
+   * across real progress is a worker that kept working. The count is the router's journal, not the ticket's
+   * assignments: an Assignment keeps its LAST report, so the 93 receipts of one worker session are one report
+   * in the ticket. Only a worker's own report counts: a launch that fails on every poll is the router retrying,
+   * and its contract is to keep trying and say so once, not to give up on a ticket a person asked for.
+   */
+  const capKey = 'report-conclusions'
+  type CapRow = { state: string; times: number; at: string }
+  const capRows = (): Record<string, CapRow> => repos.kv.get<Record<string, CapRow>>(capKey) ?? {}
+  // GitHub's clock and the router's are not the same clock, and a comment that arrived a moment before a
+  // report is speech the worker acted on. Generous by two minutes: this window only ever resets the count.
+  const SPEECH_GRACE_MS = 120_000
+  /**
+   * Did a person say anything on this ticket's thread after `after`? The router's own writing is not speech
+   * (it is the receipt the worker is answering again), the intake label is not speech (it is a grant), and a
+   * pull request's edge is not speech either: #205 sat 2h13m waiting on CI and reported 48 times because
+   * every check that finished, every recompute of `mergeable`, fired a pull Trigger that woke the worker.
+   * Words from a person on the thread are the only thing that restarts the count.
+   */
+  const inboundSpeech = (ticket: Ticket, after: string): boolean =>
+    (ticket.inputs ?? []).some(input => {
+      if (input.kind !== 'trigger' || !input.human) return false
+      if (Date.parse(input.at) <= Date.parse(after) - SPEECH_GRACE_MS) return false
+      const trigger = repos.triggers.get(input.triggerId)
+      if (!trigger || trigger.source === 'pull') return false
+      const author = String(trigger.meta?.author ?? trigger.actor?.id ?? '')
+      if (author && isListed(author, new Set([cfg.githubSelf ?? cfg.self, ...(cfg.bots ?? [])]))) return false
+      return (trigger.meta?.via ?? 'comment') !== 'label'
+    })
+  const capRepeats = (ticket: Ticket, run: ReportedRun): void => {
+    const cap = cfg.reportCap ?? 3
+    if (run.state === 'progress' || run.state === 'waiting') return
+    const at = deps.now?.() ?? new Date().toISOString()
+    const rows = capRows()
+    const prior = rows[ticket.id]
+    const times = prior && prior.state === run.state && !inboundSpeech(ticket, prior.at) ? prior.times + 1 : 1
+    repos.kv.set(capKey, Object.fromEntries(Object.entries({ ...rows, [ticket.id]: { state: run.state, times, at } as CapRow })
+      .filter(([, row]) => Date.parse(row.at) > Date.parse(at) - 30 * 86_400_000)))
+    if (times < cap) return
+    const channel = ticket.channels[0]
+    if (!channel) return
+    const said = `${run.state}: ${run.summary}`.slice(0, 160)
+    outbox.send({
+      id: `repeat:${ticket.id}:${createHash('sha1').update(said).digest('hex').slice(0, 12)}`,
+      channel, kind: 'notice', ticketId: ticket.id,
+      text: `${channel.thread}: the same result has been reported ${times} times — ${run.summary}. Nothing new arrived on this thread `
+        + 'between the reports, so no further session runs this ticket. It is stopped, not waiting: a comment here will not wake it, and a person un-stops it.',
+    })
+    if (!ticket.ended) {
+      // A stop by the router on a repeating loop, and it is deliberately the strong kind: `wake` refuses to
+      // resume a stopped ticket, so neither the router's receipt, a label trigger, nor a pull request's CI
+      // churn can put a session back on it. Re-asking is then a deliberate act — `superagent intake #NNN`,
+      // which relabels — which is what "new inbound speech" is allowed to look like.
+      try {
+        engine.stopTicket(ticket.id, `the same result was reported ${times} times, so the ticket stops here`)
+        log.line('info', 'ticket.repeat_stopped', { ticket: ticket.id, times, state: run.state })
+      } catch { /* it ended by its own report, which is the same quiet */ }
+    }
+    // A finished conclusion that repeated closes the issue too: closing is what makes the quiet last.
+    finishIssue(ticket.id)
+  }
+
   // The engine ends a ticket with its pull request but posts nothing, so the issue hears it here, once per ticket.
   const pullEnded = (ticketId: string): void => {
     const ticket = repos.tickets.get(ticketId)
@@ -294,9 +426,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       .flatMap(f => { const pull = parseThread(f.thread.replace(/^github:/, ''), home)
         return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome }] : [] })
     outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, pulls) })
+    // The merge was the work landing: with the pull request done, the ticket has nothing left to wait on.
+    finishIssue(ticket.id)
   }
   const follower = new PullFollower({
-    home, api: deps.pullApi ?? ghPulls(accounts.pulls),
+    home, api: pullApi,
     openThreads: () => github?.openThreads(), positions: repos.kv,
     self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, now: () => Date.now(),
     receive: trigger => { engine.receive(trigger) },
@@ -307,6 +441,20 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       engine.threadClosed(thread, outcome, at)
       log.line('info', 'pull.closed', { thread: thread.id, outcome, url: pullUrl(pull), tickets: waiting.length })
       for (const id of waiting) pullEnded(id)
+    },
+    // The other half of `closed`: a close written down by a read that failed (GitHub answers 404 for a private
+    // repository the account cannot see) leaves a live ticket holding a closed follow on a pull request that is
+    // open, with nothing left to follow. Re-binding the thread clears the recorded close, so the ticket is waited
+    // on, ended by, and hears review on its pull request again. Live tickets only: an ended ticket's terminal end is
+    // the operator's to undo, and reopening 39 of them in one start would recruit 39 sessions unasked (#309 ask 3).
+    reopened: (thread, pull) => {
+      const key = `github:${thread.id}`
+      const holding = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && f.closed?.outcome === 'closed'))
+      for (const t of holding) {
+        try { engine.bindThread(t.id, thread, true) }
+        catch (error) { log.line('warn', 'pull.reopen_failed', { ticket: t.id, thread: thread.id, url: pullUrl(pull), error: String(error).slice(0, 200) }) }
+      }
+      return holding.length
     },
   })
   // Bound before the engine reads the report: a ready report completes a ticket that follows no open pull request.
@@ -425,6 +573,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     renderInput,
     reported,
     follow,
+    reportDropped: fields => log.line('warn', 'worker.report_dropped', fields),
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
   })
   executorRef = executor
@@ -508,6 +657,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   async function tick(): Promise<void> {
     if (paused) return
     await recovered
+    // A ticket that finished closes its issue at the top of a pass, after the pass that queued the close has
+    // flushed its receipt: the person reads the words on the issue before the door closes (see flushCloses).
+    await flushCloses()
     const started = Date.now()
     let triggers: Trigger[] = []
     if (github) {
@@ -832,6 +984,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const workerTokenFile = env.PI_SUPERAGENT_WORKER_TOKEN_FILE?.trim()
   const workerQuietMinutes = positiveNumber('PI_SUPERAGENT_WORKER_QUIET_MINUTES', env.PI_SUPERAGENT_WORKER_QUIET_MINUTES)
   const deadlineHours = positiveNumber('PI_SUPERAGENT_WORKER_DEADLINE_HOURS', env.PI_SUPERAGENT_WORKER_DEADLINE_HOURS)
+  const reportCap = positiveNumber('PI_SUPERAGENT_REPORT_CAP', env.PI_SUPERAGENT_REPORT_CAP)
   return {
     dataDir, worktreeRoot: env.PI_SUPERAGENT_WORKTREES ?? `${dataDir}/work`,
     self: env.PI_SUPERAGENT_SELF ?? 'pi-superagent',
@@ -842,6 +995,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(workerTokenFile ? { workerTokenFile } : {}),
     ...(workerQuietMinutes === undefined ? {} : { workerQuietMinutes }),
     ...(deadlineHours === undefined ? {} : { workerDeadlineHours: deadlineHours }),
+    ...(reportCap === undefined ? {} : { reportCap: Math.floor(reportCap) }),
+    ...(env.PI_SUPERAGENT_KEEP_ISSUES_OPEN === '1' ? { keepIssuesOpen: true } : {}),
     ...(env.PI_SUPERAGENT_WATCH_REPO_ASKS === '1' ? { watchRepoIsAsks: true } : {}),
     bots: new Set((env.PI_SUPERAGENT_BOTS ?? 'pi-*,fleet-*').split(',').map(s => s.trim()).filter(Boolean)),
     ...(env.PI_SUPERAGENT_PREPARE ? { prepare: env.PI_SUPERAGENT_PREPARE } : {}),
