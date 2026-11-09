@@ -120,10 +120,13 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // The router owns health.json from its first moment: a router that has not polled yet is ready, and the
   // health check must find a file, not an absence.
   writeHealth(cfg.dataDir, null)
+  // The worker cap and the beat are logged here because a stall line reports `running` and `cap` and nothing
+  // else in the trail carries the configured cap; a reader should not have to open config.env to read a log.
   log.line('info', 'router.start', {
     dataDir: cfg.dataDir, panelPort: cfg.panelPort ?? 0,
     sdkPath: cfg.sdkPath ?? 'package-name', githubRepo: cfg.githubRepo ?? '',
     githubAs: cfg.githubTokenFile ? 'token file' : 'gh login',
+    maxWorkers: cfg.maxConcurrent ?? 4, tickMs: cfg.tickMs ?? 30_000,
   })
   const issueOf = (m: OutboundMessage): string | undefined =>
     m.channel.source === 'github' ? (m.channel.address as { issue?: string } | undefined)?.issue : undefined
@@ -657,7 +660,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     lastTickEnd = finished
     log.line('info', 'tick', {
       n: sweeps, inflight: repos.threads.active().filter(t => t.evaluating).length,
-      running: executor.running, parked: executor.parked, open: repos.tickets.open().length, ms: finished - started,
+      running: executor.running, parked: executor.parked, cap: executor.capacity,
+      open: repos.tickets.open().length, ms: finished - started,
       gapMs, pollMs, reconcileMs, evaluateMs, drainMs,
       gh: ghCalls - callsAtStart, ghTotal: ghCalls,
       pullsDue: pulls.due, pullsRead: pulls.read, pullsDeferred: pulls.deferred, readsAtOnce: pulls.atOnce,
@@ -758,8 +762,18 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
 
   const tickHealth = (state: 'ok' | 'error', fields: { ms?: number; detail?: string } = {}): TickHealth => {
     const at = Date.now()
-    const detail = fields.detail
+    // The cause, whenever the loop can see it. Measured on the live router (2026-11-09, #303): the one run that
+    // lost its beat queued a median of 12 launches a pass against a fleet of 18 workers on a cap of 8, and its
+    // beat was 2,780 s; 35 runs that queued <=1 kept 30.0 s, 17 of them with the fleet over the cap. So a stall
+    // is only actionable when the reader sees the backlog and the cap, and health.json is the one line a person
+    // reads over a wall — `superagent status` prints it.
+    const backlog = executor.pendingLaunches > 0 && executor.running >= executor.capacity
+      ? `${executor.pendingLaunches} launch${executor.pendingLaunches === 1 ? '' : 'es'} queued, `
+        + `${executor.running} busy against the cap of ${executor.capacity}`
+      : undefined
+    const base = fields.detail
       ?? (state === 'error' ? `tick stalled in ${stage} for ${secs(at - stageAt)} (pass ${secs(at - tickBegan)})` : undefined)
+    const detail = base && state === 'error' && backlog ? `${base}: ${backlog}` : base
     return {
       state,
       ...(detail ? { detail: detail.slice(0, 160) } : {}),
@@ -828,6 +842,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         log.line('warn', 'tick.stalled', {
           stage, stageMs: at - stageAt, runningMs: running, intervalMs: tickMs, stallMs, n: sweeps,
           sinceLastMs: at - lastTickEnd, launchPending: executor.pendingLaunches, ghCalls,
+          running: executor.running, cap: executor.capacity,
         })
         publishHealth(tickHealth('error'))
       }
@@ -842,6 +857,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         log.line('error', 'tick.abandon_skipped', {
           stage, stageMs: at - stageAt, runningMs: running, abandonMs, passesInFlight: inFlight,
           intervalMs: tickMs, n: sweeps, launchPending: executor.pendingLaunches, ghCalls,
+          running: executor.running, cap: executor.capacity,
         })
         publishHealth(tickHealth('error', { detail: `tick wedged in ${stage} for ${secs(at - stageAt)}: ${inFlight} passes in flight, the loop is not beating` }))
       }
@@ -852,7 +868,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // landed. Repeating a pass is safe by construction: trigger ids dedup, the outbox is idempotent by id, and
     // the engine's commands are the only writes.
     lastAbandonReport = at
-    log.line('error', 'tick.abandoned', { stage, runningMs: running, abandonMs, passesInFlight: inFlight, n: sweeps, launchPending: executor.pendingLaunches })
+    log.line('error', 'tick.abandoned', { stage, runningMs: running, abandonMs, passesInFlight: inFlight, n: sweeps, launchPending: executor.pendingLaunches, running: executor.running, cap: executor.capacity })
     again = false
     startTick()
   }

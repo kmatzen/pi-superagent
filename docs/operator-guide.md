@@ -141,6 +141,11 @@ once, because an abandoned pass keeps its `gh` children and those have no timeou
 the product. The stage `tick.abandon_skipped` names is what to fix; a restart clears a router wedged this way,
 which is the one case where it does. The line `tick n=…` is the
 liveness line: its `gapMs` is the time since the last pass finished, read against `PI_SUPERAGENT_TICK_MS`.
+A stall the fleet caused says so: `tick.stalled` carries `running` and `cap` next to `launchPending`, and
+`health.json`'s `detail` names the cause in words — `tick stalled in drain for 6.0s (pass 6.1s): 12 launches
+queued, 18 busy against the cap of 8` — because `superagent status` prints that sentence and a person reading
+it over a wall should not have to open `config.env` to learn the cap. `router.start` logs `maxWorkers` and
+`tickMs` for the same reason.
 A `engine_tick` (or the panel's tick) asked for while a pass is parked does its work and says nothing: the
 liveness line and `health.json` belong to the pass that owns the loop, so a tick by hand cannot switch off the
 alarm you are reading.
@@ -154,6 +159,14 @@ A router paused on purpose keeps writing, one line per beat, so a pause never re
 **The board is busy and nothing starts.** `tick n=…` carries `launchPending` (launches waiting for a free
 worker slot) and `open`/`running`/`parked`. Waiting launches are the queue doing its job, not a stall; the
 router no longer waits a pass on them.
+
+Read the backlog per pass, not the fleet size. Measured on the live router over 1,690 tickets' worth of
+`engine.log` (2026-11-09, #303): the 35 runs that queued at most one launch per pass beat every **30.0 s**,
+and 17 of those runs were already over `PI_SUPERAGENT_MAX_WORKERS` with an empty queue; the one run that queued
+a median of **12 launches per pass** with 18 workers on a cap of 8 beat every **2,780 s**. A fleet over its cap
+is not the fault — it is the condition that makes a queued launch slow, and the old code waited a whole pass on
+that queue. Startup takeover is one reason `running` can exceed `cap`: workers that outlived the previous
+router are adopted without checking the cap, which is a policy question the code does not decide.
 
 **Status exits 3.** Read `~/.pi/superagent/setup.json` for the missing prerequisite and its location.
 

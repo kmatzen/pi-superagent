@@ -240,6 +240,13 @@ export class PiExecutor {
   /** Launches queued and not yet run: the ones waiting for a free worker slot, counted for the tick's drain. */
   get pendingLaunches(): number { return this.queued }
 
+  /**
+   * The worker cap the launch gate enforces, next to `running`: a stall is only readable when the reader can
+   * see both (`running=18 cap=8` is the cause, `stage=drain` alone is a symptom). Startup takeover can push
+   * `running` past this number on purpose, which is why the pair is worth publishing rather than assuming.
+   */
+  get capacity(): number { return this.options.maxConcurrent ?? 4 }
+
   /** What the operator can point a browser at: which worker, in which checkout, and when it last spoke. */
   workers(): WorkerView[] {
     return [...this.live.entries()].map(([ticketId, live]) => ({

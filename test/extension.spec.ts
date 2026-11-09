@@ -1119,6 +1119,56 @@ describe('the tick keeps its cadence', () => {
     expect(healthOf(f.dir), 'a pass that finishes clears the alarm').not.toContain('"state": "error"')
   })
 
+  it('a stall the fleet caused names the fleet: the backlog and the cap, in the alarm itself', async () => {
+    // Measured on the live router 2026-11-09 (#303): the run that lost its beat queued a median of 12 launches a
+    // pass with 18 workers on a cap of 8 and beat every 2,780 s, while 35 runs that queued <=1 beat every 30.0 s
+    // — 17 of them with the fleet over the cap and an empty queue. So `running >= cap` is not the cause and a
+    // stall line that reports only the stage cannot be acted on: the reader needs the backlog and the cap, and
+    // health.json is the file read over a wall (`superagent status` prints its first 200 characters).
+    let park = false
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let polls = 0
+    // The fixture's own feed shape, served through a gate: an api that answers `[]` intake nothing, so there
+    // would be no ticket to launch and no queue to name.
+    const feed: { issues: IssueState[]; comments: IssueComment[] } = { issues: [], comments: [] }
+    const ask = (n: string) => {
+      feed.issues.push({ issue: Number(n), title: 'DO: the thing', labels: [], author: 'pi-superagent',
+        association: 'OWNER', createdAt: '2026-11-04T09:00:00Z', updatedAt: '2026-11-05T09:00:00Z' })
+      feed.comments.push({ issue: Number(n), author: 'octocat', association: 'OWNER', at: '2026-11-05T09:00:00Z', body: `do the thing ${n}` })
+    }
+    const api: GithubApi = {
+      issues: async () => { polls += 1; if (park) await gate; return [...feed.issues] },
+      comments: async () => [...feed.comments],
+      postComment: async () => {},
+    }
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, maxConcurrent: 1, launchDrainMs: 20, tickStallMs: 40, tickStallReportMs: 10, tickAbandonMs: 600_000, githubApi: api })
+    // One slot, one worker holding it (in-process workers emit no events, so it stays busy), one launch behind it.
+    for (const issue of ['521', '522']) {
+      ask(issue)
+      await f.running.tick()
+      f.decide('accept')
+      await f.running.tick()
+    }
+    expect(f.workers.length, 'the first launch took the only slot').toBe(1)
+    expect(f.running.load().queued, 'the second launch waits for the slot the first one holds').toBe(1)
+
+    park = true
+    await until(() => trailOf(f.dir).includes('tick.stalled'), 5_000)
+    const trail = trailOf(f.dir)
+    expect(trail, 'the stall line carries the fleet: how many are busy and what the cap is')
+      .toMatch(/tick\.stalled stage=poll[\s\S]*?running=1 cap=1/)
+    const health = JSON.parse(healthOf(f.dir)) as { tick: { state: string; detail: string; launchPending: number } }
+    expect(health.tick.state).toBe('error')
+    expect(health.tick.launchPending, 'the backlog is a number, not an implication').toBe(1)
+    expect(health.tick.detail, 'the alarm states the cause, in the words an operator acts on')
+      .toContain('1 launch queued, 1 busy against the cap of 1')
+    expect(healthOf(f.dir).replace(/\n/g, '').slice(0, 200), 'and it survives the cut `superagent status` makes')
+      .toContain('against the cap of 1')
+    release()
+  }, 30_000)
+
   it('a pass that never finishes is abandoned, and the beat survives it', async () => {
     let release!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })
