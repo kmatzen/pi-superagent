@@ -13,15 +13,15 @@
 *)
 EXTENDS Integers, Sequences, FiniteSets
 
-CONSTANTS t1, t2, k1, k2, m11, m12, m21   (* model values: threads, ticket slots, messages *)
+CONSTANTS t1, t2, k1, k2, m11, m21   (* model values: threads, ticket slots, messages *)
 
 (* ---- the finite world ---- *)
 Threads    == {t1, t2}
 TicketIds  == {k1, k2}
-(* m11, m12 arrive on t1; m21 on t2. m11 and m21 are a person's; m12 is a bot's. *)
-Msgs       == {m11, m12, m21}   (* m22 dropped 2026-11-09: the worker Session vars made the space 500x; the third bot message adds intake order, nothing the ticket claims need *)
-ThreadOf(m) == IF m \in {m11, m12} THEN t1 ELSE t2
-Human(m)   == m \in {m11, m21}
+(* m11 arrives on t1, m21 on t2; both are a person's. *)
+Msgs       == {m11, m21}   (* bounded 2026-11-09 for the worker-Session vars: m12 and m22, the bot messages, order intake, and every ticket-level claim here is about a person's message and a worker. Intake.tla keeps the bot messages and its own claims. *)
+ThreadOf(m) == IF m = m11 THEN t1 ELSE t2
+Human(m)   == TRUE   (* both messages in the bounded world are a person's; the bot-message intake claims live in Intake.tla *)
 States     == {"free", "live", "stopped", "done", "dropped"}
 AsgStates  == {"pend", "run", "end"}
 Reports    == {"none", "progress", "waiting", "ready", "blocked", "failed", "dropped"}
