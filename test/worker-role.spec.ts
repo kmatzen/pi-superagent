@@ -55,6 +55,25 @@ describe('the worker role', () => {
     expect(lines(join(dir, 'reports.jsonl'))[1]).not.toHaveProperty('pullRequests')
   })
 
+  // The URL rules themselves are in test/report-tool.spec.ts; what the worker's own process proves is that a
+  // refused report leaves no trace in the file the router reads, and so no report at all.
+  it('refuses a report whose pull request URL the router cannot read, and names the entry', () => {
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir })
+    const report = f.tools.find(t => t.name === 'ticket_report')!
+    const bad = 'https://github.comResearch-Adobe/caramel/pull/1994'
+    const verdict = report.execute('c1', { state: 'ready', summary: 'opened it', pullRequests: [bad] }) as
+      { isError?: boolean; content: { text: string }[] }
+    expect(verdict.isError, 'the worker sees a failure, not "reported"').toBe(true)
+    expect(verdict.content[0]!.text).toContain(bad)
+    expect(verdict.content[0]!.text, 'the fix is written on the page the worker has open').toMatch(/gh pr create/)
+    expect(lines(join(dir, 'reports.jsonl')), 'nothing reaches the router').toEqual([])
+    f.emit('agent_start')
+    f.emit('agent_settled')
+    expect(lines(join(dir, 'reports.jsonl')).at(-1), 'a refused report is no report: the run ends as a silent finish').toMatchObject({ state: 'failed', origin: 'silent' })
+  })
+
   it('turns a worker asking a person into a blocked report, and refuses the ask that has no keyboard', () => {
     const dir = tmp()
     const f = fakePi()
