@@ -176,6 +176,35 @@ A review on an unrelated PR can reach the judge as a new request. GitHub accepts
 PR conversation through its issue number. Opening a PR alone produces no request, so a worker can
 deliver a change without triggering another worker to review it.
 
+**Re-read before waking a settled ticket.** A receipt is a comment, and a comment moves the
+issue’s `updated_at`, which is the fact an intake label turns into a fresh request. The router that
+posted the receipt therefore asks for the ticket again, and the woken worker starts by checking what
+the router could have checked for it. Measured 2026-11-09: one ticket ran seven workers in 15 hours,
+another thirteen, each on a PR open, unreviewed, at the same head, with no answer on the ask. So
+before a ticket whose last report is *ready* or *blocked* on a PR it opened gets a session,
+`freshness.ts` reads that PR (state, head, comment count, last touch) and the last person who
+answered the ask. Unchanged means no dispatch: the inputs stay queued, so the first real move starts
+the worker on the next pass. Two rules keep this from becoming silence. A read that fails is a
+dispatch, said once per ticket, never a withheld run. And `redispatchHours` (24) passes, the ticket
+gets a worker on the unchanged state, so a fingerprint that stops moving cannot mute a ticket for
+good. The router’s own receipts, bot comments and the ask’s `updated_at` are not answers: only a
+person’s comment, a new head, a new comment, a submitted review, or the PR closing counts. The
+baseline is written by the settled report itself, at the moment it lands, so the **first** dispatch
+that repeats a receipt is the withheld one — #213’s three sessions in 25 minutes began as run 2, and
+a gate that has to spend one session to learn the state the worker just reported saves the second.
+A pass that lands in the same tick as the report waits for that read instead of racing it.
+
+**Three locks on one loop, at three boundaries.** The same ticket recruited thirteen sessions, so
+the same fact is now checked three times, at the three places a session can start. *Intake* journals
+the label grant it takes, so a receipt can no longer ask for the ticket again — and it **fails open
+on purpose** (`intake.label_actor_unavailable`, `_unreadable`, `_unknown` all fire intake), because
+losing the door a person uses to ask costs more than a loop. *Dispatch* is this gate: two reads on
+the pull request and the ask, and no session for a state the last receipt already told. *Report* is
+the repeat cap (`PI_SUPERAGENT_REPORT_CAP`), which stops a ticket that keeps reporting the same
+conclusion while its pull request does move — CI churn, #205’s 48 reports in 2h13m, which the gate
+correctly lets through because a moving pull request is a move. A ticket that survives all three has
+been asked for by a person, and is worth the session it costs.
+
 ## Operating the router
 
 **Keep ticket state in one store.** One router owns the synchronous SQLite store in its state

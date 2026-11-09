@@ -181,6 +181,7 @@ case "$*" in
   "api repos/x/y/pulls/9") echo '{"state":"closed","merged_at":"2026-11-06T10:00:00Z","closed_at":"2026-11-06T10:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/10") echo '{"state":"closed","merged_at":null,"closed_at":"2026-11-06T11:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/11") echo '{"state":"open","merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z"}' ;;
+  "api repos/x/y/pulls/12") echo '{"state":"open","merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z","updated_at":"2026-11-09T09:20:00Z","head":{"sha":"22f2b15"},"comments":2,"review_comments":1}' ;;
   "api repos/x/y/pulls/404") echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
   "api repos/x/y/pulls/502") echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
   "api repos/x/y/issues/11/comments?"*since=*) echo '[{"user":{"login":"rev"},"author_association":"MEMBER","created_at":"2026-11-06T09:00:00Z","body":"rename it"}]' ;;
@@ -229,6 +230,15 @@ exit 1
     expect(await api.pull('x/y', 404)).toBeUndefined()
     expect(await api.pull('x/y', 404), 'asked twice, because the follower reads on its interval').toBeUndefined()
     expect(gh.calls().filter(c => c === 'api repos/x/y'), 'visibility is asked once per repository').toHaveLength(1)
+  })
+
+  it('reads the head, the comment count and the last touch, the facts the freshness gate compares, in one call', async () => {
+    const gh = fakePullsGh()
+    expect(await ghPulls({ bin: gh.bin }).pull('x/y', 12)).toEqual({
+      open: true, merged: false, createdAt: '2026-11-05T09:00:00Z',
+      headSha: '22f2b15', comments: 3, updatedAt: '2026-11-09T09:20:00Z',
+    })
+    expect(gh.calls().filter(c => c.includes('repos/x/y/pulls/12')), 'one round trip per pull request').toHaveLength(1)
   })
 
   it("reads one pull request's comments from a time, and its submitted reviews, with each author's standing", async () => {
