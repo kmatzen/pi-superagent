@@ -77,7 +77,8 @@ terminal, run `tail -F ~/.pi/superagent/engine.log`.
 ## Manage the router
 
 ```sh
-superagent status    # 0 healthy · 1 down · 2 a part is failing · 3 waiting for setup
+superagent status    # 0 healthy · 1 down · 2 up and not beating · 3 waiting for setup · 4 a part is failing
+superagent remedy    # what the health job runs: 1 starts, 2 restarts, 0 and 3 and 4 do nothing
 superagent restart   # safe at any time: workers keep running and the new router adopts them
 superagent stop      # leaves a marker, so the health check will not restart it
 superagent start     # clears the marker
@@ -88,8 +89,15 @@ In a checkout, the same script is `scripts/superagent`.
 Settings live in `~/.pi/superagent/config.env`. [`config.example.env`](../config.example.env), shipped
 with the package, explains each setting and its default. Restart to apply a change.
 
-On macOS, the launchd job in [`launchd/`](../launchd/com.example.superagent-health.plist) runs `status`
-every five minutes and starts a router that is down. It leaves a deliberately stopped router alone.
+On macOS, the launchd job in [`launchd/`](../launchd/com.example.superagent-health.plist) runs
+`superagent remedy` every five minutes. It **starts** a router that is down (code 1) and **restarts** one that
+is up and not beating (code 2, the stalled tick loop), which is the fault a running router refuses to fix: the
+router is up, so `start` answers "already running" and the stall would stay loud and permanent. It does nothing
+to a router that is healthy (0), waiting for setup (3), carrying a part a restart cannot fix (4), or stopped on
+purpose: `remedy` honours the stop marker on its own, so a deliberate stop stays deliberate. A parked loop is
+recovered within five minutes, and a restart costs the router's tab and nothing else, because the workers are
+their own sessions and the new router adopts them. Restarts are capped at one per
+`PI_SUPERAGENT_RESTART_COOLDOWN_MIN` (30), so a fault a restart cannot fix cannot restart the router forever.
 Install it once:
 
 ```sh
@@ -100,7 +108,23 @@ launchctl load ~/Library/LaunchAgents/com.example.superagent-health.plist
 
 The job finds `superagent`, `pi` and `herdr` on its own PATH: Homebrew's directories, `/usr/local/bin` and
 `~/.npm-global/bin`. If `command -v superagent` or `command -v pi` prints a directory outside those, as nvm's
-do, add it to the job's PATH. From a checkout, replace `superagent` in the job with the script's full path.
+do, add it to the job's PATH. From a checkout, put the script's full path in front of `remedy`, one path and no
+`cd`, and reload the job after every upgrade of the script.
+
+A job installed from an older file heals nothing. The one to look for runs `cd $HOME/git/` plus a checkout path
+and then `./scripts/superagent`, which checks and heals whatever repository that path names today, and whose
+only remedy is `start`: it answers "already running" every five minutes over a stalled router. Read what is
+installed, then re-render and reload it from the file above:
+
+```sh
+launchctl print "gui/$(id -u)/com.example.superagent-health" | grep -A4 arguments    # what runs now
+launchctl bootout "gui/$(id -u)/com.example.superagent-health"
+sed "s|__HOME__|$HOME|g" "$plist" > ~/Library/LaunchAgents/com.example.superagent-health.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.example.superagent-health.plist
+```
+
+`/tmp/superagent-health.log` carries every pass, each line dated, so a remedy that repeats reads as one:
+`2026-11-09T15:20:03Z health: running and not beating: health.json is 16 min old ...; restarting the router`.
 
 ### Keep the git credential out of .git/config
 

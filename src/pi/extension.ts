@@ -104,9 +104,11 @@ export interface TickHealth {
   launchPending?: number
 }
 
-/** `superagent status` counts the `"state": "error"` lines in this file and exits 2 on any of them, and prints
- *  the file's first 200 characters — so the tick block goes second, before the source block, and its `detail`
- *  field is short enough to survive the cut. A healthy tick writes `"state": "ok"`, which fails nothing. */
+/** `superagent status` reads this file and splits it by block: a tick block in error, or a file nobody
+ *  rewrote, is the beat stopped (exit 2, the health check restarts the router); any other block in error is a
+ *  part (exit 4, the check reports and does not restart). It prints the file's first 200 characters, so the
+ *  tick block goes second, before the source block, and its `detail` field is short enough to survive the cut.
+ *  A healthy tick writes `"state": "ok"`, which fails nothing. */
 function writeHealth(dir: string, source: { state: string; detail?: string } | null, tick?: TickHealth): void {
   writeFileSync(`${dir}/health.json`, JSON.stringify({
     runtime: { state: 'ready', at: new Date().toISOString() },
@@ -720,7 +722,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const pollAt = Date.now()
       enter('poll')
       // A failing poll is not a quiet tick: a router that cannot hear GitHub looks healthy forever, so three
-      // failures in a row go into health.json, where `superagent status` turns them into exit code 2.
+      // failures in a row go into health.json, where `superagent status` turns them into exit code 4: an alarm
+      // for a person, not a restart, because restarting the router does not bring the source back.
       try {
         triggers = await github.poll()
       } catch (error) {

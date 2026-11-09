@@ -125,8 +125,9 @@ by default and logs the chosen port if it has to bind a free one. It checks the 
 loopback names and requires `x-superagent-request: 1` on API calls.
 
 `scripts/superagent` configures the repository, starts or stops the router and reports health.
-The macOS job in `launchd/` checks every five minutes. It restarts a down router and respects the
-operator’s stop marker.
+The macOS job in `launchd/` runs `remedy` every five minutes: it starts a router that is down, restarts one
+whose tick loop has stalled (the fault `start` refuses, the router being up), and respects the operator's stop
+marker and the restart cooldown.
 
 ## The state directory
 
@@ -138,6 +139,8 @@ The router stores its local state under `~/.pi/superagent`. Set `PI_SUPERAGENT_S
 | `config.env` | deployment settings, read by the start script |
 | `engine.log` | the router's log, rotated at 5 MB |
 | `health.json`, `setup.json`, `ready` | what `superagent status` reads |
+| `stopped` | the operator's stop marker: the health check leaves the router stopped |
+| `watchdog-restart` | when the health check last restarted the router, in epoch seconds (its cooldown) |
 | `workers/<session>/` | one directory per worker: its record, inbox, events and reports |
 | `work/<ticket>/` | one workspace per ticket |
 | `worker-bin/` | shims that refuse blocked commands, first on the PATH of each workspace's setup script |
