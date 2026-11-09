@@ -57,6 +57,11 @@ export interface RouterConfig {
   githubSelf?: string
   /** The agent's own GitHub account, by a file holding its token: the router reads and posts on the watched repository as it. */
   githubTokenFile?: string
+  /**
+   * Checkouts this deployment reads besides the ticket clones — the watched board's checkout, the checkout the
+   * router runs from. Each one is scanned for a credential baked into its remote URL (see git-credentials.ts).
+   */
+  watchedCheckouts?: readonly string[]
   /** The gh binary; tests put a stand-in here. */
   ghBin?: string
   blockedCommands?: readonly string[]

@@ -102,6 +102,87 @@ The job finds `superagent`, `pi` and `herdr` on its own PATH: Homebrew's directo
 `~/.npm-global/bin`. If `command -v superagent` or `command -v pi` prints a directory outside those, as nvm's
 do, add it to the job's PATH. From a checkout, replace `superagent` in the job with the script's full path.
 
+### Keep the git credential out of .git/config
+
+A remote URL that carries its credential — `https://x-access-token:ghp_…@github.com/org/repo.git` — is a
+live secret in a file git writes 0644. Every user and every process on the box reads it, and the first
+`git remote -v`, `git config --list` or failed push a worker prints carries it into a transcript, a board
+row, an issue body. Measured on the deployment box (issue #314): the watched checkout's `.git/config`,
+`-rw-r--r--`, held a 40-character `ghp_` classic token with `repo` scope — read/write on every repository
+the account reaches — and one settled ticket checkout, written 18 hours later, held that same token.
+
+`superagent start` refuses to deploy over one, `setupProblems` reports it (status code 3), and a worker is
+refused a clone that carries one. Every finding prints masked: a guard that echoed the token it found would
+publish it. A token carried in a config **section name** counts too —
+`[url "https://x-access-token:ghp_…@github.com/"] insteadOf = git@github.com:` is a documented way to make a
+token the credential store, and it puts the secret in a header rather than a `key = value` line. Measured
+before that was closed: the scanner returned no findings for exactly that file, so `status` and the panel
+called the box clean while `start` refused it. One file, one answer: `url (section name)`.
+
+**The router masks what it publishes.** A worker's report quotes what the worker printed, and `git remote -v`
+in a checkout that stores its token in the remote URL prints the token. Every issue comment the router posts
+passes through the same mask, so a token and a `://user:password@` URL leave the box as `ghp_***` and
+`://user:***@`, and the log records the count only (`github.credential_redacted`, `count: 2`) — never the
+value. A body with nothing to mask is posted byte for byte, and masking is idempotent, so a report quoting the
+guard's own masked line is not a finding. The mask sits on the write, not in a prompt, so no future wording
+skips it. It cannot cover what a worker publishes by itself — a worker's `gh pr create` body goes out of its
+own shell — which is why moving the credential out of the URL, and rotating one that URL exposed, stay the
+primary controls and this is the backstop.
+
+Move the credential out of the URL and into a file only you can read:
+
+```sh
+umask 077
+printf '%s\n' '<the token>' > ~/.pi/superagent/deploy-git-token            # 0600, and the file is the store
+cd ~/git/pi-superagent
+git remote set-url origin https://github.com/kmatzen/pi-superagent.git     # the same URL, credential removed
+U=credential.https://github.com/kmatzen/pi-superagent.git
+git config --local "$U.useHttpPath" true
+git config --local --add "$U.helper" ''                 # clears the helpers inherited from ~/.gitconfig
+git config --local --add "$U.helper" '!f(){ echo username=x-access-token; echo "password=$(cat "$HOME/.pi/superagent/deploy-git-token")"; }; f'
+chmod 600 .git/config
+git ls-remote origin HEAD && git push --dry-run origin HEAD                # the helper answers for this repo
+git remote -v                                                             # prints no secret now
+```
+
+The empty `helper` line is what makes it work on a box whose `~/.gitconfig` already names a helper: the
+first helper that answers wins, so an inherited `gh` helper hands git a *different* account's token, and a
+private repository answers that account 404. Measured here — `gh` is signed in as an account that cannot see
+the repository, so `gh auth git-credential` is not a usable store for this checkout, and the clone that
+proved it failed with `Repository not found` until the inherited helpers were cleared.
+
+`PI_SUPERAGENT_WATCHED_CHECKOUTS` adds checkouts to the scan. The deployment's own checkout and the ticket
+checkouts under the worktree root are always scanned, and the ticket checkouts are looked for one level past
+the ticket directory: the product clones into `<worktrees>/<ticket>/`, while a worker told "clone into your
+workspace" clones into `<worktrees>/<ticket>/repo/` — measured, 26 of the 29 live checkouts are the second
+shape. A linked worktree is read through its common dir, because that is where its remotes live. The scan
+descends one level and no deeper, so a `node_modules` full of nested `.git` directories costs nothing.
+
+"The deployment's own checkout" is the checkout the `superagent` command lives in, followed through a symlink:
+a link on your PATH (`npm install -g` leaves one, and a hand link into a checkout is the documented
+alternative) points at the same checkout it was written in, so the scan cannot be dodged by how the command
+is installed. Measured before that: through a link, the guard scanned the link's own directory, found no
+checkout, printed nothing, and `start` exited 0 over a checkout holding a `repo`-scoped token.
+
+Rotating a token a URL has exposed is a web-UI action: GitHub exposes no API for creating or rotating
+personal access tokens (a classic token asks 404), and a `ghp_` classic token cannot be scoped narrower than
+`repo`. Mint a fine-grained token for the one repository with `contents: write` and `pull_requests: read`,
+write it into the 0600 file, and `git ls-remote` proves the swap. Rotation then touches no git config.
+
+Read which file feeds which role before you narrow a scope, and rotate every token the box holds, not only
+the one the URL exposed. `PI_SUPERAGENT_GITHUB_TOKEN_FILE` is the router's own GitHub identity — it reads and
+writes the watched board repository, files issues and posts receipts — and `PI_SUPERAGENT_WORKER_TOKEN_FILE`
+is the identity a worker pushes its branch and opens its pull request as. Neither is the deployment's git
+token, and scoping either one to a single code repository stops intake or stops the worker's push: the
+one-repository recipe above is for the git credential only. Measured on the deployment box: three 0600 token
+files in the state directory — the GitHub token (one file behind both settings above), the deployment's git
+token, and the panel secret — and two of them are *separate* `repo`-scope classic tokens, so the URL exposed
+one while the other kept read/write on every repository the account reaches.
+
+Revoking the token is also what cleans the copies you cannot see: every worker home keeps a 0600
+`~/.git-credentials` holding the worker token (62 of them on this box, written by the deployment for workers
+that never finished). Revoke first, then delete the worker homes — deleting first leaves a live token behind.
+
 ## When several issues arrive at once
 
 By default, four workers can run at once. If you open a fifth issue while all four are busy, its
@@ -168,7 +249,20 @@ is not the fault — it is the condition that makes a queued launch slow, and th
 that queue. Startup takeover is one reason `running` can exceed `cap`: workers that outlived the previous
 router are adopted without checking the cap, which is a policy question the code does not decide.
 
-**Status exits 3.** Read `~/.pi/superagent/setup.json` for the missing prerequisite and its location.
+**Status exits 3.** Read `~/.pi/superagent/setup.json` for the missing prerequisite and its location. One
+prerequisite is a credential in a checkout's git config; see
+[Keep the git credential out of .git/config](#keep-the-git-credential-out-of-gitconfig).
+
+**Start refuses with “carries a git credential in the clear”.** A watched checkout stores its credential in
+the remote URL, where every worker can read it. The message names the file, the line and the mode; the fix
+is in [Keep the git credential out of .git/config](#keep-the-git-credential-out-of-gitconfig). On a plain
+`start` nothing was started, so the fix costs nothing to apply.
+
+On `restart` it is not free: `restart` is `stop; start`, and the scheduled health check is
+`status || start`. So a checkout that gains a credential *while the fleet runs* ends the fleet — the router is
+stopped, the start is refused, and the health check keeps refusing every five minutes until the URL is fixed.
+That is the intended posture: waking ~20 worker sessions over a disclosed credential is worse than a stopped
+router. The fix is the URL, not a second restart; the same `restart` succeeds once the credential is out of it.
 
 **A worker looks stuck.** Open its herdr tab to inspect the current command. Type a message to steer
 the worker or press Esc to interrupt it.
