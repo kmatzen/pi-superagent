@@ -200,6 +200,38 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
   it('an unknown flag is a usage error, not a silent success', () => {
     expect(run(['--deply', 'status']).status).toBe(2)
   })
+
+  // Issue #314: the watched checkout kept its `repo`-scoped token in a 0644 .git/config, where all ~20 worker
+  // sessions per run could read it and `git remote -v` could print it. The deploy is the last place that can
+  // refuse it before the workers start.
+  it('refuses to deploy over a watched checkout whose remote URL carries the credential', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pi-sa-watch-')); dirs.push(root)
+    const watched = join(root, 'pi-superagent')
+    mkdirSync(join(watched, '.git'), { recursive: true })
+    const secret = `ghp_${'x'.repeat(36)}`
+    writeFileSync(join(watched, '.git', 'config'), `[remote "origin"]\n\turl = https://x-access-token:${secret}@github.com/kmatzen/pi-superagent.git\n`)
+    const out = run(['start'], { PI_SUPERAGENT_WATCHED_CHECKOUTS: watched })
+    expect(out.status, out.stderr).toBe(1)
+    expect(out.stderr).toMatch(/carries a git credential in the clear/)
+    expect(out.stderr).toMatch(/remote set-url origin/)
+    expect(out.stderr).toContain('x-access-token:***@github.com')
+    expect(out.stderr, 'the guard must not publish the token it found').not.toContain(secret)
+    expect(existsSync(join(herdrDir, 'calls')), 'nothing was started').toBe(false)
+    // The same checkout with the credential moved out of the URL deploys, so the guard costs nothing when clean.
+    writeFileSync(join(watched, '.git', 'config'), '[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
+    expect(run(['start'], { PI_SUPERAGENT_WATCHED_CHECKOUTS: `${watched}:${watched}` }).status, 'a clean URL deploys').toBe(0)
+  })
+
+  it('refuses a ticket checkout that came back with a credential in its remote', () => {
+    const secret = `ghp_${'y'.repeat(36)}`
+    mkdirSync(join(state, 'work', 'TK-7', '.git'), { recursive: true })
+    writeFileSync(join(state, 'work', 'TK-7', '.git', 'config'), `[credential]\n\thelper = !f(){ echo password=${secret}; }; f\n`)
+    const out = run(['start'])
+    expect(out.status).toBe(1)
+    expect(out.stderr).toMatch(/work\/TK-7\/\.git\/config/)
+    expect(out.stderr).toContain('password=ghp_***')
+    expect(out.stderr).not.toContain(secret)
+  })
 })
 
   it('intake labels the issues it is asked for, in ranges and lists, and refuses a bad spec', () => {

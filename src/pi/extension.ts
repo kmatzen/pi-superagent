@@ -6,7 +6,7 @@ import { execFile, execFileSync } from 'node:child_process'
 import { promisify } from 'node:util'
 
 const runGit = promisify(execFile)
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
 import {GithubSource, REPLY_MARKER, type GithubApi, REQUEST_LABEL} from './source-github.ts'
@@ -851,6 +851,10 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(env.PI_SUPERAGENT_GITHUB_REPO ? { githubRepo: env.PI_SUPERAGENT_GITHUB_REPO } : {}),
     ...(env.PI_SUPERAGENT_GITHUB_SELF ? { githubSelf: env.PI_SUPERAGENT_GITHUB_SELF } : {}),
     ...(env.PI_SUPERAGENT_GITHUB_TOKEN_FILE ? { githubTokenFile: env.PI_SUPERAGENT_GITHUB_TOKEN_FILE } : {}),
+    // Checkouts outside the worktree root that this deployment reads: the board's checkout, the checkout the
+    // router runs from. The credential guard scans them; ':' and ',' both separate, so config.env and a shell
+    // prefix take the same value.
+    ...(env.PI_SUPERAGENT_WATCHED_CHECKOUTS?.trim() ? { watchedCheckouts: env.PI_SUPERAGENT_WATCHED_CHECKOUTS.split(/[,:]/).map(s => s.trim()).filter(Boolean) } : {}),
     ...(env.PI_SUPERAGENT_ALLOWED?.trim() ? { allowed: new Set(env.PI_SUPERAGENT_ALLOWED.split(',').map(s => s.trim()).filter(Boolean)) } : {}),
   }
 }
@@ -887,7 +891,10 @@ export default function superagent(pi: PiLike): void {
     host[ACTIVE] = false
     throw error
   }
-  const problems = setupProblems({ root: config.worktreeRoot, stateDir: config.dataDir })
+  // The router's own checkout is a watched checkout too: its .git/config is one `git remote -v` away from a
+  // worker transcript, and it is where a deploy-time credential gets baked when someone "just" fixes a push.
+  const checkouts = [...(config.watchedCheckouts ?? []), resolve(import.meta.dirname, '..')]
+  const problems = setupProblems({ root: config.worktreeRoot, stateDir: config.dataDir, checkouts })
   writeFileSync(`${config.dataDir}/setup.json`, JSON.stringify({ problem: problems[0] ?? null, problems, at: new Date().toISOString() }))
   writeHealth(config.dataDir, null)
   // `ready` is what `superagent start` waits for: a session that has booted is not yet a router that
