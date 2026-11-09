@@ -53,14 +53,17 @@ workers and flushes replies. Three consecutive GitHub poll failures set an error
 A pull read answers in three ways, not two (`PullRead` in `pulls.ts`): GitHub's body, the word `absent`
 when the same token can read the repository and GitHub has no such number, and `unreadable` when the read
 itself said nothing — a 404 from an account the repository is invisible to, a 403 from an IP allowlist, a
-5xx, a dead token. Only the first two end a ticket's wait, because GitHub answers HTTP 404 for a pull request
-that is gone and for one the token cannot see with the same bytes. An unreadable read keeps the follow open, is
-named once per pull request per window (`pull.unreadable`, then `pull.unreadable_escalated`), and is counted
-under `pulls` in `health.json` as `degraded` — a repository the token will never see is not an outage to
-restart. The probe that tells the two apart asks the REPOSITORY the same question with the SAME token, because
-the operator's rule of 2026-11-08 is that every call to GitHub is the one configured account. The window's read
-count restarts with the router; the escalation and the first-seen time do not, because the measured incident is
-a router that restarts. A report URL that is not a pull request link is `pull.parse_failed`.
+5xx, a dead token. **Only a body saying `state: closed`, with its own `closed_at`/`merged_at`, ends a ticket's
+wait** — because GitHub answers HTTP 404 for a pull request that is gone and for one the token cannot see with
+the same bytes, and a pre-fix router dated those endings from its own clock. `absent` and `unreadable` keep the
+follow open, are named once per pull request per window (`pull.absent`, `pull.unreadable`, then
+`pull.unreadable_escalated`), and are counted under `pulls` in `health.json` as `degraded` — a repository the
+token will never see is not an outage to restart. A deleted pull request therefore parks its ticket in the open
+state with a name on it, for a person to close; the router never guesses that ending. The probe that tells a
+gone pull from an invisible one asks the REPOSITORY the same question with the SAME token, because the operator's
+rule of 2026-11-08 is that every call to GitHub is the one configured account. The window's read count restarts
+with the router; the escalation and the first-seen time do not, because the measured incident is a router that
+restarts. A report URL that is not a pull request link is `pull.parse_failed`.
 
 `source-github.ts` tracks issues, comments and submitted reviews. It recognizes the router’s own
 comments by the bot login or a hidden marker. `scopeOf` in `router.ts` checks each author’s GitHub
