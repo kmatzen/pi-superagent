@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync,
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { execFile, execFileSync } from 'node:child_process'
-import { childDirs, describeCredentials, findEmbeddedGitCredentials } from './git-credentials.ts'
+import { checkoutDirs, describeCredentials, findEmbeddedGitCredentials } from './git-credentials.ts'
 
 export interface WorkspaceRequest {
   root: string
@@ -153,7 +153,7 @@ export function setupProblems(request: { root: string; stateDir: string; checkou
   // Every checkout this deployment reads: the ones the operator named, the one the router runs from, and the
   // ticket checkouts under the worktree root. A credential in any of them is readable by every user on the
   // box and printed by every worker that runs `git remote -v`, so it is a setup problem, not a lint.
-  for (const dir of new Set([...(request.checkouts ?? []), ...childDirs(request.root)])) {
+  for (const dir of new Set([...(request.checkouts ?? []), ...checkoutDirs(request.root)])) {
     const findings = findEmbeddedGitCredentials(dir)
     if (findings.length) problems.push({ code: 'git-credential-in-url', place: 'Deployment', detail: describeCredentials(dir, findings) })
   }
