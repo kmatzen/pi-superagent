@@ -1137,4 +1137,28 @@ describe('the tick keeps its cadence', () => {
     // One abandoned pass, not one per beat: the guard moved to the new pass, whose clock started fresh.
     expect((trailOf(f.dir).match(/tick\.abandoned/g) ?? []).length).toBe(1)
   })
+
+  it('a wedge that never clears is announced, and the loop stops stacking passes on it', async () => {
+    // Nothing releases this gate, so every replacement wedges in the same await. Abandoning a pass does not
+    // stop it, and a `gh` process has no timeout, so the ceiling is what keeps a wedged router from collecting
+    // a live pass — and its child processes — every `tickAbandonMs` for the life of the process.
+    const gate = new Promise<void>(() => {})
+    let polls = 0
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, tickStallMs: 10, tickStallReportMs: 10, tickAbandonMs: 30, githubApi: gatedGithub(gate, () => { polls += 1 }) })
+    await until(() => trailOf(f.dir).includes('tick.abandon_skipped'), 2_000)
+    const trail = trailOf(f.dir)
+    expect(polls, 'three passes reached the poll: the original and two replacements').toBe(3)
+    expect(trail, 'the replacement is named, and so is the refusal to stack a third').toMatch(/tick\.abandoned stage=poll[\s\S]*tick\.abandon_skipped stage=poll[\s\S]*passesInFlight=3/)
+    expect((trail.match(/tick\.abandoned /g) ?? []).length, 'two replacements, then the ceiling holds').toBe(2)
+    const reached = polls
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(polls, 'the beat keeps firing, and starts no fourth pass onto the wedge').toBe(reached)
+    expect((trailOf(f.dir).match(/tick\.abandoned /g) ?? []).length, 'the ceiling is a ceiling, not a slower ramp').toBe(2)
+    expect(trailOf(f.dir), 'the alarm repeats, so a person tailing the log keeps seeing it')
+      .toMatch(/tick\.abandon_skipped[\s\S]*tick\.abandon_skipped/)
+    const health = JSON.parse(healthOf(f.dir)) as { tick: { state: string; detail: string } }
+    expect(health.tick.state, 'and the file the health check counts says the loop is not beating').toBe('error')
+    expect(health.tick.detail).toContain('the loop is not beating')
+  })
 })

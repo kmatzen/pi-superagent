@@ -56,7 +56,10 @@ each one then paying the full PR fan-out because the 120 s read budget had expir
 on the launches it queued instead, and the loop's own liveness is published: every pass logs `tick n=…` with
 `gapMs` and per-stage times and `gh` call count, and writes `tick` into `health.json`, so a pass parked for
 longer than `PI_SUPERAGENT_TICK_STALL_MS` fails `superagent status` naming its stage, and one past
-`PI_SUPERAGENT_TICK_ABANDON_MS` is abandoned and replaced. `PullFollower` bounds its own fan-out per pass
+`PI_SUPERAGENT_TICK_ABANDON_MS` is abandoned and replaced. Abandoning gives up the guard's place, not the pass,
+so at most three passes run at once (`tick.abandon_skipped` says the loop is wedged rather than slow): a hung
+`gh` child has no timeout, and a ceiling stops a permanent wedge from collecting a pass every `abandonMs`.
+`PullFollower` bounds its own fan-out per pass
 (`PI_SUPERAGENT_PULL_READS_PER_TICK`, read least-recently-read first) so a late pass defers reads instead of
 spending a minute on them.
 

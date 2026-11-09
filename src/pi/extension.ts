@@ -739,14 +739,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   let tickBegan = 0
   let lastTickEnd = Date.now()
   let lastStallReport = 0
+  let lastAbandonReport = 0
   const enter = (name: string): void => { stage = name; stageAt = Date.now() }
+  // One decimal, because a stall reported as "0s" reads as nothing having happened.
+  const secs = (ms: number): string => `${Math.round(ms / 100) / 10}s`
 
   const tickHealth = (state: 'ok' | 'error', fields: { ms?: number; detail?: string } = {}): TickHealth => {
     const at = Date.now()
-    // One decimal, because a stall reported as "0s" reads as nothing having happened.
-    const where = (ms: number): string => `${Math.round(ms / 100) / 10}s`
     const detail = fields.detail
-      ?? (state === 'error' ? `tick stalled in ${stage} for ${where(at - stageAt)} (pass ${where(at - tickBegan)})` : undefined)
+      ?? (state === 'error' ? `tick stalled in ${stage} for ${secs(at - stageAt)} (pass ${secs(at - tickBegan)})` : undefined)
     return {
       state,
       ...(detail ? { detail: detail.slice(0, 160) } : {}),
@@ -768,12 +769,22 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   /** Which pass owns the guard. An abandoned pass that later settles must not clear the guard of the pass that
    *  replaced it, and must not report that it is the live one. */
   let generation = 0
+  /**
+   * Passes started and not finished. Abandoning a pass gives up its place in the guard, it does not stop the
+   * pass: its awaits stay open, and a `gh` process has no timeout of its own, so a wedge that never clears — a
+   * hung socket, a herdr that stopped answering — would collect one live pass, and its child processes, every
+   * `abandonMs` for the life of the process. The ceiling is the point where the alarm is the whole product.
+   */
+  let inFlight = 0
+  const maxPassesInFlight = 3
   const startTick = (): void => {
     const mine = ++generation
     const beganAt = Date.now()
     tickBegan = beganAt
     ticking = true
+    inFlight += 1
     void tick().finally(() => {
+      inFlight -= 1
       if (mine !== generation) {
         // The pass gave up its place long ago, and the live stage belongs to whoever holds it now: report only
         // what this one knows, which is how long it took to land.
@@ -794,20 +805,39 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const at = Date.now()
     const running = at - tickBegan
     if (running < stallMs) return
-    if (at - lastStallReport >= stallReportMs) {
-      lastStallReport = at
-      log.line('warn', 'tick.stalled', {
-        stage, stageMs: at - stageAt, runningMs: running, intervalMs: tickMs, stallMs, n: sweeps,
-        sinceLastMs: at - lastTickEnd, launchPending: executor.pendingLaunches, ghCalls,
-      })
-      publishHealth(tickHealth('error'))
+    if (running < abandonMs) {
+      // One voice per phase: past the abandon deadline the wedge line below owns health.json, so the two never
+      // take turns overwriting each other on consecutive beats.
+      if (at - lastStallReport >= stallReportMs) {
+        lastStallReport = at
+        log.line('warn', 'tick.stalled', {
+          stage, stageMs: at - stageAt, runningMs: running, intervalMs: tickMs, stallMs, n: sweeps,
+          sinceLastMs: at - lastTickEnd, launchPending: executor.pendingLaunches, ghCalls,
+        })
+        publishHealth(tickHealth('error'))
+      }
+      return
     }
-    if (running < abandonMs) return
+    if (inFlight >= maxPassesInFlight) {
+      // The passes this loop replaced are wedged in the same place, so replacing them buys nothing. Keep the
+      // alarm and stop stacking work on a box shared with the workers: `superagent status` exits 2 on this and
+      // says the loop is not beating, which is the fact the operator needs.
+      if (at - lastAbandonReport >= stallReportMs) {
+        lastAbandonReport = at
+        log.line('error', 'tick.abandon_skipped', {
+          stage, stageMs: at - stageAt, runningMs: running, abandonMs, passesInFlight: inFlight,
+          intervalMs: tickMs, n: sweeps, launchPending: executor.pendingLaunches, ghCalls,
+        })
+        publishHealth(tickHealth('error', { detail: `tick wedged in ${stage} for ${secs(at - stageAt)}: ${inFlight} passes in flight, the loop is not beating` }))
+      }
+      return
+    }
     // Give the pass up and keep the beat. Awaits here are GitHub, herdr and the launch queue, and none of them
     // is allowed to own the cadence for the life of the process; the pass keeps running and reports where it
     // landed. Repeating a pass is safe by construction: trigger ids dedup, the outbox is idempotent by id, and
     // the engine's commands are the only writes.
-    log.line('error', 'tick.abandoned', { stage, runningMs: running, abandonMs, n: sweeps, launchPending: executor.pendingLaunches })
+    lastAbandonReport = at
+    log.line('error', 'tick.abandoned', { stage, runningMs: running, abandonMs, passesInFlight: inFlight, n: sweeps, launchPending: executor.pendingLaunches })
     again = false
     startTick()
   }
