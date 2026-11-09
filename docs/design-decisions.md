@@ -42,6 +42,19 @@ comment, or a report that changed state, restarts the count. The journal is the 
 aggregate's: an Assignment keeps its last report, so the 93 receipts of one worker session are one
 report in the ticket.
 
+**Say a report nobody received.** A worker's report travels: the pane appends it to
+`reports.jsonl`, the router reads the file and files it on the ticket. When the ticket has no
+live worker by then — it ended on the worker's own report, and a queued copy of its mandate
+started a second run in the same tab — the router drops the report, the report tool has already
+answered `reported`, and the file's cursor has moved past the line, so nothing retries it.
+Measured 2026-11-09 on #255: the report at 08:59:23Z ended the run, a queued copy of the same
+mandate woke the same tab at ~09:01Z, its `ticket_report` answered `reported`, and the issue's
+comment count never moved. Every later run of that ticket read the last receipt as proof the
+previous one had spoken. The drop is now said in the engine log (`worker.report_dropped`) and
+answered to the worker as `not recorded`, because a report nobody received is indistinguishable
+from a worker that went silent, and an operator who cannot tell the two keeps spending sessions
+on the same proof.
+
 **Save later read positions after delivery.** A poll stages its read position for the next poll to
 commit. If the router crashes after reading a comment but before the engine receives it, the old
 position lets the router read it again. Stable trigger IDs make that replay safe. The initial
