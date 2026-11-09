@@ -75,7 +75,8 @@ afterEach(() => { for (const r of live.splice(0)) r.stop() })
 function fixture(accept = true, before?: (dir: string) => void, reuse?: string, herdr?: Herdr,
                  options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number;
                    workerTiming?: { pollMs?: number; livenessMs?: number }; pullApi?: PullApi; blocked?: string[];
-                   judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean } = {}) {
+                   judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
+                   maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [] }
   const closes: number[] = []
@@ -106,6 +107,11 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     dataDir: dir, worktreeRoot: join(dir, 'work'), self: 'pi-superagent', githubRepo: 'o/r', prepare: options.prepare ?? 'true',
     bots: new Set(['fleet-answer-loop']), tickMs: options.tickMs ?? 5, ...(herdr ? { workers: 'herdr' as const } : {}),
     ...(options.blocked ? { blockedCommands: options.blocked } : {}),
+    ...(options.maxConcurrent === undefined ? {} : { maxConcurrent: options.maxConcurrent }),
+    ...(options.launchDrainMs === undefined ? {} : { launchDrainMs: options.launchDrainMs }),
+    ...(options.tickStallMs === undefined ? {} : { tickStallMs: options.tickStallMs }),
+    ...(options.tickStallReportMs === undefined ? {} : { tickStallReportMs: options.tickStallReportMs }),
+    ...(options.tickAbandonMs === undefined ? {} : { tickAbandonMs: options.tickAbandonMs }),
     ...(options.watchRepoIsAsks ? { watchRepoIsAsks: true } : {}),
     ...(options.workerTokenFile ? { workerTokenFile: options.workerTokenFile } : {}),
   }
@@ -1259,4 +1265,231 @@ describe('the sweep of settled checkouts', () => {
       expect(readdirSync(root)).toEqual(['tk-open'])
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
+})
+
+// The cadence of the loop, measured live 2026-11-09 (#303): a 30 s timer entered 7 ticks in 6.6 h. Every beat
+// fired, found `ticking === true`, and folded itself into `again` in silence. The pass was parked in
+// `await executor.idle()` — the launch queue's tail, which waits for a free worker slot — and a fleet at its
+// cap frees one only when the fleet goes quiet. These three pin the fix: the pass never waits on capacity, a
+// pass that stops moving says where, and a pass that never finishes is given up on.
+describe('the tick keeps its cadence', () => {
+  /** A tick that parks must fail here with a reason, not in the test runner's timeout. */
+  const withDeadline = async (p: Promise<void>, ms: number, what: string): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expired = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what}: the pass did not finish in ${ms}ms`)), ms)
+      timer.unref?.()
+    })
+    try { await Promise.race([p, expired]) } finally { clearTimeout(timer) }
+  }
+  const trailOf = (dir: string) => readFileSync(join(dir, 'engine.log'), 'utf8')
+  const healthOf = (dir: string) => readFileSync(join(dir, 'health.json'), 'utf8')
+
+  const gatedGithub = (gate: Promise<void>, open: () => void): GithubApi => ({
+    issues: async () => { open(); await gate; return [] },
+    comments: async () => [] as IssueComment[],
+    postComment: async () => {},
+  })
+
+  it('a fleet at its cap keeps the loop running: a pass never waits for a worker slot', async () => {
+    const f = fixture(true, undefined, undefined, undefined, { tickMs: 5, maxConcurrent: 1, launchDrainMs: 20 })
+    // Three accepted tickets against one slot: the first holds it (in-process workers emit no events, so it is
+    // busy for the life of the process), the other two queue behind it. That is the live shape, in miniature.
+    for (const issue of ['501', '502', '503']) {
+      f.addComment(issue, 'octocat', `do the thing ${issue}`)
+      await f.running.tick()
+      f.decide('accept')
+      await f.running.tick()
+    }
+    expect(f.workers).toHaveLength(1)
+    expect(f.running.load().queued, 'the other two are waiting for a slot').toBe(2)
+
+    for (let pass = 0; pass < 5; pass++) await withDeadline(f.running.tick(), 2_000, 'a pass with launches queued')
+    const trail = trailOf(f.dir)
+    expect((trail.match(/ tick n=/g) ?? []).length, 'the loop was entered every time').toBeGreaterThanOrEqual(5)
+    expect(trail, 'and the pass says the queue is still waiting, not that it drained').toMatch(/launchPending=1 drained=false/)
+    expect(f.workers.length, 'queued launches stay queued, they are not dropped').toBe(1)
+
+    const health = JSON.parse(healthOf(f.dir)) as { tick: { state: string; intervalMs: number } }
+    expect(health.tick.state, 'a saturated fleet is not a stalled router').toBe('ok')
+  })
+
+  it('a pass that stops moving names its stage, in the log and in health.json', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let polls = 0
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, tickStallMs: 40, tickStallReportMs: 10, tickAbandonMs: 600_000, githubApi: gatedGithub(gate, () => { polls += 1 }) })
+    await until(() => (trailOf(f.dir).match(/tick\.stalled/g) ?? []).length >= 2)
+    const trail = trailOf(f.dir)
+    expect(trail).toMatch(/tick\.stalled stage=poll stageMs=\d+ runningMs=\d+ intervalMs=5 stallMs=40/)
+    expect(polls, 'the parked pass holds the poll: the guard is why a second one never starts').toBe(1)
+    expect((trail.match(/tick\.stalled/g) ?? []).length, 'the timer kept firing, and said so twice').toBeGreaterThanOrEqual(2)
+
+    // Read it before the pass lands: health.json is the file a person reaches when the pane is the wedged thing.
+    const health = JSON.parse(healthOf(f.dir)) as { tick: { state: string; stage: string; detail: string; launchPending: number } }
+    expect(health.tick.state, 'a stalled tick is an error, which is what the health check counts').toBe('error')
+    expect(health.tick.stage).toBe('poll')
+    expect(health.tick.detail).toContain('stalled in poll')
+    // The contract `superagent status` reads: one "state": "error", and the file's first 200 characters carry it.
+    expect(healthOf(f.dir)).toContain('"state": "error"')
+    expect(healthOf(f.dir).replace(/\n/g, '').slice(0, 200)).toContain('stalled in poll')
+
+    release()
+    await until(() => (JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state === 'ok')
+    expect(healthOf(f.dir), 'a pass that finishes clears the alarm').not.toContain('"state": "error"')
+  })
+
+  it('a stall the fleet caused names the fleet: the backlog and the cap, in the alarm itself', async () => {
+    // Measured on the live router 2026-11-09 (#303): the run that lost its beat queued a median of 12 launches a
+    // pass with 18 workers on a cap of 8 and beat every 2,780 s, while 35 runs that queued <=1 beat every 30.0 s
+    // — 17 of them with the fleet over the cap and an empty queue. So `running >= cap` is not the cause and a
+    // stall line that reports only the stage cannot be acted on: the reader needs the backlog and the cap, and
+    // health.json is the file read over a wall (`superagent status` prints its first 200 characters).
+    let park = false
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let polls = 0
+    // The fixture's own feed shape, served through a gate: an api that answers `[]` intake nothing, so there
+    // would be no ticket to launch and no queue to name.
+    const feed: { issues: IssueState[]; comments: IssueComment[] } = { issues: [], comments: [] }
+    const ask = (n: string) => {
+      feed.issues.push({ issue: Number(n), title: 'DO: the thing', labels: [], author: 'pi-superagent',
+        association: 'OWNER', createdAt: '2026-11-04T09:00:00Z', updatedAt: '2026-11-05T09:00:00Z' })
+      feed.comments.push({ issue: Number(n), author: 'octocat', association: 'OWNER', at: '2026-11-05T09:00:00Z', body: `do the thing ${n}` })
+    }
+    const api: GithubApi = {
+      issues: async () => { polls += 1; if (park) await gate; return [...feed.issues] },
+      comments: async () => [...feed.comments],
+      postComment: async () => {},
+    }
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, maxConcurrent: 1, launchDrainMs: 20, tickStallMs: 40, tickStallReportMs: 10, tickAbandonMs: 600_000, githubApi: api })
+    // One slot, one worker holding it (in-process workers emit no events, so it stays busy), one launch behind it.
+    for (const issue of ['521', '522']) {
+      ask(issue)
+      await f.running.tick()
+      f.decide('accept')
+      await f.running.tick()
+    }
+    expect(f.workers.length, 'the first launch took the only slot').toBe(1)
+    expect(f.running.load().queued, 'the second launch waits for the slot the first one holds').toBe(1)
+
+    park = true
+    await until(() => trailOf(f.dir).includes('tick.stalled'), 5_000)
+    const trail = trailOf(f.dir)
+    expect(trail, 'the stall line carries the fleet: how many are busy and what the cap is')
+      .toMatch(/tick\.stalled stage=poll[\s\S]*?running=1 cap=1/)
+    const health = JSON.parse(healthOf(f.dir)) as { tick: { state: string; detail: string; launchPending: number } }
+    expect(health.tick.state).toBe('error')
+    expect(health.tick.launchPending, 'the backlog is a number, not an implication').toBe(1)
+    expect(health.tick.detail, 'the alarm states the cause, in the words an operator acts on')
+      .toContain('1 launch queued, 1 busy against the cap of 1')
+    expect(healthOf(f.dir).replace(/\n/g, '').slice(0, 200), 'and it survives the cut `superagent status` makes')
+      .toContain('against the cap of 1')
+    release()
+  }, 30_000)
+
+  it('a pass that never finishes is abandoned, and the beat survives it', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let polls = 0
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, tickStallMs: 30, tickAbandonMs: 90, githubApi: gatedGithub(gate, () => { polls += 1 }) })
+    await until(() => trailOf(f.dir).includes('tick.abandoned'))
+    expect(polls, 'the pass that replaced the abandoned one reached the poll too').toBeGreaterThanOrEqual(2)
+    release()
+    // The abandoned pass lands and says where; the loop is on its own beat by then, and finishes passes.
+    await until(() => trailOf(f.dir).includes('tick.late_finish'))
+    const trail = trailOf(f.dir)
+    expect(trail, 'the abandoned pass names the stage it was parked in').toMatch(/tick\.abandoned stage=poll/)
+    expect(trail, 'and reports when it finally lands, without claiming the live pass').toMatch(/tick\.late_finish runningMs=\d+ supersededBy=\d+/)
+    expect((trail.match(/ tick n=/g) ?? []).length, 'the loop is finishing passes again, not mourning the parked one').toBeGreaterThanOrEqual(2)
+    // One abandoned pass, not one per beat: the guard moved to the new pass, whose clock started fresh.
+    expect((trailOf(f.dir).match(/tick\.abandoned/g) ?? []).length).toBe(1)
+  })
+
+  it('a wedge that never clears is announced, and the loop stops stacking passes on it', async () => {
+    // Nothing releases this gate, so every replacement wedges in the same await. Abandoning a pass does not
+    // stop it, and a `gh` process has no timeout, so the ceiling is what keeps a wedged router from collecting
+    // a live pass — and its child processes — every `tickAbandonMs` for the life of the process.
+    const gate = new Promise<void>(() => {})
+    let polls = 0
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, tickStallMs: 10, tickStallReportMs: 10, tickAbandonMs: 30, githubApi: gatedGithub(gate, () => { polls += 1 }) })
+    await until(() => trailOf(f.dir).includes('tick.abandon_skipped'), 2_000)
+    const trail = trailOf(f.dir)
+    expect(polls, 'three passes reached the poll: the original and two replacements').toBe(3)
+    expect(trail, 'the replacement is named, and so is the refusal to stack a third').toMatch(/tick\.abandoned stage=poll[\s\S]*tick\.abandon_skipped stage=poll[\s\S]*passesInFlight=3/)
+    expect((trail.match(/tick\.abandoned /g) ?? []).length, 'two replacements, then the ceiling holds').toBe(2)
+    const reached = polls
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(polls, 'the beat keeps firing, and starts no fourth pass onto the wedge').toBe(reached)
+    expect((trailOf(f.dir).match(/tick\.abandoned /g) ?? []).length, 'the ceiling is a ceiling, not a slower ramp').toBe(2)
+    expect(trailOf(f.dir), 'the alarm repeats, so a person tailing the log keeps seeing it')
+      .toMatch(/tick\.abandon_skipped[\s\S]*tick\.abandon_skipped/)
+    const health = JSON.parse(healthOf(f.dir)) as { tick: { state: string; detail: string } }
+    expect(health.tick.state, 'and the file the health check counts says the loop is not beating').toBe('error')
+    expect(health.tick.detail).toContain('the loop is not beating')
+  })
+
+  it('the pass the beat gave up on clears nothing', async () => {
+    // Abandoning a pass gives up its place in the guard, not the pass, so the abandoned one eventually lands.
+    // It must not stamp the liveness line, move `lastTickEnd`, or write `"state": "ok"` over the alarm the loop
+    // is under: that is the silent-success shape, with health.json — the file `superagent status` counts — as
+    // the victim, and it is the one report a stalled loop can produce against itself.
+    const resolvers: Array<() => void> = []
+    let polls = 0
+    const api: GithubApi = {
+      // Every pass parks in the poll, each on its own resolver: nothing can finish on its own, so any
+      // `tick n=` line in the trail is the report this test is looking for.
+      issues: async () => { polls += 1; await new Promise<void>(resolve => { resolvers.push(resolve) }); return [] },
+      comments: async () => [] as IssueComment[],
+      postComment: async () => {},
+    }
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, tickStallMs: 10, tickStallReportMs: 10, tickAbandonMs: 30, githubApi: api })
+    await until(() => trailOf(f.dir).includes('tick.abandon_skipped'), 10_000)
+    expect(polls, 'the ceiling is in force: every pass is parked in the poll').toBe(3)
+
+    for (const release of resolvers.splice(0, 1)) release()   // the superseded pass lands; the loop is still wedged
+    await until(() => trailOf(f.dir).includes('tick.late_finish'), 10_000)
+    expect(trailOf(f.dir), 'it says where it landed, and nothing else').toMatch(/tick\.late_finish runningMs=\d+ supersededBy=\d+/)
+    expect(trailOf(f.dir), 'it writes no liveness line for a loop that has finished nothing').not.toMatch(/ tick n=/)
+    expect((JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state, 'and it leaves the alarm up')
+      .toBe('error')
+
+    // Let everything through: the beat finishes passes again, and the pass that owns the guard reports it.
+    await until(() => { for (const release of resolvers.splice(0)) release(); return polls > 3 }, 10_000)
+    await until(() => (JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state === 'ok', 10_000)
+    expect(trailOf(f.dir), 'a pass that owns the guard reports the cadence').toMatch(/ tick n=/)
+  }, 30_000)
+
+  it('a tick asked for by hand cannot clear the alarm the loop is under', async () => {
+    // The panel's "run one pass now" and the `engine_tick` tool are what an operator reaches for the moment a
+    // router looks stuck. With a pass parked, that pass owns the guard, so the pass by hand must do its work and
+    // say nothing: the liveness line, the stage label and health.json belong to the parked one, and an `ok` from
+    // a side pass is the alarm switched off by the person trying to read it.
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let polls = 0
+    const api: GithubApi = {
+      issues: async () => { polls += 1; if (polls === 1) await gate; return [] as IssueComment[] as never },
+      comments: async () => [] as IssueComment[],
+      postComment: async () => {},
+    }
+    const f = fixture(true, undefined, undefined, undefined,
+      { tickMs: 5, tickStallMs: 10, tickStallReportMs: 10, tickAbandonMs: 600_000, githubApi: api })
+    await until(() => trailOf(f.dir).includes('tick.stalled'), 2_000)
+    expect((JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state, 'the loop is under an alarm').toBe('error')
+
+    await withDeadline(f.running.tick(), 2_000, 'a pass asked for by hand')
+    expect(polls, 'it did run: the work of a tick is not what is withheld').toBe(2)
+    expect(trailOf(f.dir), 'it logs no liveness line for a loop that has finished nothing').not.toMatch(/ tick n=/)
+    expect((JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state, 'and writes no ok over the alarm').toBe('error')
+
+    release()
+    await until(() => (JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state === 'ok', 5_000)
+    expect(trailOf(f.dir), 'the pass that owns the guard is the one that clears it').toMatch(/ tick n=/)
+  }, 30_000)
 })

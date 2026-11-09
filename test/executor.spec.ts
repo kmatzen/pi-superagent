@@ -395,3 +395,40 @@ describe('PiExecutor', () => {
     expect(f.calls_of('report')[0]!.args[1]).toMatchObject({ state: 'failed', summary: /provider 502/ })
   })
 })
+
+// A production tick that awaits `idle()` awaits the worker slots with it. Measured live 2026-11-09 (#303): the
+// router entered 7 ticks in 6.6 h against a 30 s timer, because its last await was this queue and the fleet was
+// at its cap. `drain` is the seam that takes the launches without the capacity wait, and says which it got.
+describe('draining the launch queue', () => {
+  it('returns when its budget is spent, naming the launches still waiting for a slot', async () => {
+    const f = fixture({ maxConcurrent: 1, slotPollMs: 5 })
+    f.executor.start(ticket({ id: 'T1' }), assignment('A1'))
+    expect(await f.executor.drain(50)).toEqual({ settled: true, pending: 0 })
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    expect(f.executor.pendingLaunches, 'the second launch is waiting for the slot T1 holds').toBe(1)
+    const began = Date.now()
+    expect(await f.executor.drain(30)).toEqual({ settled: false, pending: 1 })
+    expect(Date.now() - began, 'the budget is the ceiling, not the slot').toBeLessThan(1_000)
+    expect(f.sessions, 'and the launch is queued, not dropped').toHaveLength(1)
+    f.executor.stop(ticket({ id: 'T1' }), assignment('A1'), 'done')
+    expect(await f.executor.drain(500)).toEqual({ settled: true, pending: 0 })
+    expect(f.sessions).toHaveLength(2)
+  })
+
+  it('a launch that throws still leaves the queue drained, not parked', async () => {
+    const f = fixture({}, { launch: 'T1' })
+    f.executor.start(ticket(), assignment())
+    expect(await f.executor.drain(500)).toEqual({ settled: true, pending: 0 })
+    expect(f.calls_of('reported')[0]!.args[3], 'the failure is filed as a launch report').toMatchObject({ state: 'failed' })
+  })
+
+  it('counts every launch exactly once, so a queue with a failure in it reads its true size', async () => {
+    // The count is what the tick reports as `launchPending`, and what its drain waits on: a launch counted
+    // twice on the way out would tell the pass the queue was empty while a ticket still waited on a slot.
+    const f = fixture({ maxConcurrent: 2 }, { launch: 'T2' })
+    for (const id of ['T1', 'T2', 'T3']) f.executor.start(ticket({ id }), assignment(`A${id}`))
+    expect(await f.executor.drain(500)).toEqual({ settled: true, pending: 0 })
+    expect(f.sessions.map(s => s.sessionId), 'the failure does not stop the launch behind it').toEqual(['s0', 's1'])
+    expect(f.calls_of('reported').map(c => (c.args[3] as { state: string }).state), 'one failure filed').toEqual(['failed'])
+  })
+})
