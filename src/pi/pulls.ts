@@ -11,11 +11,47 @@ export interface PullState {
   merged: boolean
   createdAt: string
   closedAt?: string
+  mergedAt?: string
+  /** GitHub's own `state` string, kept verbatim, so a receipt can be checked against the API. */
+  rawState: string
+  /** The commit at the tip of the branch at the moment of the read: what the ticket's work was judged against. */
+  headRefOid: string
 }
 
+/**
+ * What a pull-state read produced, in the words a person can check on GitHub: the poll's exit status, and the
+ * fields the ending is claimed from. A receipt that only says "closed" is how eight false closings of one open
+ * pull request ran for nine hours unnoticed (board #235 against `fleet-board#74`, 2026-11-09).
+ */
+export interface PullEvidence {
+  repo: string
+  number: number
+  /** The poll's exit status: 0 when `gh` answered, the code it died with when it did not, -1 when it never ran. */
+  status: number
+  /** The raw `state` field, verbatim; empty when the read produced no body to read a state out of. */
+  state: string
+  closedAt: string | null
+  mergedAt: string | null
+  headRefOid: string
+  /** Why the read decided nothing (`repo-invisible`, `empty-output`, `gh-exit-1`, `unrecognised-state:…`). */
+  reason?: string
+}
+
+/**
+ * A pull-state read answers three ways, and only two of them say the pull request finished:
+ * `found` carries GitHub's own state, `absent` is GitHub saying it has no such number in a repository this same
+ * token can read, and `unknown` is a read that said nothing — a non-zero exit, empty stdout, a body with no
+ * state, an unrecognised state, a rate limit, a 404 from an account the repository is invisible to. The third
+ * is not a close, and a poller that reads it as one ends live tickets on a network blip.
+ */
+export type PullRead =
+  | { read: 'found'; state: PullState; evidence: PullEvidence }
+  | { read: 'absent'; evidence: PullEvidence }
+  | { read: 'unknown'; reason: string; evidence: PullEvidence }
+
 export interface PullApi {
-  /** Undefined when GitHub has no such pull request. */
-  pull(repo: string, number: number): Promise<PullState | undefined>
+  /** The pull request's state, or the fact that this read decided nothing; it never answers "closed" for a failure. */
+  pull(repo: string, number: number): Promise<PullRead>
   comments(repo: string, number: number, since?: string): Promise<IssueComment[]>
   reviews(repo: string, number: number): Promise<PrReview[]>
 }
@@ -71,7 +107,8 @@ export interface FollowerOptions {
   positions: PositionStore
   self: string
   bots?: ReadonlySet<string>
-  closed(thread: ThreadRef, pull: PullRef, outcome: 'merged' | 'closed', at: string): void
+  /** `evidence` is the read the ending acted on, and it travels with the close so the receipt can quote it. */
+  closed(thread: ThreadRef, pull: PullRef, outcome: 'merged' | 'closed', at: string, evidence: PullEvidence): void
   receive(trigger: Trigger): void
   warn(event: string, fields: Record<string, unknown>): void
   now?: () => number
@@ -85,6 +122,7 @@ const READS_AT_ONCE = 4
 export class PullFollower {
   private readonly polled = new Map<string, number>()
   private readonly unreadable = new Set<string>()
+  private readonly stateUnknown = new Set<string>()
 
   constructor(private readonly options: FollowerOptions) {}
 
@@ -120,19 +158,40 @@ export class PullFollower {
   }
 
   private async read(id: string, pull: PullRef, local: boolean, now: number): Promise<void> {
-    let state: PullState | undefined
+    let result: PullRead
     try {
-      state = await this.options.api.pull(pull.repo, pull.number)
+      result = await this.options.api.pull(pull.repo, pull.number)
     } catch (error) {
       this.options.warn('pull.read_failed', { thread: id, error: String(error).slice(0, 200) })
       return
     }
-    // A pull request GitHub no longer has cannot be merged, so the ticket's wait ends here: `undefined` is GitHub's only answer for one.
-    if (!state || !state.open) {
-      this.options.closed({ source: 'github', id }, pull, state?.merged ? 'merged' : 'closed', state?.closedAt ?? new Date(now).toISOString())
+    // A read that said nothing ends nothing. The follow stays open, the next pass asks again, and no receipt is
+    // written: measured 2026-11-09, every one of the eight "closed without merging" receipts on board #235
+    // followed a failed read of `fleet-board#74`, which GitHub says is open and unchanged since 06:00:01Z.
+    if (result.read === 'unknown') {
+      if (!this.stateUnknown.has(id)) {
+        this.stateUnknown.add(id)
+        this.options.warn('pull.state_unknown', { thread: id, reason: result.reason, status: result.evidence.status,
+          state: result.evidence.state, closedAt: result.evidence.closedAt, mergedAt: result.evidence.mergedAt })
+      }
       return
     }
-    if (!local) await this.listen(id, pull, state.createdAt)
+    if (this.stateUnknown.delete(id)) this.options.warn('pull.state_readable', { thread: id })
+    // A pull request GitHub has no number for cannot be merged, so the ticket's wait ends here — and only here:
+    // `absent` is readable only out of a repository this same token read, so it is a fact about the pull request.
+    if (result.read === 'absent') {
+      this.options.closed({ source: 'github', id }, pull, 'closed', new Date(now).toISOString(), result.evidence)
+      return
+    }
+    const state = result.state
+    if (state.open) {
+      if (!local) await this.listen(id, pull, state.createdAt)
+      return
+    }
+    // Only an explicit terminal state ends a ticket: MERGED, or CLOSED with its own `closed_at` (gh-api.ts answers
+    // `unknown` for a closed pull request whose body carries no time, and for any state string it does not know).
+    const at = (state.merged ? state.mergedAt : state.closedAt) ?? new Date(now).toISOString()
+    this.options.closed({ source: 'github', id }, pull, state.merged ? 'merged' : 'closed', at, result.evidence)
   }
 
   private async listen(id: string, pull: PullRef, createdAt: string): Promise<void> {

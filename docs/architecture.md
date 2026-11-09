@@ -88,6 +88,15 @@ When the PR leaves the watched repository’s open list, the follower checks whe
 closed and calls `threadClosed`. For another repository it checks every two minutes and routes
 comments and reviews through the qualified thread ID, `owner/repo#N`.
 
+A PR poll answers three ways (`PullRead`): `found` carries GitHub’s own `state` and times,
+`absent` is GitHub saying it has no such number in a repository this same token read, and
+`unknown` is a read that said nothing — a non-zero exit, empty stdout, a body with no state, an
+unrecognised state, a rate limit, a 404 on a repository the token cannot see. Only `found` with
+`MERGED`, or `CLOSED` carrying `closed_at`, and `absent` end a ticket; `unknown` keeps the follow
+open, logs `pull.state_unknown` once per pull request, and writes no receipt. The ending notice
+quotes the read it acted on (PR, raw state, `closed_at`, `merged_at`, head SHA, poll exit status)
+and is keyed on the thread plus the PR URLs, so a re-armed ticket cannot post it a second time.
+
 `receipts.ts` formats reports, questions, crashes and launch failures for the GitHub thread.
 `outbox.ts` queues messages by ID. Failed posts remain pending, and a recurring launch failure
 produces one notice. The source recognizes the hidden `<!-- superagent -->` marker on outgoing
@@ -135,5 +144,7 @@ To start over, stop the router and delete the directory. On the next start, the 
 | A bot never passes for a person | bot patterns and the policy gate | `Intake.tla` C5 |
 | Only authors admitted by the source scope reach the judge or a worker | the source scope, `scopeOf` | tests only |
 | A ticket with a pull request ends with it, as merged or closed | binding before the report, `threadClosed` | tests only |
+| A pull-state read that failed ends no ticket | `PullRead`’s `unknown` case in `gh-api.ts` and `pulls.ts` | tests only |
+| One ending notice per pull request per thread | the `pull-end:<thread>:<urls>` outbox key | tests only |
 | A live agent's tab is never swept | the liveness check in `closeStaleTabs` | `Workers.tla` W2, W4 |
 | Dead workers' tabs do not pile up | the sweep and the linger close | `Workers.tla` W5 |

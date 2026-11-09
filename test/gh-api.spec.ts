@@ -153,6 +153,18 @@ case "$*" in
   "api repos/x/y/pulls/11") echo '{"state":"open","merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/404") echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
   "api repos/x/y/pulls/502") echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
+  # Every way a poll can fail without saying anything about the pull request (board #235, 2026-11-09).
+  "api repos/x/y/pulls/12") echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
+  "api repos/x/y/pulls/13") exit 0 ;;
+  "api repos/x/y/pulls/14") echo '<html>502 Bad Gateway</html>'; exit 0 ;;
+  "api repos/x/y/pulls/15") echo '{"merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z"}'; exit 0 ;;
+  "api repos/x/y/pulls/16") echo '{"state":"closed","merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z"}'; exit 0 ;;
+  "api repos/x/y/pulls/17") echo '{"state":"archived","merged_at":null,"closed_at":"2026-11-06T11:00:00Z","created_at":"2026-11-05T09:00:00Z"}'; exit 0 ;;
+  "api repos/x/y/pulls/18") echo 'gh: API rate limit exceeded for user ID 1 (HTTP 403)' >&2; exit 1 ;;
+  # A repository this token can read answers 200, so a 404 on a pull inside it is a fact about the pull; an
+  # invisible repository answers 404 for the repository too, which is a fact about the token.
+  "api repos/x/y") echo '{"full_name":"x/y"}' ;;
+  "api repos/invisible/r"*) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
   "api repos/x/y/issues/11/comments?"*since=*) echo '[{"user":{"login":"rev"},"author_association":"MEMBER","created_at":"2026-11-06T09:00:00Z","body":"rename it"}]' ;;
   "api repos/x/y/pulls/11/reviews?per_page=100") echo '[{"id":5,"user":{"login":"rev"},"author_association":"OWNER","state":"APPROVED","submitted_at":"2026-11-06T09:30:00Z","body":""},{"id":6,"state":"PENDING"}]' ;;
   "api -X POST repos/x/y/issues/11/comments --input -") cat - > "$(dirname "$0")/posted.json" ;;
@@ -165,12 +177,48 @@ esac
 
 describe('ghPulls', () => {
   it('reads a pull request as merged, closed or open, and one GitHub does not have as absent', async () => {
-    const api = ghPulls({ bin: fakePullsGh().bin })
-    expect(await api.pull('x/y', 9)).toEqual({ open: false, merged: true, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T10:00:00Z' })
-    expect(await api.pull('x/y', 10)).toEqual({ open: false, merged: false, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T11:00:00Z' })
-    expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, createdAt: '2026-11-05T09:00:00Z' })
-    expect(await api.pull('x/y', 404)).toBeUndefined()
-    await expect(api.pull('x/y', 502), 'any other failure is an error, not a closed pull request').rejects.toThrow(/502/)
+    const gh = fakePullsGh()
+    const api = ghPulls({ bin: gh.bin })
+    expect(await api.pull('x/y', 9)).toMatchObject({
+      read: 'found', state: { open: false, merged: true, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T10:00:00Z', mergedAt: '2026-11-06T10:00:00Z' },
+      evidence: { status: 0, state: 'closed', closedAt: '2026-11-06T10:00:00Z', mergedAt: '2026-11-06T10:00:00Z' },
+    })
+    expect(await api.pull('x/y', 10)).toMatchObject({
+      read: 'found', state: { open: false, merged: false, closedAt: '2026-11-06T11:00:00Z' },
+      evidence: { repo: 'x/y', number: 10, status: 0, state: 'closed', closedAt: '2026-11-06T11:00:00Z', mergedAt: null },
+    })
+    expect(await api.pull('x/y', 11)).toMatchObject({ read: 'found', state: { open: true, merged: false }, evidence: { status: 0, state: 'open' } })
+    // A 404 is a fact about the pull request only where this same token can read the repository: measured
+    // 2026-11-09, the router's account got 404 on whole repositories and every follow in one ended its ticket.
+    expect(await api.pull('x/y', 404)).toMatchObject({ read: 'absent', evidence: { reason: 'no-such-pull-request', status: 1 } })
+    expect(await api.pull('invisible/r', 11), 'an invisible repository is an unreadable pull, never a closed one').toMatchObject({ read: 'unknown', reason: 'repo-invisible' })
+    expect(await api.pull('x/y', 502), 'a 5xx is a read that decided nothing, not a closed pull request').toMatchObject({ read: 'unknown', reason: 'gh-exit-1', evidence: { status: 1 } })
+  })
+
+  // The falsifying fixtures for board #235: eight "closed without merging" receipts fired against
+  // `matzen_adobe/fleet-board#74`, which GitHub reported open, with closed_at and merged_at null, the whole time.
+  // Every one followed a poll that failed, so every way a poll can fail is answered here — and none answers closed.
+  it('a poll that failed says nothing about the pull request: rc=1, empty stdout, garbage, no state, an unknown state, a rate limit', async () => {
+    const gh = fakePullsGh()
+    const api = ghPulls({ bin: gh.bin })
+    expect(await api.pull('x/y', 12), 'gh exited 1').toMatchObject({ read: 'unknown', reason: 'gh-exit-1', evidence: { status: 1, state: '' } })
+    expect(await api.pull('x/y', 13), 'gh exited 0 and printed nothing').toMatchObject({ read: 'unknown', reason: 'empty-output', evidence: { status: 0 } })
+    expect(await api.pull('x/y', 14), 'gh printed a body that is not JSON').toMatchObject({ read: 'unknown', reason: 'unparseable-output' })
+    expect(await api.pull('x/y', 15), 'the body carried no state').toMatchObject({ read: 'unknown', reason: 'no-state-in-body' })
+    expect(await api.pull('x/y', 16), 'a closed body with no closed_at is an incomplete answer').toMatchObject({ read: 'unknown', reason: 'closed-without-closed-at' })
+    expect(await api.pull('x/y', 17), 'a state the poller does not know decides nothing').toMatchObject({ read: 'unknown', reason: 'unrecognised-state:archived' })
+    expect(await api.pull('x/y', 18), 'a rate limit is a failed read').toMatchObject({ read: 'unknown', reason: 'rate-limited', evidence: { status: 1 } })
+    for (const n of [12, 13, 14, 15, 16, 17, 18]) {
+      expect((await api.pull('x/y', n)).read, `pull ${n}: a failed read is never found, and never absent`).toBe('unknown')
+    }
+  })
+
+  it('asks about a repository once while it stays invisible to this token', async () => {
+    const gh = fakePullsGh()
+    const api = ghPulls({ bin: gh.bin })
+    await api.pull('invisible/r', 11)
+    await api.pull('invisible/r', 12)
+    expect(gh.calls().filter(c => c === 'api repos/invisible/r'), 'invisibility is a property of the account, not of the poll').toHaveLength(1)
   })
 
   it("reads one pull request's comments from a time, and its submitted reviews, with each author's standing", async () => {
@@ -235,7 +283,7 @@ esac
 `)
     chmodSync(bin, 0o755)
     const api = ghPulls({ bin, tokenFile: token })
-    expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, createdAt: '2026-11-08T00:00:00Z' })
+    expect(await api.pull('x/y', 11)).toMatchObject({ read: 'found', state: { open: true, merged: false, createdAt: '2026-11-08T00:00:00Z' } })
     expect(readFileSync(join(dir, 'used.log'), 'utf8').trim()).toBe('pulls-secret')
   })
 })
@@ -261,9 +309,10 @@ esac
 
   it('with a token file, every call acts as that account: reads and replies alike', async () => {
     const gh = tokenGh()
-    expect(await ghPulls({ bin: gh.bin, tokenFile: gh.token }).pull('x/y', 11)).toMatchObject({ open: true })
+    expect(await ghPulls({ bin: gh.bin, tokenFile: gh.token }).pull('x/y', 11)).toMatchObject({ read: 'found', state: { open: true } })
     await expect(ghApi({ repo: 'o/r', bin: gh.bin, tokenFile: gh.token, followed: () => [] }).postComment(3, 'on it')).resolves.toBeUndefined()
-    await expect(ghPulls({ bin: gh.bin }).pull('x/y', 11), 'without it, gh acts as whoever it is signed in as').rejects.toThrow(/401/)
+    expect(await ghPulls({ bin: gh.bin }).pull('x/y', 11), 'without it, gh acts as whoever it is signed in as, and is refused: a refused read is UNKNOWN, never a close')
+      .toMatchObject({ read: 'unknown', reason: 'gh-exit-1', evidence: { status: 1 } })
   })
 
   it('a missing or empty token file is an error that names the file, and never a quiet switch of account', async () => {

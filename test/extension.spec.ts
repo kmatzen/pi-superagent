@@ -8,7 +8,8 @@ import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
 import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
-import type { PullApi, PullState } from '../src/pi/pulls.ts'
+import type { PullApi, PullRead } from '../src/pi/pulls.ts'
+import { closedRead, mergedRead, openRead, unknownRead } from './pull-read.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ext-')); dirs.push(d); return d }
@@ -732,19 +733,22 @@ echo '[]'
 describe('a pull request per ticket', () => {
   /** GitHub's pull requests as a test sets them: open until the test merges or closes one, at a time it names. */
   function pullsFake() {
-    const states = new Map<string, PullState>()
+    const states = new Map<string, PullRead>()
     const comments = new Map<string, IssueComment[]>()
     const created = new Date(Date.now() - 60_000).toISOString()
     const api: PullApi = {
-      pull: async (repo, n) => states.get(`${repo}#${n}`),
+      // A pull request the test never created is a read that decided nothing, never a close.
+      pull: async (repo, n) => states.get(`${repo}#${n}`) ?? unknownRead('test-has-no-such-pull', { repo, number: n, status: 1 }),
       comments: async (repo, n) => comments.get(`${repo}#${n}`) ?? [],
       reviews: async () => [],
     }
     return {
       api, comments,
-      open: (repo: string, n: number) => states.set(`${repo}#${n}`, { open: true, merged: false, createdAt: created }),
+      open: (repo: string, n: number) => states.set(`${repo}#${n}`, openRead({ repo, number: n, createdAt: created })),
+      // A pull request whose read failed: the shape the poller must treat as UNKNOWN.
+      fail: (repo: string, n: number, reason: string) => states.set(`${repo}#${n}`, unknownRead(reason, { repo, number: n, status: 1 })),
       end: (repo: string, n: number, merged: boolean, closedAt = new Date().toISOString()) =>
-        states.set(`${repo}#${n}`, { open: false, merged, createdAt: created, closedAt }),
+        states.set(`${repo}#${n}`, merged ? mergedRead(closedAt, { repo, number: n }) : closedRead(closedAt, { repo, number: n })),
     }
   }
   async function working(f: ReturnType<typeof fixture>, issue: string) {
@@ -788,6 +792,58 @@ describe('a pull request per ticket', () => {
     await f.running.tick()
     expect(ticket().ended).toMatchObject({ outcome: 'closed', by: 'executor' })
     expect(f.receipts('491')).toMatch(/closed without merging[\s\S]*A comment here starts the work again/)
+    // The receipt carries the read it acted on, so a person can check the claim against GitHub in one command.
+    expect(f.receipts('491')).toMatch(/pull\/78 \(#78 in o\/r\): gh exit 0, state=closed, closed_at=\d{4}-\d\d-\d\dT/)
+    expect(f.receipts('491')).toContain('merged_at=null')
+  })
+
+  it('a read that failed ends nothing: the ticket waits on, and the issue hears no ending', async () => {
+    // The defect on board #235: a poll that failed read as CLOSED and ended the ticket eight times in nine
+    // hours, each ending re-arming the same work. An unreadable pull request is UNKNOWN, so nothing ends.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '494')
+    pulls.open('o/r', 84)
+    f.workers[0]!.report!({ state: 'ready', summary: 'renamed it', pullRequests: ['https://github.com/o/r/pull/84'] })
+    await f.running.tick()
+    // GitHub answers this poll with nothing at all: exit 0, empty stdout.
+    pulls.fail('o/r', 84, 'empty-output')
+    await f.running.tick()
+    await f.running.tick()
+    expect(ticket().ended, 'the ticket is still open on its pull request').toBeUndefined()
+    expect(f.receipts('494')).not.toMatch(/closed without merging/)
+  })
+
+  it('one ending notice per pull request per ticket, across a router restart and a re-armed ticket', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '495')
+    pulls.open('o/r', 85)
+    f.workers[0]!.report!({ state: 'ready', summary: 'pushed it', pullRequests: ['https://github.com/o/r/pull/85'] })
+    await f.running.tick()
+    pulls.end('o/r', 85, false, '2026-11-09T06:00:01Z')
+    await f.running.tick()
+    expect(ticket().ended).toMatchObject({ outcome: 'closed', by: 'executor' })
+    expect(f.receipts('495').match(/closed without merging/g), 'the first ending is said once').toHaveLength(1)
+
+    // The measured ping-pong: a restart, a person's comment, a new ticket for the same issue, the same pull
+    // request closing again. Eight ticket ids gave board #235 eight receipts; the key is the thread and the pull.
+    const g = fixture(true, undefined, f.dir, undefined, { pullApi: pulls.api })
+    g.addComment('495', 'octocat', 'nothing is coming, wrap it up', '2026-11-09T07:00:00Z')
+    await g.running.tick()
+    await settle()
+    g.decide('accept')
+    await g.running.tick()
+    expect(g.workers.length, 'the comment re-armed the issue and started a worker').toBe(1)
+    g.workers[0]!.report!({ state: 'ready', summary: 'wrapped it up', pullRequests: ['https://github.com/o/r/pull/85'] })
+    await g.running.tick()
+    await g.running.tick()
+    const rows = new SqliteRepositories(`${g.dir}/tickets.db`).tickets.list().filter(t => t.channels[0]?.thread === '#495')
+    expect(rows.at(-1)!.ended, 'and it ended on the same pull request again, so the read ran a second time').toMatchObject({ outcome: 'closed', by: 'executor' })
+    const ledger = new SqliteRepositories(`${g.dir}/tickets.db`).kv.get<Record<string, { status: string }>>('outbox') ?? {}
+    expect(ledger['pull-end:#495:https://github.com/o/r/pull/85']?.status,
+      'the notice is keyed on the thread and the pull request, never on the ticket row: a re-arm mints a new row, which is how #235 posted eight').toBe('sent')
+    expect(g.receipts('495'), 'the same ending on the same pull request is not posted a second time').not.toMatch(/closed without merging/)
   })
 
   it('a ticket with two pull requests ends only when both are done, and each is named by what it did', async () => {
