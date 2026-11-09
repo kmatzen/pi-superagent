@@ -11,7 +11,7 @@ import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type Out
 import { SqliteRepositories } from './store.ts'
 import {GithubSource, REPLY_MARKER, type GithubApi, REQUEST_LABEL} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
-import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi } from './pulls.ts'
+import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type ReconcileReport } from './pulls.ts'
 import { CommentOutbox } from './outbox.ts'
 import { PiExecutor } from './executor.ts'
 import { renderCandidateFor, SessionAssessor, type SessionPilot } from './assessor.ts'
@@ -85,13 +85,32 @@ export interface RunningRouter {
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] })
 
-/** `superagent status` greps health.json for "state": "error"; the router rewrites it as the GitHub source
- *  fails and recovers. */
-function writeHealth(dir: string, source: { state: string; detail?: string } | null): void {
+/** Why a pass is not moving, in the one file that is readable when the router's own pane is not. */
+export interface TickHealth {
+  /** The contract `superagent status` counts: a stalled tick is an error, and it fails the health check. */
+  state: 'ok' | 'error'
+  /** The stall, in the words `superagent status` prints: the file is read by a human over a wall. */
+  detail?: string
+  at: string
+  n: number
+  ms: number
+  intervalMs: number
+  /** Milliseconds since the last finished pass, read against `intervalMs`: this is the stall as a number. */
+  sinceLastMs: number
+  stage?: string
+  stageMs?: number
+  launchPending?: number
+}
+
+/** `superagent status` counts the `"state": "error"` lines in this file and exits 2 on any of them, and prints
+ *  the file's first 200 characters — so the tick block goes second, before the source block, and its `detail`
+ *  field is short enough to survive the cut. A healthy tick writes `"state": "ok"`, which fails nothing. */
+function writeHealth(dir: string, source: { state: string; detail?: string } | null, tick?: TickHealth): void {
   writeFileSync(`${dir}/health.json`, JSON.stringify({
     runtime: { state: 'ready', at: new Date().toISOString() },
+    ...(tick ? { tick } : {}),
     ...(source ? { source } : {}),
-  }, null, 2))
+  }, null, 1))
 }
 
 export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningRouter {
@@ -127,7 +146,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     },
   }, repos.kv, () => Date.now(), 12,
      (m, tries, error) => log.line('error', 'outbox.given_up', { thread: m.channel.thread, tries, error }))
-  const accounts = ghAccounts(cfg)
+  // Every `gh` process this pass spawns, counted: the fan-out is the tick's cost, and until #303 nothing had
+  // ever counted it. Reset per pass and reported on the tick line.
+  let ghCalls = 0
+  const accounts = ghAccounts(cfg, () => { ghCalls += 1 })
   const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({
     // Reviews are read as the account that opens the pull requests: the watched account is not in the
     // organization that hosts them, and a pull request it cannot see is a review the ticket never gets.
@@ -292,6 +314,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     home, api: deps.pullApi ?? ghPulls(accounts.pulls),
     openThreads: () => github?.openThreads(), positions: repos.kv,
     self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, now: () => Date.now(),
+    // The fan-out is bounded per pass, not left to the 120 s budget, which binds only while the loop keeps its
+    // cadence (measured 2026-11-09: 41 follows due at once, 12.1 s per pass).
+    ...(cfg.pullReadsPerTick === undefined ? {} : { maxReads: cfg.pullReadsPerTick }),
+    ...(cfg.pullReadBudgetMs === undefined ? {} : { budgetMs: cfg.pullReadBudgetMs }),
     receive: trigger => { engine.receive(trigger) },
     warn: (event, fields) => log.line('warn', event, fields),
     closed: (thread, pull, outcome, at) => {
@@ -500,33 +526,54 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
 
   async function tick(): Promise<void> {
     if (paused) return
-    await recovered
     const started = Date.now()
+    const gapMs = started - lastTickEnd
+    const callsAtStart = ghCalls
+    let pollMs = 0
+    let reconcileMs = 0
+    let evaluateMs = 0
+    let drainMs = 0
+    let drain = { settled: true, pending: 0 }
+    let pulls: ReconcileReport = { due: 0, read: 0, deferred: 0, atOnce: 0 }
+    // The startup sweep, the takeover of surviving workers, and the orphan retire all live behind this one
+    // await, and every pass waits on it: named as a stage so a router that never gets past it says so (#303).
+    enter('recovery')
+    await recovered
     let triggers: Trigger[] = []
     if (github) {
+      const pollAt = Date.now()
+      enter('poll')
       // A failing poll is not a quiet tick: a router that cannot hear GitHub looks healthy forever, so three
       // failures in a row go into health.json, where `superagent status` turns them into exit code 2.
       try {
         triggers = await github.poll()
       } catch (error) {
         pollFailures += 1
-        log.line('error', 'github.poll_failed', { error: String(error).slice(0, 200), failures: pollFailures })
-        if (pollFailures >= 3) writeHealth(cfg.dataDir, { state: 'error', detail: `github polls failing (${pollFailures}): ${String(error).slice(0, 160)}` })
+        log.line('error', 'github.poll_failed', { error: String(error).slice(0, 200), failures: pollFailures, ms: Date.now() - pollAt, gh: ghCalls - callsAtStart })
+        if (pollFailures >= 3) {
+          sourceHealth = { state: 'error', detail: `github polls failing (${pollFailures}): ${String(error).slice(0, 160)}` }
+          publishHealth(tickHealth('error', { detail: sourceHealth.detail }))
+        }
         return
       }
-      if (pollFailures) { pollFailures = 0; writeHealth(cfg.dataDir, null) }
+      if (pollFailures) { pollFailures = 0; sourceHealth = null; publishHealth() }
+      pollMs = Date.now() - pollAt
     }
     for (const trigger of triggers) engine.receive(trigger)
+    const reconcileAt = Date.now()
+    enter('reconcile')
     try {
-      await follower.reconcile(repos.tickets.open())
+      pulls = await follower.reconcile(repos.tickets.open())
     } catch (error) {
       // The rest of the pass still runs: judgements, launches and replies must not wait on one pull request.
       log.line('error', 'pull.reconcile_failed', { error: String(error).slice(0, 200) })
     }
+    reconcileMs = Date.now() - reconcileAt
     // The conversation a ticket lives in can end on GitHub: a merge closes the issue it names, and
     // closing without merging is a person saying no. Either way the ticket stops and says so, unless it
     // follows its own pull request, whose close ends it (above).
     const openThreads = github?.openThreads()
+    enter('conversations')
     if (openThreads) {
       for (const ticket of repos.tickets.open()) {
         const channel = ticket.channels[0]
@@ -550,11 +597,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // evaluateDue runs on every pass: it is the only thing that expires a stuck eval, and gating it once left
     // 54 stale judgements in flight forever. The judge's load is bounded by the assessor, one question at a time.
     sweeps += 1
+    enter('evaluate')
+    const evaluateAt = Date.now()
     engine.evaluateDue()
-    log.line('info', 'tick', {
-      n: sweeps, inflight: repos.threads.active().filter(t => t.evaluating).length,
-      running: executor.running, parked: executor.parked, open: repos.tickets.open().length, ms: Date.now() - started,
-    })
+    evaluateMs = Date.now() - evaluateAt
+    enter('launch')
     for (const ticket of repos.tickets.open()) {
       const assignment = ticket.assignments.at(-1)
       if (assignment && assignment.state === 'pending') executor.start(ticket, assignment)
@@ -580,11 +627,31 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         question: 'accept the work, steer it, or stop it on the panel',
       } as never)
     }
-    // Replies go out before the wait on worker capacity: with every slot busy, idle() resolves only when a
-    // worker ends, and an acknowledgement must not wait an hour behind it.
+    // Replies go out before anything that waits: with every slot busy, an acknowledgement must not queue behind
+    // the fleet, which is what held nine replies for ten minutes on 2026-11-08.
     outbox.flush()
-    await executor.idle()
+    // The launches this pass queued get a bounded start, and no more. `executor.idle()` is the launch queue's
+    // tail and that queue is gated on a free worker slot, so awaiting it made the loop enterable only when the
+    // fleet went quiet — hourly, at 20 workers against a cap of 8. That is the stall #303 was filed for.
+    enter('drain')
+    const drainAt = Date.now()
+    drain = await executor.drain(launchDrainMs)
+    drainMs = Date.now() - drainAt
     outbox.flush()
+    // The liveness line, and the only place the cadence is visible: `gapMs` is the beat, and the stages are
+    // where a slow pass spent itself. One `ms=` field carried all of it, which is why the 6 h stall took six
+    // hours to see and the 15 s pass took a board to notice (measured 2026-11-09).
+    const finished = Date.now()
+    lastTickEnd = finished
+    log.line('info', 'tick', {
+      n: sweeps, inflight: repos.threads.active().filter(t => t.evaluating).length,
+      running: executor.running, parked: executor.parked, open: repos.tickets.open().length, ms: finished - started,
+      gapMs, pollMs, reconcileMs, evaluateMs, drainMs,
+      gh: ghCalls - callsAtStart, ghTotal: ghCalls,
+      pullsDue: pulls.due, pullsRead: pulls.read, pullsDeferred: pulls.deferred, readsAtOnce: pulls.atOnce,
+      launchPending: drain.pending, drained: drain.settled,
+    })
+    publishHealth(tickHealth('ok', { ms: finished - started }))
   }
 
   // An assignment marked running with no session in this process is a ghost: the worker died with the
@@ -644,21 +711,107 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   })()
 
   let pollFailures = 0
+  /** The GitHub source's own state, published into health.json next to the tick's. */
+  let sourceHealth: { state: string; detail: string } | null = null
+
+  // ── Tick cadence ─────────────────────────────────────────────────────────
+  // Measured on the live router 2026-11-09: a 30 s timer entered 7 ticks in 6.6 h. `runTick` fired on every
+  // beat, saw `ticking === true`, and folded the demand into `again` — silently, for hours, because nothing
+  // logged that a pass had not finished. The pass was parked in its last await, `executor.idle()`, which is the
+  // launch queue's tail, and that queue waits for a free worker slot: with 20 workers busy against a cap of 8
+  // (survivors adopted at startup ignore the cap) it drains only when the fleet goes quiet, which is the hourly
+  // beat. The cadence and the cost are one fault: at an hourly beat the 120 s per-pull budget is always
+  // expired, so every pass paid the full 41-pull fan-out — the 6.6 s → 15.4 s climb the board tracked.
+  // Three changes, each of them loud: the pass never awaits worker capacity; a pass that stops moving names the
+  // stage it is parked in, in the log and in health.json, where `superagent status` fails on it; and a pass
+  // that never finishes is abandoned, so a wedged `gh` call cannot own the cadence for the life of the process.
+  const tickMs = cfg.tickMs ?? 30_000
+  /** How long a pass may start launches. Never a wait on capacity: see above. */
+  const launchDrainMs = cfg.launchDrainMs ?? Math.min(5_000, Math.max(250, Math.round(tickMs / 6)))
+  const stallMs = cfg.tickStallMs ?? Math.max(2 * tickMs, 60_000)
+  const stallReportMs = cfg.tickStallReportMs ?? Math.max(60_000, tickMs)
+  const abandonMs = cfg.tickAbandonMs ?? Math.max(10 * tickMs, 300_000)
+
+  /** Where the in-flight pass is, and when it got there. */
+  let stage = 'idle'
+  let stageAt = 0
+  /** When the in-flight pass began, and when the last one finished (from process start, until it has one). */
+  let tickBegan = 0
+  let lastTickEnd = Date.now()
+  let lastStallReport = 0
+  const enter = (name: string): void => { stage = name; stageAt = Date.now() }
+
+  const tickHealth = (state: 'ok' | 'error', fields: { ms?: number; detail?: string } = {}): TickHealth => {
+    const at = Date.now()
+    // One decimal, because a stall reported as "0s" reads as nothing having happened.
+    const where = (ms: number): string => `${Math.round(ms / 100) / 10}s`
+    const detail = fields.detail
+      ?? (state === 'error' ? `tick stalled in ${stage} for ${where(at - stageAt)} (pass ${where(at - tickBegan)})` : undefined)
+    return {
+      state,
+      ...(detail ? { detail: detail.slice(0, 160) } : {}),
+      at: new Date(at).toISOString(),
+      n: sweeps,
+      ms: fields.ms ?? 0,
+      intervalMs: tickMs,
+      sinceLastMs: at - lastTickEnd,
+      stage,
+      ...(state === 'error' ? { stageMs: at - stageAt, launchPending: executor.pendingLaunches } : {}),
+    }
+  }
+  const publishHealth = (tick?: TickHealth): void => writeHealth(cfg.dataDir, sourceHealth, tick)
+
   // Ticks cost 1-5 s and every settled agent asks for one: five workers settling at once used to start
   // five full GitHub polls. One runs, and the demand to run again after it is remembered.
   let ticking = false
   let again = false
-  const runTick = (): void => {
-    // Measured 2026-11-08: a tick parked on worker capacity held nine replies for ten minutes, and the guard returned before this line.
-    outbox.flush()
-    if (ticking) { again = true; return }
+  /** Which pass owns the guard. An abandoned pass that later settles must not clear the guard of the pass that
+   *  replaced it, and must not report that it is the live one. */
+  let generation = 0
+  const startTick = (): void => {
+    const mine = ++generation
+    const beganAt = Date.now()
+    tickBegan = beganAt
     ticking = true
     void tick().finally(() => {
+      if (mine !== generation) {
+        // The pass gave up its place long ago, and the live stage belongs to whoever holds it now: report only
+        // what this one knows, which is how long it took to land.
+        log.line('warn', 'tick.late_finish', { runningMs: Date.now() - beganAt, supersededBy: generation, launchPending: executor.pendingLaunches })
+        return
+      }
       ticking = false
       if (again) { again = false; runTick() }
     })
   }
-  const timer = setInterval(runTick, cfg.tickMs ?? 30_000)
+  const runTick = (): void => {
+    // Measured 2026-11-08: a tick parked on worker capacity held nine replies for ten minutes, and the guard returned before this line.
+    outbox.flush()
+    if (!ticking) { startTick(); return }
+    again = true
+    // The timer fires while a pass is parked, which makes it the one thing that can see the stall. Before this
+    // line the coalescing was invisible, and that is why six hours of a dead loop looked like a quiet board.
+    const at = Date.now()
+    const running = at - tickBegan
+    if (running < stallMs) return
+    if (at - lastStallReport >= stallReportMs) {
+      lastStallReport = at
+      log.line('warn', 'tick.stalled', {
+        stage, stageMs: at - stageAt, runningMs: running, intervalMs: tickMs, stallMs, n: sweeps,
+        sinceLastMs: at - lastTickEnd, launchPending: executor.pendingLaunches, ghCalls,
+      })
+      publishHealth(tickHealth('error'))
+    }
+    if (running < abandonMs) return
+    // Give the pass up and keep the beat. Awaits here are GitHub, herdr and the launch queue, and none of them
+    // is allowed to own the cadence for the life of the process; the pass keeps running and reports where it
+    // landed. Repeating a pass is safe by construction: trigger ids dedup, the outbox is idempotent by id, and
+    // the engine's commands are the only writes.
+    log.line('error', 'tick.abandoned', { stage, runningMs: running, abandonMs, n: sweeps, launchPending: executor.pendingLaunches })
+    again = false
+    startTick()
+  }
+  const timer = setInterval(runTick, tickMs)
   const off = pi.on('agent_settled', runTick)
 
   // Made at startup, not at the first write: the operator reads this file to pause the fleet by hand.
@@ -820,6 +973,12 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   if (!dataDir) throw new Error('PI_SUPERAGENT_STATE is required for role=router')
   const maxWorkers = positiveNumber('PI_SUPERAGENT_MAX_WORKERS', env.PI_SUPERAGENT_MAX_WORKERS)
   const tickMs = positiveNumber('PI_SUPERAGENT_TICK_MS', env.PI_SUPERAGENT_TICK_MS)
+  const launchDrainMs = positiveNumber('PI_SUPERAGENT_LAUNCH_DRAIN_MS', env.PI_SUPERAGENT_LAUNCH_DRAIN_MS)
+  const tickStallMs = positiveNumber('PI_SUPERAGENT_TICK_STALL_MS', env.PI_SUPERAGENT_TICK_STALL_MS)
+  const tickStallReportMs = positiveNumber('PI_SUPERAGENT_TICK_STALL_REPORT_MS', env.PI_SUPERAGENT_TICK_STALL_REPORT_MS)
+  const tickAbandonMs = positiveNumber('PI_SUPERAGENT_TICK_ABANDON_MS', env.PI_SUPERAGENT_TICK_ABANDON_MS)
+  const pullReadsPerTick = positiveNumber('PI_SUPERAGENT_PULL_READS_PER_TICK', env.PI_SUPERAGENT_PULL_READS_PER_TICK)
+  const pullReadBudgetMs = positiveNumber('PI_SUPERAGENT_PULL_READ_BUDGET_MS', env.PI_SUPERAGENT_PULL_READ_BUDGET_MS)
   const panelPort = positiveNumber('PI_SUPERAGENT_PANEL_PORT', env.PI_SUPERAGENT_PANEL_PORT)
   const keepWorktrees = positiveNumber('PI_SUPERAGENT_KEEP_WORKTREES', env.PI_SUPERAGENT_KEEP_WORKTREES)
   const workerTokenFile = env.PI_SUPERAGENT_WORKER_TOKEN_FILE?.trim()
@@ -830,6 +989,12 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     self: env.PI_SUPERAGENT_SELF ?? 'pi-superagent',
     ...(maxWorkers === undefined ? {} : { maxConcurrent: maxWorkers }),
     ...(tickMs === undefined ? {} : { tickMs }),
+    ...(launchDrainMs === undefined ? {} : { launchDrainMs }),
+    ...(tickStallMs === undefined ? {} : { tickStallMs }),
+    ...(tickStallReportMs === undefined ? {} : { tickStallReportMs }),
+    ...(tickAbandonMs === undefined ? {} : { tickAbandonMs }),
+    ...(pullReadsPerTick === undefined ? {} : { pullReadsPerTick: Math.floor(pullReadsPerTick) }),
+    ...(pullReadBudgetMs === undefined ? {} : { pullReadBudgetMs }),
     ...(panelPort === undefined ? {} : { panelPort }),
     ...(keepWorktrees === undefined ? {} : { keepWorktrees: Math.floor(keepWorktrees) }),
     ...(workerTokenFile ? { workerTokenFile } : {}),
