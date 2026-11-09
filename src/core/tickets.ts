@@ -253,8 +253,18 @@ export class Tickets extends EnginePart {
   release(ticketId: string, assignmentId: string): void {
     const ticket = this.require(ticketId)
     const running = runningAssignment(ticket)
-    if (!running || running.id !== assignmentId) return
-    this.endAssignment(ticket, running, 'released')
+    if (running && running.id === assignmentId) {
+      this.endAssignment(ticket, running, 'released')
+      this.repo.tickets.save(ticket)
+      return
+    }
+    // A worker that reported `ready` has no running Assignment: its turn ended, and the ticket stayed open
+    // because only a person can merge its pull request (measured 2026-11-09: 15 tickets in exactly that state,
+    // 4h to 21h each, every one of them holding a tab, an agent and a slot). Freeing that worker is the same
+    // act, so the Assignment carries the same end reason, and `wake` starts the next worker on the next message.
+    const last = latestAssignment(ticket)
+    if (!last || last.id !== assignmentId || last.state !== 'ended' || last.endedReason === 'released') return
+    last.endedReason = 'released'
     this.repo.tickets.save(ticket)
   }
 

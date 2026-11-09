@@ -305,7 +305,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       }
     }
     announce(ticket, assignmentId, origin, run, fresh)
-    if (origin === 'worker' && awaitsAHuman(run.state)) {
+    // The operator's rule 2026-11-08 and its 2026-11-09 extension: a worker gives up its agent, tab and slot
+    // whenever a person is the only thing it can be waiting for — it asked, it needs an answer, or it finished
+    // its turn and its own pull request waits for a human merge. A ticket the report ENDED needs none of this:
+    // ending disposes the worker through `stop`. formal/Ticket.tla R1/R3/R5 are the claims.
+    if (origin === 'worker' && (awaitsAHuman(run.state) || run.state === 'ready')
+      && !repos.tickets.get(ticket.id)?.ended) {
       engine.release(ticket.id, assignmentId)
       executorRef?.release(ticket)
       log.line('info', 'worker.released', { ticket: ticket.id, assignment: assignmentId, state: run.state })
