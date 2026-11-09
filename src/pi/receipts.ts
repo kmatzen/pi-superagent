@@ -53,6 +53,16 @@ export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; 
     : !merged.length ? `${thread}: ${urls(closed)} closed without merging, so this ticket ends. A comment here starts the work again.`
     : `${thread}: ${urls(merged)} merged and ${urls(closed)} closed without merging, so this ticket ends with the work that landed. A comment here starts the work again.`
   if (!unreadable.length) return body
-  const list = unreadable.map(p => `${p.url} (${p.reason})`).join(', ')
-  return `${body}\n\nThe router could NOT read ${list} with its GitHub token, so nothing above is verified against that pull request: it may be open. Look for \`pull.unreadable\` in the router's engine.log, and grant the router's GitHub account read access to that repository.`
+  // `github-has-no-such-pull` is GitHub answering for the repository and having no such number: a deleted pull
+  // request, most likely. That is not "unreadable", and saying it was would be its own unverified claim.
+  const gone = unreadable.filter(p => p.reason.startsWith('github-has-no-such-pull')).map(p => p.url)
+  const blind = unreadable.filter(p => !p.reason.startsWith('github-has-no-such-pull'))
+  const parts = [body]
+  if (blind.length) {
+    parts.push(`The router could NOT read ${blind.map(p => `${p.url} (${p.reason})`).join(', ')} with its GitHub token, so nothing above is verified against that pull request: it may be open. Look for \`pull.unreadable\` in the router's engine.log, and grant the router's GitHub account read access to that repository.`)
+  }
+  if (gone.length) {
+    parts.push(`GitHub has no pull request at ${gone.join(', ')} (the router can read that repository), so the router cannot see it merged or closed. It ended this ticket on the signal above, not on that pull request. If that pull request was deleted on purpose, this is the right ending; if not, the number moved and the router was never told where.`)
+  }
+  return parts.join('\n\n')
 }
