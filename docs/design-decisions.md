@@ -67,6 +67,20 @@ read is unreadable, the follow stays open, and the failure is said once per thre
 matching `pull.read_readable` when it recovers. Absent and unreadable are different answers; only
 the first one ends a wait.
 
+**Repair a close a failed read wrote down.** The fix above stops the next false close; it does not undo
+the ones already in the database, and a recorded close is permanent by design — a closed follow is not
+read again, so nothing is there to notice the truth. Measured 2026-11-09 on the live board: 21 **live**
+tickets hold a closed follow on a pull request that is open, with no open follow left, which means they
+are followed by nothing, can be ended by nothing, and never read a review on the pull request they are
+waiting for; 39 ended tickets took that same false close as their terminal end, and their pull requests
+are still open. So the follower re-checks a recorded close once per start (`pull.reopened` in the log,
+once per thread, no API call where the watched repository’s open-thread list already answers) and
+re-binds the thread on the tickets that are **live**, which clears the recorded close and gives the wait
+back. Tickets that already ended are left ended: reopening 39 of them in one start recruits 39 sessions
+unasked, and an end a person should undo is the operator’s door, not the router’s. The repair is silent,
+because the router writing on a thread is what recruits a session — the same reason its receipt is not
+inbound speech.
+
 **Say a report nobody received.** A worker's report travels: the pane appends it to
 `reports.jsonl`, the router reads the file and files it on the ticket. When the ticket has no
 live worker by then — it ended on the worker's own report, and a queued copy of its mandate

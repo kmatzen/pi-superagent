@@ -822,6 +822,36 @@ describe('a pull request per ticket', () => {
     expect(receipt).toMatch(/github\.com\/o\/r\/pull\/82 closed without merging/)
   })
 
+  it('a close recorded by a read that failed is repaired, and the pull request ends the ticket when it really lands', async () => {
+    // The mirror of #309's ask 1: a terminal end must be a *true* one. GitHub answers 404 for a repository the
+    // router's account cannot see, the reader read it as "no such pull request", and the ticket wrote down a close
+    // that never happened — measured 2026-11-09 on 21 live tickets, whose pull requests are open, unfollowed, and
+    // cannot end them. Repairing the row is silent: the router posting on a thread is what recruits a session.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '505')
+    pulls.open('o/r', 92)
+    f.workers[0]!.report!({ state: 'ready', summary: 'two changes', pullRequests: ['https://github.com/o/r/pull/91', 'https://github.com/o/r/pull/92'] })
+    await f.running.tick()
+    const follow91 = () => ticket().follows!.find(f => f.thread === 'github:#91')!
+    expect(follow91().closed, 'the read that failed wrote a close down').toMatchObject({ outcome: 'closed' })
+    expect(ticket().ended, 'the open pull request holds the ticket open').toBeUndefined()
+    // The reader can see it after all: GitHub says the pull request is open, so the recorded close is false.
+    pulls.open('o/r', 91)
+    await f.running.tick()
+    expect(follow91().closed, 'the follow is a wait again').toBeUndefined()
+    expect(f.receipts('505'), 'and the repair posted nothing on the thread').not.toMatch(/reopened|reopened the pull/i)
+    // Proof the follow is live, not just tidy: the merges now end the ticket the normal way.
+    pulls.end('o/r', 91, true, '2026-11-09T01:00:00Z')
+    await f.running.tick()
+    expect(ticket().ended, 'the second pull request is still open').toBeUndefined()
+    pulls.end('o/r', 92, true, '2026-11-09T02:00:00Z')
+    f.feed.issues.splice(f.feed.issues.findIndex(i => i.issue === 505), 1)
+    await f.running.tick()
+    expect(ticket().ended).toMatchObject({ outcome: 'merged', by: 'executor' })
+    expect(f.receipts('505'), 'the repaired follow ended the ticket when the work landed').toContain('#505 merged: https://github.com/o/r/pull/91')
+  })
+
   it('a merge that closes the issue is not a stop: the ticket ends merged once its work finishes', async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })

@@ -435,6 +435,20 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       log.line('info', 'pull.closed', { thread: thread.id, outcome, url: pullUrl(pull), tickets: waiting.length })
       for (const id of waiting) pullEnded(id)
     },
+    // The other half of `closed`: a close written down by a read that failed (GitHub answers 404 for a private
+    // repository the account cannot see) leaves a live ticket holding a closed follow on a pull request that is
+    // open, with nothing left to follow. Re-binding the thread clears the recorded close, so the ticket is waited
+    // on, ended by, and hears review on its pull request again. Live tickets only: an ended ticket's terminal end is
+    // the operator's to undo, and reopening 39 of them in one start would recruit 39 sessions unasked (#309 ask 3).
+    reopened: (thread, pull) => {
+      const key = `github:${thread.id}`
+      const holding = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && f.closed?.outcome === 'closed'))
+      for (const t of holding) {
+        try { engine.bindThread(t.id, thread, true) }
+        catch (error) { log.line('warn', 'pull.reopen_failed', { ticket: t.id, thread: thread.id, url: pullUrl(pull), error: String(error).slice(0, 200) }) }
+      }
+      return holding.length
+    },
   })
   // Bound before the engine reads the report: a ready report completes a ticket that follows no open pull request.
   const follow = (ticket: Ticket, urls: readonly string[]): readonly string[] => {
