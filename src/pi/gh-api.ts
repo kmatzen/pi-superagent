@@ -20,6 +20,11 @@ export interface GhOptions {
    * counted, so this is the number that goes into the tick's log line.
    */
   onCall?: (args: readonly string[]) => void
+  /**
+   * How long a repository's readability is trusted before it is probed again (default 15 minutes). A grant is the
+   * fix the ticket is told to ask a human for, so a permanent answer means the grant lands at the next restart.
+   */
+  visibilityTtlMs?: number
 }
 
 export interface GithubApiOptions extends GhOptions {
@@ -251,21 +256,27 @@ export const isUnreadablePull = (error: unknown): boolean =>
 export function ghPulls(options: GhOptions = {}): PullApi {
   const call = ghCall(options)
   /**
-   * Whether this account can read a repository at all, asked once per repository. GitHub answers **404**, not 403,
+   * Whether this account can read a repository at all, asked once per visibility window. GitHub answers **404**,
+   * not 403,
    * for a private repository the token cannot see, and a caller that reads a 404 on a pull request as "GitHub has
    * no such pull request" ends the ticket that waits on it. Measured 2026-11-09: the router's account cannot see
    * the private repository its own code lives in, so it told the board twice in one day that an open, ready, mergeable
    * pull request had "closed without merging, so this ticket ends" — a false terminal end on the live fix, posted
    * in the router's own voice. Absent and unreadable are different answers, and only the first one ends a wait.
+   *
+   * The answer EXPIRES. "Grant that account read access" is the fix this tells a human to make, and an answer
+   * cached for the life of the process means the grant lands at the next restart, not when they make it — a door
+   * the ticket names that the running router cannot walk through. One probe per repository per window is the cost.
    */
-  const visibility = new Map<string, boolean>()
+  const visibility = new Map<string, { readable: boolean; at: number }>()
+  const visibilityTtlMs = options.visibilityTtlMs ?? 15 * 60_000
   const repoReadable = async (repo: string): Promise<boolean> => {
     const known = visibility.get(repo)
-    if (known !== undefined) return known
+    if (known !== undefined && Date.now() - known.at < visibilityTtlMs) return known.readable
     // A probe that fails for any reason counts as unreadable: the safe reading of a repository the reader cannot
     // confirm is that the pull request's state is unknown, which keeps the ticket waiting and says so.
     const readable = await call(['api', `repos/${repo}`]).then(() => true, () => false)
-    visibility.set(repo, readable)
+    visibility.set(repo, { readable, at: Date.now() })
     return readable
   }
   return {

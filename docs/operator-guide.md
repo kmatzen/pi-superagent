@@ -321,7 +321,10 @@ GH_TOKEN=$(cat ~/.pi/superagent/github-token) gh api repos/OWNER/REPO --jq .full
 ```
 
 A 404 there is the whole cause: add that account as a read-only collaborator, or give the router a token scoped to
-the repository. In the log the lines are `pull.read_failed` (`permanent: true` on a 404 for a repository the account
+the repository. It takes effect on its own — the readability answer expires every 15 minutes — so there is nothing to
+restart. Check the grant itself, not the intention: `gh api repos/OWNER/REPO/collaborators --jq '[.[].login]'` as the
+repository's owner must list the bot. Measured 2026-11-09, the answer to this ask was "addressed" while the
+collaborator list of both repositories named only their owner. In the log the lines are `pull.read_failed` (`permanent: true` on a 404 for a repository the account
 cannot see) and `pull.blind_notice`, said once per ticket per pull request, not once per poll. A terminal receipt
 refuses to state an outcome it never saw: where the ticket's record says a pull request closed and the router cannot
 read it, it says it cannot read it and asks, instead of claiming "closed without merging" — measured 2026-11-09 on

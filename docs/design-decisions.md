@@ -93,7 +93,10 @@ blind spot (`pull.read_failed` carries `permanent: true`), the tickets waiting o
 say here that the work landed. It is fired on every pass that finds the blind spot and deduped by the caller’s
 journal per (ticket, pull request), so a ticket that walks into it later is told and a ticket is never told twice.
 The transient failure — a rate limit, a network fault — is not blind: it may answer next pass, and a door a person
-cannot open is not worth an interruption.
+cannot open is not worth an interruption. And the readability answer EXPIRES (15 minutes, `visibilityTtlMs`), because
+the fix the notice asks for is a grant a human makes: the first "addressed" I measured came back with no grant landed
+(the collaborator list of both repositories named only their owner), and had it landed, a process-lifetime cache would
+have kept answering 404 until the next restart — the door named, the running router unable to walk through it.
 
 **Say an outcome only when it was seen.** A terminal end reads the ticket’s follow records, and a record written
 by a read that failed is not an observation. Measured 2026-11-09 on board #309: the ticket’s follow on

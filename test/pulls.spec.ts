@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
 import { followedPulls, parsePull, parseThread, PullFollower, threadOfPull, threadUrl, type PullApi, type PullState } from '../src/pi/pulls.ts'
-import { unreadablePullError } from '../src/pi/gh-api.ts'
+import { ghPulls, unreadablePullError } from '../src/pi/gh-api.ts'
 import { REPLY_MARKER, type IssueComment, type PrReview } from '../src/pi/source-github.ts'
 import type { Ticket, Trigger } from '../src/core/index.ts'
 
@@ -389,5 +392,49 @@ describe('the fan-out a pass pays', () => {
     const second = await t.f.reconcile(many(2))
     expect(second.read).toBe(1)
     expect(t.calls.filter(c => c.startsWith('pull '))).toEqual(['pull other/lib#1', 'pull other/lib#2'])
+  })
+})
+
+describe('the visibility probe (a grant a human makes must land)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sa-vis-'))
+  afterAll(() => rmSync(root, { recursive: true, force: true }))
+  /** A fake `gh` whose answers follow a gate file, so a test can grant access mid-test. */
+  function gated(name: string, script: string) {
+    const dir = join(root, name)
+    mkdirSync(dir, { recursive: true })
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash\n${script}\n`)
+    chmodSync(bin, 0o755)
+    return { dir, bin }
+  }
+
+  it('a read grant made while the router runs takes effect, because the answer expires', async () => {
+    // The blind-spot notice tells a human "grant that account read access". Measured 2026-11-09 the answer came
+    // back "addressed" and no grant had landed; had one landed, the visibility answer was cached for the life of
+    // the process, so the router would have gone on answering 404 until it restarted — a door the ticket names
+    // that the running router cannot walk through.
+    const gate = join(root, 'granted')
+    writeFileSync(gate, 'no')
+    const { bin } = gated('grant', `case "$*" in
+  "api repos/private/secret")          [ "$(cat ${gate})" = yes ] && echo '{"full_name":"x"}' || { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; } ;;
+  "api repos/private/secret/pulls/31") [ "$(cat ${gate})" = yes ] && echo '{"state":"closed","merged_at":"2026-11-09T10:00:00Z","created_at":"2026-11-09T09:00:00Z"}' || { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; } ;;
+esac`)
+    const pulls = ghPulls({ bin, visibilityTtlMs: 0 })
+    await expect(pulls.pull!('private/secret', 31)).rejects.toThrow(/cannot read/)
+    writeFileSync(gate, 'yes')
+    expect(await pulls.pull!('private/secret', 31), 'the merge is visible the moment the grant is').toMatchObject({ open: false, merged: true })
+  })
+
+  it('probes a repository once per window, not once per blind read', async () => {
+    // The window is what makes the expiry cheap. The board measured 41 followed pull requests and a 12 s pass, so
+    // a probe per blind read would be the new cost of a grant that has not landed.
+    const { dir, bin } = gated('window', `case "$*" in
+  "api repos/private/secret") echo x >> ${root}/probes; echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  "api repos/private/secret/pulls/"*) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+esac`)
+    void dir
+    const pulls = ghPulls({ bin })
+    for (const n of [31, 32, 33]) await expect(pulls.pull!('private/secret', n)).rejects.toThrow(/cannot read/)
+    expect(readFileSync(join(root, 'probes'), 'utf8').trim().split('\n').length, 'three blind reads, one probe').toBe(1)
   })
 })
