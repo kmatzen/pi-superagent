@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { pullEndText, receiptText } from '../src/pi/receipts.ts'
 
 describe('what the thread reads when a run ends', () => {
-  it('a result is one line: the thread, the state, the summary', () => {
-    expect(receiptText('#400', 'worker', { state: 'ready', summary: 'merged and deployed' })).toBe('#400 ready: merged and deployed')
+  it('a result is one line: the thread, the state, the summary, and the end of the ticket', () => {
+    const text = receiptText('#400', 'worker', { state: 'ready', summary: 'merged and deployed' })
+    expect(text.startsWith('#400 ready: merged and deployed'), text).toBe(true)
+    // A finished report with nothing to wait on says so: the ticket that only got its summary stayed open and
+    // labelled on GitHub, where intake hears it again (issue #309).
+    expect(text).toMatch(/ends with the report[\s\S]*nothing runs it now[\s\S]*A comment on the closed issue/)
   })
 
   it('a question is asked on the thread, with an invitation to answer there', () => {
@@ -28,7 +32,8 @@ describe('what the thread reads when a run ends', () => {
     expect(text).toContain('stays open until the pull request is merged or closed')
     expect(receiptText('#400', 'worker', { state: 'blocked', summary: 'x', question: 'Rebase?', pullRequests: ['https://github.com/o/r/pull/9'] }))
       .toMatch(/Pull request:\*\* https:\/\/github.com\/o\/r\/pull\/9[\s\S]*Question:\*\* Rebase\?/)
-    expect(receiptText('#400', 'worker', { state: 'ready', summary: 'answered' }), 'no pull request, no wait').toBe('#400 ready: answered')
+    expect(receiptText('#400', 'worker', { state: 'ready', summary: 'answered' }), 'no pull request, so the ticket ends here')
+      .toMatch(/ends with the report[\s\S]*no pull request is open/)
   })
 
   it('the end of a pull request is said on the issue: done when merged, how to start again when closed', () => {

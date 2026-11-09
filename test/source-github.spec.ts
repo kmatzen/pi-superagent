@@ -20,14 +20,17 @@ function fixture(comments: IssueComment[], issues: IssueState[], reviews: PrRevi
   const kv = new Map<string, unknown>()
   const store = { get: <T,>(k: string) => kv.get(k) as T | undefined, set: (k: string, v: unknown) => { kv.set(k, v) } }
   const posted: Array<{ issue: number; body: string }> = []
+  const labelsOff: Array<{ issue: number; label: string }> = []
   const api: GithubApi = {
     comments: async since => comments.filter(c => !since || Date.parse(c.at) >= Date.parse(since)),
     issues: async () => issues,
     postComment: async (issue, body) => { posted.push({ issue, body }) },
     reviews: async sinceId => reviews.filter(r => r.id > sinceId),
+    // The label write the router makes to spend an intake grant; a test that wants the write to fail deletes it.
+    removeLabel: async (issue, label) => { labelsOff.push({ issue, label }) },
   }
   const source = new GithubSource(api, { repo: 'o/r', self: 'superagent[bot]', bots: new Set(['github-actions[bot]']) }, store)
-  return { source, api, kv, store, posted }
+  return { source, api, kv, store, posted, labelsOff }
 }
 
 describe('GithubSource', () => {
@@ -73,8 +76,78 @@ describe('GithubSource', () => {
     expect(fired[0]!.meta).toMatchObject({ via: 'label', author: 'superagent[bot]' })
 
     const again = await f.source.poll()
-    expect(again.map(t => t.id), 'the label fires one request, not one per poll — the engine dedups the id')
-      .toEqual(fired.map(t => t.id))
+    expect(again, 'the grant is spent: the label asks once, and the router takes it off the issue').toHaveLength(0)
+    expect(f.labelsOff, 'the label leaves the issue with the request').toEqual([{ issue: 205, label: 'agent-requested' }])
+  })
+
+  it('a spent grant is taken off the issue, and a router that died mid-write finishes the job', async () => {
+    // The grant journal commits with the positions, at the next poll; a router that died before making the
+    // label write left the label sitting on an issue it had already heard, and a label on an issue is how the
+    // board says "ask". The next router takes it off. The one that died before the journal committed re-fires
+    // the ask, which is the at-least-once rule the read cursors follow, and the engine's id dedup swallows it.
+    const rows = [issue({ issue: 207, title: 'DO: rotate the deploy keys', author: 'superagent[bot]', labels: ['agent-requested'] })]
+    const f = fixture([], rows)
+    f.store.set('source:github:o/r:issues', ['#207'])
+    // The stand-in GitHub: taking the label off moves it out of the issue, as the write does there.
+    const api: GithubApi = {
+      ...f.api,
+      removeLabel: async (issue, label) => {
+        f.labelsOff.push({ issue, label })
+        const row = rows.find(i => i.issue === issue)
+        if (row) row.labels = row.labels.filter(l => l !== label)
+      },
+    }
+    const opts = { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested' }
+    const first = new GithubSource(api, opts, f.store)
+    expect(await first.poll(), 'the label asks once').toHaveLength(1)
+    expect(await first.poll(), 'the journal commits at the next poll, and the label comes off with it').toHaveLength(0)
+    expect(rows[0]!.labels, 'the issue no longer carries the ask').toEqual([])
+
+    const restarted = new GithubSource(api, opts, f.store)
+    expect(await restarted.poll(), 'a restart hears nothing from an issue it already served').toHaveLength(0)
+    expect(f.labelsOff, 'one label write, not one per poll').toEqual([{ issue: 207, label: 'agent-requested' }])
+
+    rows[0]!.labels = ['agent-requested']
+    expect((await restarted.poll()).map(t => t.text), 'a re-label asks again').toEqual(['DO: rotate the deploy keys'])
+  })
+
+  it('the intake grant is spent: the router\'s own receipt does not re-ask, and a new label does', async () => {
+    // The loop issue #309 is about: GitHub moves an issue's updated_at when a comment lands, and the router's
+    // receipt is a comment. Measured 2026-11-09 on the live board, 26-31 label triggers fired in a burst every
+    // completed poll, hours apart, each one waking a ticket whose work had finished.
+    const rows = [issue({ issue: 205, title: 'DO: merge the pull request', author: 'superagent[bot]',
+                          labels: ['agent-requested'] })]
+    const f = fixture([], rows)
+    f.store.set('source:github:o/r:issues', ['#205'])
+    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested' }, f.store)
+    expect(await f.source.poll()).toHaveLength(1)
+
+    // The label came off with the request, and the receipt moved the issue's update time: intake hears nothing.
+    rows[0]!.labels = []
+    rows[0]!.updatedAt = new Date().toISOString()
+    expect(await f.source.poll(), 'the router\'s own speech is not a request').toHaveLength(0)
+
+    // The board labels it again: that is a person asking a second time, and it is heard.
+    rows[0]!.labels = ['agent-requested']
+    rows[0]!.updatedAt = new Date().toISOString()
+    const second = await f.source.poll()
+    expect(second.map(t => t.text), 'a re-label is a new grant, so it asks again').toEqual(['DO: merge the pull request'])
+    expect(second[0]!.id).not.toEqual('github:#205:label:spent')
+  })
+
+  it('a label that cannot be taken off still asks only once', async () => {
+    // A token without label rights, or a label write that fails: the journal, not the write, is the guard.
+    const rows = [issue({ issue: 206, title: 'DO: rotate the keys', author: 'superagent[bot]', labels: ['agent-requested'] })]
+    const f = fixture([], rows)
+    f.store.set('source:github:o/r:issues', ['#206'])
+    f.api.removeLabel = async () => { throw new Error('gh api -X DELETE exited 1: HTTP 403 (Forbidden)') }
+    const warned: Array<Record<string, unknown>> = []
+    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested',
+                                         onWarn: (event, fields) => warned.push({ event, ...fields }) }, f.store)
+    expect(await f.source.poll()).toHaveLength(1)
+    rows[0]!.updatedAt = new Date().toISOString()
+    expect(await f.source.poll(), 'the label is still on the issue, and the grant journal is what stops it').toHaveLength(0)
+    expect(warned[0]).toMatchObject({ event: 'intake.label_failed', issue: '#206' })
   })
 
   it('an issue the seed recorded stays silent without the label', async () => {

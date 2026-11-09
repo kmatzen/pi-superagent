@@ -312,4 +312,29 @@ describe('paged GitHub reads', () => {
     expect((await api.pullsOpen!()).length).toBe(120)
     expect((await api.reviews!(0)).length).toBe(120)
   })
+
+  it('spends the intake label and closes the issue a ticket finished on', async () => {
+    // Issue #309: the label is the operator handing one issue over, so the router takes it off after hearing
+    // it, and a ticket that ends with nothing to wait on closes the issue intake was reading.
+    const dir = tmp()
+    writeFileSync(join(dir, 'gh'), `#!/bin/bash
+echo "$*" >> "$(dirname "$0")/calls.log"
+case "$*" in
+  *labels/gone*) echo 'gh: Label does not exist (HTTP 422)' >&2; exit 1 ;;
+  *labels/forbidden*) echo 'gh: HTTP 403 (Forbidden)' >&2; exit 1 ;;
+esac
+echo '{}'
+`)
+    chmodSync(join(dir, 'gh'), 0o755)
+    const api = ghApi({ repo: 'o/r', bin: join(dir, 'gh'), followed: () => [] })
+    await api.removeLabel!(7, 'agent-requested')
+    await api.closeIssue!(7)
+    const calls = readFileSync(join(dir, 'calls.log'), 'utf8')
+    expect(calls).toContain('api -X DELETE repos/o/r/issues/7/labels/agent-requested')
+    expect(calls).toContain('api -X PATCH repos/o/r/issues/7 -f state=closed')
+    // A label that is already off is the state the caller wanted; a token without rights is a real failure,
+    // and the source's grant journal is what stops the re-ask when the write cannot be made.
+    await expect(api.removeLabel!(7, 'gone')).resolves.toBeUndefined()
+    await expect(api.removeLabel!(7, 'forbidden')).rejects.toThrow(/403/)
+  })
 })

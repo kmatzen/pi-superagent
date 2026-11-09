@@ -19,6 +19,22 @@ when the operator connected a repository. The source now saves the initial set o
 seeds the review cursor. Closing and reopening an issue makes it eligible again. Its updated
 timestamp distinguishes the new trigger from the earlier one. See `Intake.tla` C1 and C2.
 
+**Spend the intake label, and close the issue a ticket finished on.** That timestamp is GitHub's
+`updated_at`, and GitHub moves it when a comment lands — including the router's own receipt. A
+labelled issue therefore re-asked on every poll, and the router's speech was what recruited the next
+worker: measured 2026-11-09, 26-31 label triggers in a burst at every completed tick, one ticket
+reporting the same sentence 93 times in 20 hours, another waking a fourth worker nine hours after
+its merge. The label is an act, not a state, so the source journals the grant it takes
+(`source:github:<repo>:label-grants`), takes the label off, and hands the grant back only when the
+label comes off. A finished ticket then closes its issue, because intake hears open issues and a
+`ready` report with no pull request leaves nothing to wait on. A person's comment, or a reopen,
+still starts the work: that is new inbound speech, and the only thing that is.
+
+**Stop a ticket that repeats itself.** The Nth report of the same conclusion recruits a worker that
+can only report it again, so at `PI_SUPERAGENT_REPORT_CAP` (3) the ticket says so on itself and
+stops recruiting. The count is the router's journal: an Assignment keeps its last report, so the 93
+receipts of one worker session are one report in the ticket.
+
 **Save later read positions after delivery.** A poll stages its read position for the next poll to
 commit. If the router crashes after reading a comment but before the engine receives it, the old
 position lets the router read it again. Stable trigger IDs make that replay safe. The initial
