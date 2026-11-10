@@ -1,14 +1,17 @@
 # Keeping the fleet running: liveness that does not depend on the worker
 
-Status: proposed (2026-11-10). Owner: the router's operator. Affects `src/pi` (executor, extension), the panel's
-load line, `formal/`, and one scheduled audit. No `src/core` change is required for the first increment.
+Status: L2 shipped (2026-11-10); L1, L3, L4 proposed. Owner: the router's operator. Affects `src/pi` (executor,
+extension), the panel's load line, `formal/`, and one scheduled audit. No `src/core` change is required for the
+first increment.
 
 Measured on 2026-11-10, at 04:10Z, with the router healthy: `tick n=199 running=8 parked=4 cap=8 open=23`,
 ticks ~1.2 s, 110 workers released in the previous 24 h (41 `ready`, 55 `blocked`, 14 `quiet`), 10 of the 18
 newest followed pull requests merged, and all eight board issues the router had ended by asking a person were
 closed. The ask/delivery split and the closure ask work in production.
 
-Four of eight worker slots were held by workers that had stopped working 5 to 11 hours earlier.
+Four of eight worker sessions were alive and doing nothing, 5 to 11 hours each, and four board issues labelled
+for the agent had no live ticket, the oldest starved 45 hours. Those two facts are related, but not the way the
+first version of this document said. See *Correction* below.
 
 | ticket | pane state | silent | what it last said |
 | --- | --- | --- | --- |
@@ -23,33 +26,52 @@ starved 45 hours.
 
 ## Root cause, in one sentence
 
-**A slot is released only by a message the worker itself posts, so any worker that cannot post — because it
-finished and stopped, was cut off mid-turn, or died on a provider error — keeps its slot.**
+**A crash is recorded as a failure even when the worker's own last word was `ready`, so the router relaunches
+work that is already shipped** — and the report the worker made, the only record of what it finished, is what
+gets overwritten.
 
-The code already knows the shape of the hole. `src/pi/extension.ts:303` excludes `ready` from the
+The code already knew the shape of the hole. `src/pi/extension.ts:303` excludes `ready` from the
 release-when-a-human-is-the-only-blocker rule with the comment: *"that report ends the ticket, and ending it
 needs the worker's own turn-end bookkeeping (measured: releasing on ready left the ticket unended)"*. So the
-cooperative path is load-bearing by design, and the four cases above are exactly the workers that never reach
-it. `executor.quiet()` (src/pi/executor.ts:302) is the only silence detector, and it *reports once per silent
+cooperative path is load-bearing by design, and the cases above are the workers that never reach it.
+
+## Correction (2026-11-10, same day, after shipping the guard below)
+
+The first version of this document claimed the four idle sessions held four of eight worker **slots**, and that
+this starved the queue. That was wrong, and the code says so: the launch gate is `gateClosed = running >=
+capacity` (src/pi/executor.ts:343) and `get running()` counts workers **on a turn** (src/pi/executor.ts:118),
+while `parked` counts the alive-and-settled rest. The tick at 04:10Z read `running=8 parked=4 cap=8`: the four
+idle sessions were the parked four, they were visible all along, and they took no slots.
+
+What the four cost is real but smaller: a live session, a herdr tab, and a panel entry per ticket that will never
+speak again, with no signal that distinguishes "waiting for a person" from "dead". What starved the queue is a
+different problem, and the doc now names it: **cap 8 against turns that run for hours, with no aging and no
+fairness among labelled asks**. Four busy workers on long builds is enough; at 04:25Z the freed slots went to
+relaunches (D2), and the queue sat, which is what the guard fixes. `executor.quiet()` (src/pi/executor.ts:302) is the only silence detector, and it *reports once per silent
 stretch* — it never frees the slot it reports.
 
 Three defects follow from the same root, and each one was measured on 2026-11-10:
 
-- **D1 — silence is not terminal.** `quiet()` marks `quietReported` and returns; `busy` is cleared only by a
-  report or a session end. A pi worker that finishes its turn leaves the process alive at a prompt, so the
-  session never "ends": the slot leaks forever.
+- **D1 — parked workers are never reaped.** A settled worker keeps its session, tab, and live entry forever
+  (measured: 4 parked, 5.2 to 10.7 h). It costs no slot, so it does not starve the queue; it costs tabs, memory,
+  and an honest panel. `executor.quiet()` (src/pi/executor.ts:302) is the only silence detector, and it
+  *reports once per silent stretch*.
 - **D2 — relaunch has no memory of the report.** `src/pi/extension.ts:310` relaunches on any `origin ===
   'crash'` with no look at the last report's state. After the operator freed the four slots by closing the
   panes (04:25:32Z), the engine relaunched all four tickets, including the two whose workers had reported the
   work shipped with a pull request open for review. Freed capacity went to work that was already done.
-- **D3 — starvation is invisible.** The tick publishes `running` and `cap`, never the depth of labelled work
-  waiting for a slot. `running=8 cap=8` reads as "fully used", not "your queue is 45 hours deep".
+- **D3 — starvation is invisible, and unaged.** The tick publishes `running`, `parked` and `cap`, never the
+  depth of labelled work waiting for a slot, and the launch order has no aging. A 45-hour wait reads as
+  `running=8 cap=8`.
 
 ## Design
 
 Four mechanisms, each one testable on its own, in the order that pays.
 
-### L1 — liveness from an outside signal (the fix)
+### L1 — liveness from an outside signal
+
+> Status 2026-11-10: the guard (L2) shipped the same day; L1 is not yet built, and its value is now re-ranked —
+> it reaps parked sessions and labels them honestly, it does not recover capacity.
 
 The executor gains a second source of truth for "is this worker working": the pane it runs in. The host already
 answers it — the agent table reports `working`, `idle`, `done`, `blocked` per pane, with the pane's cwd, which
@@ -73,6 +95,9 @@ better on precision and stays on the roadmap; it must not be the primary signal,
 report is not.
 
 ### L2 — relaunch consults the last report
+
+> **Shipped 2026-11-10** in this branch: a crash keeps the state the worker itself reported (`src/pi/executor.ts`
+> crash path) and the relaunch reads it (`src/pi/extension.ts`), with two tests. The table below is the rule.
 
 The crash branch reads what the dead worker last said:
 
@@ -126,7 +151,9 @@ under L1+L4.
 
 1. Land L1 in observe-only: compute and log the verdict, change nothing. One day of `verdict=lost` lines
    against real panes calibrates `LOST_MINUTES` and proves the pane read is affordable.
-2. Land L2 (the guard) — the smallest change with the largest immediate benefit, safe to ship on its own.
+2. **Done 2026-11-10.** L2 shipped with the correction above: a crash keeps the worker's report, and the relaunch
+   reads it. Safe to ship on its own, and it is the difference between a freed slot that frees the queue and a
+   freed slot that re-runs a shipped change.
 3. Turn L1 enforcement on behind the same flag; land L3 with the panel and card; land L4 with the budget field.
 4. Add I6/I7 to the formal model with the falsification, and extend the operator guide with the queue line.
 

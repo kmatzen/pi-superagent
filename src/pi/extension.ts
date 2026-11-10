@@ -307,7 +307,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
 
   const reported = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun): void => {
     let fresh = false
-    if (origin === 'crash' && !relaunched.has(ticket.id)) {
+    // A crash of a worker that had already reported `ready`, `blocked`, or `waiting` is not unfinished work: the
+    // delivery exists, or a person is the only blocker. Relaunching those re-ran shipped changes (measured
+    // 2026-11-10: after four panes closed, all four tickets relaunched, two of them already merged-ready PRs).
+    const saidItsPiece = run.state === 'ready' || awaitsAHuman(run.state)
+    if (origin === 'crash' && !relaunched.has(ticket.id) && !saidItsPiece) {
       relaunched.add(ticket.id)
       try {
         engine.retryTicket(ticket.id)
@@ -316,6 +320,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       } catch (error) {
         log.line('warn', 'worker.relaunch_failed', { ticket: ticket.id, error: String(error).slice(0, 200) })
       }
+    }
+    if (origin === 'crash' && saidItsPiece) {
+      log.line('info', 'worker.relaunch_skipped', { ticket: ticket.id, assignment: assignmentId, state: run.state })
+      releaseIfWaiting(ticket.id, assignmentId, run.state)
     }
     announce(ticket, assignmentId, origin, run, fresh)
     // The operator's rule 2026-11-08 and its 2026-11-09 extension: a worker gives up its agent, tab and slot
