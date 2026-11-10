@@ -777,7 +777,29 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       if (pollFailures) { pollFailures = 0; sourceHealth = null; publishHealth() }
       pollMs = Date.now() - pollAt
     }
-    for (const trigger of triggers) engine.receive(trigger)
+    // One live ticket per issue. Measured 2026-11-10: issue 145 carried two running tickets at once, and issue
+    // 235 has had eight tickets over its life, because a label on an issue that already had work in flight opened
+    // a second ticket for it. A stopped ticket is open no longer, so re-labelling still re-dispatches.
+    // A positive list of in-flight states, so an unknown state passes through: a guard that guesses at
+    // 'finished' would silently refuse a re-ask, which is a lost ask, and a lost ask is the failure this guard
+    // exists to prevent. Measured in the answer path: a worker that asked a human is not in flight, and its
+    // answer must start a fresh worker.
+    const IN_FLIGHT = new Set(['queued', 'starting', 'running', 'pending'])
+    const liveThreads = new Set(
+      repos.tickets
+        .open()
+        .filter(t => IN_FLIGHT.has(String(t.assignments[t.assignments.length - 1]?.state ?? '')))
+        .flatMap(t => t.channels.map(c => c.thread)),
+    )
+    for (const trigger of triggers) {
+      const thread = trigger.threads?.[0]?.id
+      if (thread && liveThreads.has(thread)) {
+        log.line('info', 'intake.duplicate_thread', { thread, trigger: trigger.id })
+        continue
+      }
+      if (thread) liveThreads.add(thread)
+      engine.receive(trigger)
+    }
     const reconcileAt = Date.now()
     enter('reconcile')
     try {
