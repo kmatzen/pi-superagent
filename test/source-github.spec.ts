@@ -465,4 +465,57 @@ describe('GithubSource', () => {
     await f.source.poll()
     expect(await f.source.poll()).toHaveLength(0)
   })
+
+  it('a standing ask with a spent grant gets its launch back, and the board sees the label return', async () => {
+    // The one-shot grant made a standing ask entitled to nothing after its first worker (measured
+    // 2026-11-10: 5 asks queued 57 hours with 8 free slots). The queue marker says it still wants an
+    // agent, so the router's counter hands the launch back once, and the label returns to the issue.
+    const f = fixture([], [issue({ issue: 214, title: 'DO: keep the panel green', labels: ['agent-ready'] })])
+    f.store.set('source:github:o/r:issues', ['#214'])
+    f.store.set('source:github:o/r:label-grants', ['#214'])
+    const labelsOn: Array<{ issue: number; label: string }> = []
+    f.api.addLabel = async (issue, label) => { labelsOn.push({ issue, label }) }
+    const asked: string[] = []
+    const source = new GithubSource(f.api, {
+      repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested', queueLabel: 'agent-ready',
+      regrant: (_issue, key) => { const yes = asked.length === 0; asked.push(key); return yes },
+    }, f.store)
+    source.bootstrap()
+    expect((await source.poll()).map(tr => tr.text), 'the ask fires again').toEqual(['DO: keep the panel green'])
+    expect(labelsOn, 'the write rides the next poll, the same deferral that spends a grant').toEqual([])
+    expect(await source.poll(), 'the counter says no the second time').toHaveLength(0)
+    expect(labelsOn, 'the grant returns to the board, so the launch is visible there').toEqual(
+      [{ issue: 214, label: 'agent-requested' }])
+    expect(f.kv.get('source:github:o/r:label-grants'), 'the spent grant leaves the journal with the positions')
+      .toEqual([])
+  })
+
+  it('a cap answer of no leaves a standing ask quiet, with no label write and no trigger', async () => {
+    const f = fixture([], [issue({ issue: 215, title: 'DO: watch the queue', labels: ['agent-ready'] })])
+    f.store.set('source:github:o/r:issues', ['#215'])
+    f.store.set('source:github:o/r:label-grants', ['#215'])
+    const labelsOn: Array<{ issue: number; label: string }> = []
+    f.api.addLabel = async (issue, label) => { labelsOn.push({ issue, label }) }
+    const source = new GithubSource(f.api, {
+      repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested', queueLabel: 'agent-ready',
+      regrant: () => false,
+    }, f.store)
+    source.bootstrap()
+    expect(await source.poll(), 'the cap is a real no').toHaveLength(0)
+    expect(labelsOn, 'a refused re-grant writes nothing to the board').toEqual([])
+  })
+
+  it('an issue the queue marker does not name is left alone, grant spent or not', async () => {
+    const f = fixture([], [issue({ issue: 216, title: 'DONE: shipped last week' })])
+    f.store.set('source:github:o/r:issues', ['#216'])
+    f.store.set('source:github:o/r:label-grants', ['#216'])
+    let called = 0
+    const source = new GithubSource(f.api, {
+      repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested',
+      regrant: () => { called++; return true },
+    }, f.store)
+    source.bootstrap()
+    expect(await source.poll()).toHaveLength(0)
+    expect(called, 'no queue marker, no ask for a re-grant').toBe(0)
+  })
 })

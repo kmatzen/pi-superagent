@@ -29,6 +29,23 @@ import { createPanelServer } from './server.ts'
 import { checkoutRepository, guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
 import { briefFor, ghAccounts, loadSdk, policyOf, pullBrief, scopeOf, type RouterConfig, type SdkSurface } from './router.ts'
 
+/**
+ * A standing ask re-earns its launch a bounded number of times per day. The counter lives in the store,
+ * not in labels: a label the router adds and removes without memory is a surface that lies to the board.
+ * Measured 2026-11-10: the one-shot grant left 5 standing asks queued 57 hours with 8 free slots, and an
+ * unbounded re-grant would turn a stuck ask into a launch loop. Cap 2 per issue per day.
+ */
+export const REGRANT_CAP = 2
+export const REGRANT_KEY = 'router:regrant'
+export interface RegrantCounters { day: string, perIssue: Record<string, number> }
+export const regrantPlan = (counters: RegrantCounters | undefined, key: string, day: string,
+                            cap = REGRANT_CAP): RegrantCounters | undefined => {
+  const today = counters?.day === day ? counters : { day, perIssue: {} }
+  const used = today.perIssue[key] ?? 0
+  return used >= cap ? undefined : { day, perIssue: { ...today.perIssue, [key]: used + 1 } }
+}
+
+
 export interface PiLike {
   registerTool(tool: RegisteredTool): void
   // pi reads only these two and steers mid-turn on any other value (agent-session.js:1640), which is how 'text' injected unchosen.
@@ -198,6 +215,16 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, requestLabel: REQUEST_LABEL,
         onWarn: (event, fields) => log.line('warn', event, fields),
         onOpen: (open) => { openBoard = open },
+        // The standing queue, given its launch back. The source decides when the ask qualifies (queue
+        // label, spent grant, nothing live); the counter here decides how often, and says no after.
+        regrant: (issue, key) => {
+          const day = (deps.now ? deps.now() : new Date().toISOString()).slice(0, 10)
+          const next = regrantPlan(repos.kv.get<RegrantCounters>(REGRANT_KEY), key, day)
+          if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day }); return false }
+          repos.kv.set(REGRANT_KEY, next)
+          log.line('info', 'regrant.granted', { thread: key, issue, day })
+          return true
+        },
       }, repos.kv)
     : undefined
   github?.bootstrap()
