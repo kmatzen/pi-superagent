@@ -84,6 +84,13 @@ export interface FollowerOptions {
   /** How often a pull request outside the watched repository is read: three calls each time, against GitHub's hourly limit. */
   everyMs?: number
   /**
+   * How long a thread that this account cannot read stays out of the queue. Measured 2026-11-10: 330 read
+   * failures in 4000 log lines, 42 on one thread, because a 404 is a permanent answer for a private
+   * repository and the follower asked again every interval, and again after each of the day's 96 restarts.
+   * The burn is what tripped the hourly API limit, and a tripped limit blinds the reads that DO matter.
+   */
+  cooldownMs?: number
+  /**
    * Most pull requests one pass reads, whatever is due. The 120 s budget above is wall-clock, so it binds only
    * while the loop keeps its cadence; when a tick is entered late, every follow is due at once and the pass pays
    * the whole fan-out (measured 2026-11-09: 41 follows, 12.1 s per pass). The cap makes a pass's cost a property
@@ -116,6 +123,14 @@ export interface ReconcileReport {
 export class PullFollower {
   private readonly polled = new Map<string, number>()
   private readonly unreadable = new Set<string>()
+  /** Thread id -> the moment it may be read again. In memory on purpose: a restart re-asks once, and once is
+   *  what a repository that came back into sight deserves. */
+  private readonly cooldown = new Map<string, number>()
+  /** Consecutive failed reads per thread. The long backoff belongs to the PERMANENT answer (a private
+   *  repository this account cannot see), not to a network blip: a repo that comes back into sight mid-day
+   *  must be seen on the next interval: four consecutive failures is a permanent answer, three is a bad
+   *  minute. */
+  private readonly failures = new Map<string, number>()
   /** Threads whose state read has already been complained about: a follow in a repository the account cannot see
    *  fails every interval, and 720 identical lines a day is how the one real line gets buried. */
   private readonly unread = new Set<string>()
@@ -144,6 +159,9 @@ export class PullFollower {
       const local = id.startsWith('#')
       if (local && (!open || open.has(id))) continue
       if (!local && now - (this.polled.get(id) ?? -Infinity) < (this.options.everyMs ?? 120_000)) continue
+      // A thread in backoff is not due: the answer that put it there (a repository this account cannot read)
+      // does not change between passes, and asking again is the burn, not the fix.
+      if (!local && (this.cooldown.get(id) ?? 0) > now) continue
       due.push({ id, pull, local })
     }
     // A follow recorded closed is not in `followed`, so nothing reads it again: a close a read *failed* to make —
@@ -164,6 +182,7 @@ export class PullFollower {
     }
     for (const [id, pull] of recorded) {
       this.probed.add(id)
+      if ((this.cooldown.get(id) ?? 0) > now) continue
       // The watched repository answers this from the poll already in hand: a thread open there denies the close, so
       // that reopen costs no API call. Its absence proves nothing — the list answers issues, and a pull request
       // thread missing from it is not a closed pull request — so the rest are read, once each.
@@ -227,12 +246,22 @@ export class PullFollower {
       // Unknown is not closed. Ending the wait on a read that failed posts "closed without merging, so this ticket
       // ends" on a pull request that is open and ready — measured 2026-11-09, twice in one day, on the router's
       // own fix, because its account cannot see the private repository that pull lives in.
+      const fails = (this.failures.get(id) ?? 0) + 1
+      this.failures.set(id, fails)
+      const ms = this.options.cooldownMs ?? 30 * 60_000
+      if (!local && ms > 0 && fails >= 4) this.cooldown.set(id, now + ms)
+      // Said once per thread, with the backoff on the same line: the router already counts this event, and a
+      // second event per failure doubles the noise for the one fact a reader needs.
       if (!this.unread.has(id)) {
         this.unread.add(id)
-        this.options.warn('pull.read_failed', { thread: id, error: String(error).slice(0, 200) })
+        this.options.warn('pull.read_failed', {
+          thread: id, error: String(error).slice(0, 200), backoffMinutes: ms > 0 ? Math.round(ms / 60_000) : 0,
+        })
       }
       return
     }
+    this.cooldown.delete(id)
+    this.failures.delete(id)
     if (this.unread.delete(id)) this.options.warn('pull.read_readable', { thread: id })
     // A pull request GitHub no longer has cannot be merged, so the ticket's wait ends here. `undefined` is GitHub's
     // answer for one *to a reader that can see the repository*: a repository this account cannot read throws above
