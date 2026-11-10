@@ -26,6 +26,9 @@ export interface WorkerRecord {
   tabSettledAt?: string
 }
 
+/** How many bounded keeps a retired tab gets before the sweep closes it at a busy agent. */
+const RETIRE_CLOSE_TRIES = 3
+
 export interface HerdrWorkersOptions {
   herdr: Herdr
   stateDir: string
@@ -34,6 +37,8 @@ export interface HerdrWorkersOptions {
   pollMs?: number
   livenessMs?: number
   lingerMs?: number
+  /** How long a retired worker's agent gets to wind down before its tab closes at a busy agent. */
+  retireGraceMs?: number
   startTimeoutMs?: number
   shellWaitMs?: number
 }
@@ -132,11 +137,17 @@ export class HerdrWorkers {
       retired.push(record)
     }
     // Close timers die with the process, and a tab kept for a busy agent needs another look: re-check every open one.
-    const linger = this.options.lingerMs ?? 600_000
+    // A retired worker is work the engine has decided it does not want, and it held its tab open forever while
+    // its agent stayed busy: measured 2026-11-10, 18 of 32 tabs belonged to ended tickets, three of them a second
+    // agent on a ticket that had moved on. The interrupt above asks; a bounded grace then closes, even at a busy one.
+    const retireGraceMs = this.options.retireGraceMs ?? 60_000
     const open = new Set((await this.options.herdr.tabList().catch(() => [])).map(tab => tab.tabId))
     for (const record of this.records(true).filter(r => r.endedAt && open.has(r.tabId) && !retired.includes(r))) {
-      const wait = Math.max(0, Date.parse(record.endedAt!) + linger - Date.now())
-      setTimeout(() => { void this.closeIfIdle(record) }, wait).unref()
+      // A close the previous router owed is not lost to the restart: schedule it when it is due, and never later
+      // than the retire grace, which is the budget that ends a busy agent's keep.
+      const due = Math.max(0, Date.parse(record.endedAt!) + (this.options.lingerMs ?? 600_000) - Date.now())
+      const delay = Math.min(due, retireGraceMs)
+      setTimeout(() => { void this.closeIfIdle(record, retireGraceMs, RETIRE_CLOSE_TRIES) }, delay).unref()
     }
     return retired
   }
@@ -288,17 +299,29 @@ export class HerdrWorkers {
     }
   }
 
-  // herdr has no guarded close: re-check the recorded occupant is idle right before closing, else keep the tab.
-  private async closeIfIdle(record: WorkerRecord): Promise<void> {
+  // A bounded keep: without the budget a busy agent holds a retired tab forever, which is the leak being closed.
+  private async closeIfIdle(
+    record: WorkerRecord,
+    forceAfter?: number,
+    tries = (forceAfter === undefined ? 0 : RETIRE_CLOSE_TRIES),
+  ): Promise<void> {
     const agent = await this.options.herdr.agentGet(record.agent).catch(() => undefined)
     const settle = (): void => {
       record.tabSettledAt = new Date().toISOString()
       writeFileSync(join(record.dir, 'worker.json'), JSON.stringify(record, null, 2))
     }
     if (agent?.pane_id === record.paneId && !['idle', 'done'].includes(agent.agent_status)) {
-      // Still busy, whoever drives it: look again after another linger rather than keep the tab forever.
+      if (forceAfter !== undefined && tries > 0) {
+        this.options.log.line('info', 'worker.tab_closed_busy', {
+          agent: record.agent, tab: record.tabId, status: agent.agent_status, ticket: record.ticketId,
+        })
+        await this.options.herdr.tabClose(record.tabId)
+          .then(() => { settle() })
+          .catch((error: unknown) => this.options.log.line('warn', 'worker.tab_close_failed', { tab: record.tabId, error: String(error).slice(0, 160) }))
+        return
+      }
       this.options.log.line('info', 'worker.tab_kept', { agent: record.agent, tab: record.tabId, status: agent.agent_status })
-      setTimeout(() => { void this.closeIfIdle(record) }, this.options.lingerMs ?? 600_000).unref()
+      setTimeout(() => { void this.closeIfIdle(record, forceAfter, tries - 1) }, forceAfter ?? this.options.lingerMs ?? 600_000).unref()
       return
     }
     if (agent?.pane_id !== record.paneId) {
