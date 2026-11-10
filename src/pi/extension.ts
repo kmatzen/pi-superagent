@@ -1148,6 +1148,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // start. A pid is the proof that survives a rewritten title.
       try {
         writeFileSync(join(cfg.dataDir, 'panel.pid'), `${process.pid}\n`)
+        // The port a zero-config panel bound to, on the record: `superagent stop-ticket` must reach the panel,
+        // and a pid and a token are useless to a caller that cannot find the door.
+        writeFileSync(join(cfg.dataDir, 'panel.port'), `${(panel.server.address() as { port?: number } | null)?.port ?? cfg.panelPort}\n`)
       } catch { /* a panel that cannot record its pid still serves; `start` then falls back to its old refusal */ }
       log.line('info', 'panel.bound', { port: (panel.server.address() as { port?: number } | null)?.port ?? cfg.panelPort })
     })

@@ -147,6 +147,17 @@ describe('the panel and the API', () => {
     expect((await f.api('/api/tickets', '1')).json()).toEqual([])
     await new Promise(r => setTimeout(r, 30))
     expect(f.running.workers(), 'the stop reached the worker').toEqual([])
+    const withReason = await fetch(`http://127.0.0.1:${f.port}/api/tickets/${open!.id}/stop`, {
+      method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir), 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'it duplicates ticket 695488 on issue #145' }),
+    })
+    expect(withReason.status).toBe(200)
+    expect(String((await withReason.json() as { reason?: string }).reason), "the caller's reason reaches the engine").toContain('duplicates ticket')
+    const badBody = await fetch(`http://127.0.0.1:${f.port}/api/tickets/${open!.id}/stop`, {
+      method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir), 'content-type': 'application/json' }, body: '{oops',
+    })
+    expect(badBody.status, 'a malformed body never blocks the stop the caller asked for').toBe(200)
+    expect(String((await badBody.json() as { reason?: string }).reason), 'and the default reason stands').toBe('stopped by the operator')
     const missing = await fetch(`http://127.0.0.1:${f.port}/api/tickets/nope/stop`, { method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir) } })
     expect(missing.status).toBe(404)
     f.running.stop()
