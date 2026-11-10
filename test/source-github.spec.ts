@@ -486,8 +486,20 @@ describe('GithubSource', () => {
     expect(await source.poll(), 'the counter says no the second time').toHaveLength(0)
     expect(labelsOn, 'the grant returns to the board, so the launch is visible there').toEqual(
       [{ issue: 214, label: 'agent-requested' }])
-    expect(f.kv.get('source:github:o/r:label-grants'), 'the spent grant leaves the journal with the positions')
-      .toEqual([])
+    expect(f.kv.get('source:github:o/r:label-grants'), 'the journal prunes to labelled issues, so the counter is what caps the loop').toEqual([])
+  })
+
+  it('a grant on the issue is the label path, and the re-grant never fires on top of it', async () => {
+    const f = fixture([], [issue({ issue: 217, title: 'DO: land the panel', labels: ['agent-ready', 'agent-requested'] })])
+    f.store.set('source:github:o/r:issues', ['#217'])
+    let called = 0
+    const source = new GithubSource(f.api, {
+      repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested', queueLabel: 'agent-ready',
+      regrant: () => { called++; return true },
+    }, f.store)
+    source.bootstrap()
+    expect((await source.poll()).length, 'the ask fires once, through the label path').toBe(1)
+    expect(called, 'a live grant is not a re-grant').toBe(0)
   })
 
   it('a cap answer of no leaves a standing ask quiet, with no label write and no trigger', async () => {
