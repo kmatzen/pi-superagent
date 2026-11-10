@@ -9,7 +9,7 @@ const runGit = promisify(execFile)
 import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
-import {GithubSource, REPLY_MARKER, type GithubApi, type IssueState, REQUEST_LABEL} from './source-github.ts'
+import {GithubSource, REPLY_MARKER, type GithubApi, type IssueState, QUEUE_LABEL, REQUEST_LABEL} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type ReconcileReport } from './pulls.ts'
@@ -177,7 +177,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   let openBoard: readonly IssueState[] = []
   const starvation = (): { starved: number; oldestStarvedH: number } => {
     const live = new Set(repos.tickets.open().flatMap(t => t.channels.map(c => c.thread)))
-    const waiting = openBoard.filter(i => i.labels.includes(REQUEST_LABEL) && !live.has(`#${i.issue}`))
+    const waiting = openBoard.filter(i => i.labels.includes(QUEUE_LABEL) && !live.has(`#${i.issue}`))
     const hours = (iso: string) => (Date.now() - Date.parse(iso)) / 3.6e6
     const oldest = waiting.reduce((m, i) => Math.max(m, hours(i.updatedAt)), 0)
     return { starved: waiting.length, oldestStarvedH: Math.round(oldest * 10) / 10 }
