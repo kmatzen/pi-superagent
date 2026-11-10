@@ -27,6 +27,12 @@ while [ $# -gt 0 ]; do
       [ "$#" -eq 2 ] && [[ "$2" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$ ]] && [[ "${2#*/}" != "." && "${2#*/}" != ".." ]] || { usage >&2; exit 2; }
       CMD=init; INIT_REPO="$2"; shift 2 ;;
     start|stop|restart|status|remedy) CMD="$1"; shift ;;
+    stop-ticket)
+      # Parsed with the verbs, not in the dispatch: the loop below shifts every known verb, so a verb it does
+      # not know arrives here with its arguments already eaten.
+      CMD=stop-ticket
+      ST_ID="${2:-}"; shift 2
+      ST_REASON="$*"; shift ;;
     intake)
       CMD=intake; shift
       [ "$#" -ge 1 ] || { usage >&2; exit 2; }
@@ -481,7 +487,7 @@ stop_ticket() {
     echo "stop-ticket: no panel to ask (run 'superagent start' with a panelPort, and the port lands in $STATE/panel.port)"; return 1
   fi
   local out
-  out="$(curl -sS -m 15 -X POST -H "x-superagent-token: $token" -H 'content-type: application/json' \
+  out="$(curl -sS -m 15 -X POST -H "x-superagent-request: 1" -H "x-superagent-token: $token" -H 'content-type: application/json' \
     --data "$(python3 -c 'import json,sys; print(json.dumps({"reason": sys.argv[1]}))' "$reason")" \
     "http://127.0.0.1:$port/api/tickets/$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$id")/stop" 2>&1)"
   echo "$out"
@@ -493,7 +499,7 @@ case "${CMD:-status}" in
     if [ -n "${RESPECT_STOP:-}" ] && [ -f "$STOP_MARKER" ]; then echo "left stopped: manual stop marker present"; exit 0; fi
     start ;;
   stop) stop ;;
-  stop-ticket) shift; stop_ticket "$@" ;;
+  stop-ticket) stop_ticket "$ST_ID" "$ST_REASON" ;;
   restart)
     if [ -n "${RESPECT_STOP:-}" ] && [ -f "$STOP_MARKER" ]; then echo "left stopped: manual stop marker present"; exit 0; fi
     restart_router ;;
