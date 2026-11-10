@@ -28,6 +28,23 @@ import type { Ticket, Trigger } from '../src/core/index.ts'
     expect(g.calls.filter(c => c.startsWith('pull ')).length, 'with no backoff, every interval asks again, which is the burn').toBeGreaterThan(before)
   })
 
+  it('a pull request that stopped merging cleanly tells the ticket once, and keeps saying it on a slow clock', async () => {
+    // Measured 2026-11-10: a fleet pull request sat unmergeable for 16 hours, a second for 15, work finished and
+    // unreachable. A conflict is not a comment and not a review, so the talk readers never saw it.
+    const t = follower({ pull: async () => ({ ...openPull, mergeable: false }) })
+    await t.reconcile(t.following('#5'))
+    expect((t.received[0]?.meta as { via?: string }).via, 'the conflict reaches the ticket').toBe('conflict')
+    t.tick(121_000)
+    await t.reconcile(t.following('#5'))
+    expect(t.received.length, 'the same conflict does not launch a second worker two minutes later').toBe(1)
+    t.tick(6 * 60 * 60_000)
+    await t.reconcile(t.following('#5'))
+    expect(t.received.length, 'a conflict still stuck six hours on is said again').toBe(2)
+    const g = follower({ pull: async () => ({ ...openPull, mergeable: null }) })
+    await g.reconcile(g.following('#5'))
+    expect(g.received, 'GitHub computing mergeable says nothing').toEqual([])
+  })
+
 describe('the pull requests tickets follow', () => {
   const ticket = (id: string, follows: Array<{ thread: string; closed?: boolean }>) =>
     ({ id, follows: follows.map(f => ({ thread: f.thread, closed: f.closed ? { at: 'x' } : undefined })) }) as never
