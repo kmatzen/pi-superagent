@@ -168,3 +168,9 @@ To start over, stop the router and delete the directory. On the next start, the 
 | A ticket with a pull request ends with it, as merged or closed | binding before the report, `threadClosed` | tests only |
 | A live agent's tab is never swept | the liveness check in `closeStaleTabs` | `Workers.tla` W2, W4 |
 | Dead workers' tabs do not pile up | the sweep and the linger close | `Workers.tla` W5 |
+
+## Related designs
+
+- [Ask and Delivery: one object each, two lifecycles](design-ask-vs-delivery.md) — proposed. Why the
+  guarantee above, "a ticket with a pull request ends with it", costs seven rules, and the split that makes
+  it one.
