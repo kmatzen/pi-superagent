@@ -35,6 +35,22 @@ import { briefFor, ghAccounts, loadSdk, policyOf, pullBrief, scopeOf, type Route
  * Measured 2026-11-10: the one-shot grant left 5 standing asks queued 57 hours with 8 free slots, and an
  * unbounded re-grant would turn a stuck ask into a launch loop. Cap 2 per issue per day.
  */
+/**
+ * The qualification for a standing ask to re-earn its launch: there is work on the thread, it is not
+ * finished, its worker's assignment ended by release, and no agent is live on it. A ticket that reported
+ * `ready` is delivered work, not a queue entry; a ticket with a worker is running. Written after the live
+ * check 2026-11-10 proved the label journal cannot answer this question.
+ */
+export const standingAskEntitled = (
+  ticket: { id?: string, ended?: unknown, assignments: readonly { state: string, endedReason?: string }[] } | undefined,
+  liveWorkers: readonly { ticketId?: string }[],
+): boolean => {
+  if (!ticket || ticket.ended) return false
+  const last = ticket.assignments[ticket.assignments.length - 1]
+  if (!last || last.state !== 'ended' || last.endedReason !== 'release') return false
+  return !liveWorkers.some(w => ticket.id !== undefined && w.ticketId === ticket.id)
+}
+
 export const REGRANT_CAP = 2
 export const REGRANT_KEY = 'router:regrant'
 export interface RegrantCounters { day: string, perIssue: Record<string, number> }
@@ -218,11 +234,16 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         // The standing queue, given its launch back. The source decides when the ask qualifies (queue
         // label, spent grant, nothing live); the counter here decides how often, and says no after.
         regrant: (issue, key) => {
+          // Qualified by the state of the work, not by a label journal: standing ask, a ticket on the
+          // thread, its worker's assignment ended, nothing live on it. A ticket that finished (ready) is
+          // not entitled to a new worker, and neither is one a worker is running on right now.
+          const ask = repos.tickets.open().find(t => t.channels[0]?.thread === key)
+          if (!standingAskEntitled(ask, executor.workers())) return false
           const day = (deps.now ? deps.now() : new Date().toISOString()).slice(0, 10)
           const next = regrantPlan(repos.kv.get<RegrantCounters>(REGRANT_KEY), key, day)
           if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day }); return false }
           repos.kv.set(REGRANT_KEY, next)
-          log.line('info', 'regrant.granted', { thread: key, issue, day })
+          log.line('info', 'regrant.granted', { thread: key, issue, ticket: ask?.id, day })
           return true
         },
       }, repos.kv)
