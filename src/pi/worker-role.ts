@@ -1,5 +1,5 @@
 /** The superagent inside a worker's own pi: report tool, guard, and a file bridge to the router in another process. */
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import {appendFileSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync} from 'node:fs'
 import { join } from 'node:path'
 import { reportTool } from './report-tool.ts'
 import { guardExtension } from './workspace.ts'
@@ -21,6 +21,17 @@ function askText(questions: unknown): string {
 
 export const ACTIVITY_EVERY_MS = 5000
 export const SILENT_FINISH = 'the worker finished its run without calling ticket_report'
+
+// A worker that ends its turn in silence is not a worker that needs a person. Measured 2026-11-10: 14 of 22
+// open tickets sat parked on this one summary, so the fleet's lost throughput was a forgotten tool call, not
+// capacity, and only a human could restart it. One nudge asks for the outcome; the second consecutive
+// silence files the failure, which is the case a person owns. The nudge rides the inbox, so the model reads
+// it the way it reads any other input, and the state machine sees one report per assignment, as upstream
+// specifies it in 003-execution.
+export const SILENT_NUDGE = 'You ended your turn without calling ticket_report, and the fleet cannot tell done from gone. '
+  + 'Call ticket_report NOW with the true outcome: ready (work delivered, link the pull request), '
+  + 'blocked (you need a person, with the question), or failed (what broke). One line is enough.'
+export const SILENT_NUDGE_FILE = 'zz-self-nudge.json'
 
 export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000): boolean {
   const dir = env.PI_SUPERAGENT_WORKER_DIR
@@ -60,11 +71,23 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
   // Inputs are kept in the inbox until a run takes them. pi queues a message sent into a running turn and hands
   // the queue back to the human's input box when that turn is aborted, so a file deleted at send time is a message
   // the model never read: the router marked it delivered, the ticket waited on its worker, and nothing retried it.
+  // One nudge per WORKER, not per run: a counter reset on agent_start lets a worker that finishes
+  // silently be nudged forever, which is worse than parking it. Proved by test on the first attempt.
+  let silentStreak = 0
   const inflight = new Map<string, string>()
   pi.on('agent_start', () => append('events.jsonl', { type: 'turnStarted' }))
   pi.on('agent_settled', (event) => {
     // Filed here, before the settle: only this process knows the order of a run's events for certain.
-    if (!reported) append('reports.jsonl', { state: 'failed', summary: SILENT_FINISH, question: null, origin: 'silent' })
+    if (!reported && silentStreak === 0) {
+      // The first silence is a forgotten call: ask for the outcome, file nothing.
+      silentStreak = 1
+      writeFileSync(join(inbox, SILENT_NUDGE_FILE), JSON.stringify({ text: SILENT_NUDGE, mode: 'followUp' }))
+      append('events.jsonl', { type: 'selfNudge' })
+    } else if (!reported) {
+      append('reports.jsonl', { state: 'failed', summary: SILENT_FINISH, question: null, origin: 'silent' })
+    } else {
+      silentStreak = 0
+    }
     reported = false
     const aborted = Boolean((event as { aborted?: boolean } | undefined)?.aborted)
     for (const [name, file] of inflight) {

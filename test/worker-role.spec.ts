@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { SILENT_FINISH, workerRole, type WorkerPi } from '../src/pi/worker-role.ts'
+import { SILENT_FINISH, SILENT_NUDGE_FILE, workerRole, type WorkerPi } from '../src/pi/worker-role.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'wrole-')); dirs.push(d); return d }
@@ -10,6 +10,8 @@ afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true 
 const until = async (ok: () => boolean, ms = 3000) => {
   for (const end = Date.now() + ms; !ok() && Date.now() < end;) await new Promise(resolve => setTimeout(resolve, 10))
 }
+// The worker's own nudge lives in the inbox beside router inputs; the input tests count router inputs.
+const inboxFiles = (dir: string): string[] => readdirSync(join(dir, 'inbox')).filter((n: string) => n !== SILENT_NUDGE_FILE)
 const lines = (file: string) => existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l) as Record<string, unknown>) : []
 
 function fakePi() {
@@ -71,7 +73,10 @@ describe('the worker role', () => {
     expect(lines(join(dir, 'reports.jsonl')), 'nothing reaches the router').toEqual([])
     f.emit('agent_start')
     f.emit('agent_settled')
-    expect(lines(join(dir, 'reports.jsonl')).at(-1), 'a refused report is no report: the run ends as a silent finish').toMatchObject({ state: 'failed', origin: 'silent' })
+    expect(existsSync(join(dir, 'inbox', SILENT_NUDGE_FILE)), 'a refused report is no report, so the first silence nudges').toBe(true)
+    f.emit('agent_start')
+    f.emit('agent_settled')
+    expect(lines(join(dir, 'reports.jsonl')).at(-1), 'and the second silence files the silent finish').toMatchObject({ state: 'failed', summary: SILENT_FINISH })
   })
 
   it('turns a worker asking a person into a blocked report, and refuses the ask that has no keyboard', () => {
@@ -104,21 +109,31 @@ describe('the worker role', () => {
     f.emit('agent_start')
     for (let i = 0; i < 50; i++) f.emit('message_update')
     f.emit('agent_settled')
-    expect(lines(join(dir, 'events.jsonl')).map(e => e.type)).toEqual(['turnStarted', 'activity', 'settled'])
+    expect(lines(join(dir, 'events.jsonl')).map(e => e.type)).toEqual(['turnStarted', 'activity', 'selfNudge', 'settled'])
   })
 
-  it('files a run that ends without ticket_report as a failure, ahead of the settle that ends it', () => {
+  it('nudges a silent worker once, then files the failure, ahead of the settle that ends the run', () => {
+    // The rule changed 2026-11-10 on the operator's word. Measured before it: 14 of 22 open tickets sat
+    // parked on this one summary, so the fleet lost throughput to a forgotten tool call, and only a human
+    // could restart it. One nudge per WORKER: a counter reset per run nudges a silent worker forever.
     const dir = tmp()
     const f = fakePi()
     workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir })
     f.emit('agent_start')
     f.emit('agent_settled')
-    expect(lines(join(dir, 'reports.jsonl'))).toMatchObject([{ state: 'failed', summary: SILENT_FINISH, origin: 'silent' }])
+    expect(existsSync(join(dir, 'reports.jsonl')), 'the first silence files no report').toBe(false)
+    expect(existsSync(join(dir, 'inbox', SILENT_NUDGE_FILE)), 'and queues one nudge the worker reads').toBe(true)
+    expect(lines(join(dir, 'events.jsonl')).map(e => e.type), 'the router can see the nudge').toContain('selfNudge')
+    f.emit('agent_start')
+    f.emit('agent_settled')
+    const reports = lines(join(dir, 'reports.jsonl'))
+    expect(reports.length, 'one failure, never a second nudge').toBe(1)
+    expect(reports).toMatchObject([{ state: 'failed', summary: SILENT_FINISH }])
     const at = (file: string) => String(lines(join(dir, file)).at(-1)!.at)
-    expect(at('reports.jsonl') <= at('events.jsonl'), 'the report is written before the settle').toBe(true)
+    expect(at('reports.jsonl') <= at('events.jsonl'), 'the report is written before the settle event').toBe(true)
   })
 
-  it('a run that reported is not a silent finish, even when pi retries after the report; the next run must report again', () => {
+  it('a run that reported is not a silent finish, and the next silence is a nudge, not a report', () => {
     const dir = tmp()
     const f = fakePi()
     workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir })
@@ -127,10 +142,12 @@ describe('the worker role', () => {
     report.execute('c1', { state: 'blocked', summary: 'needs a decision', question: 'Ship it?' })
     f.emit('agent_start')
     f.emit('agent_settled')
-    expect(lines(join(dir, 'reports.jsonl')).map(r => r.origin ?? 'worker')).toEqual(['worker'])
+    expect(lines(join(dir, 'reports.jsonl')).map(r => r.origin ?? 'worker'), 'a retry after a report files nothing').toEqual(['worker'])
+    expect(existsSync(join(dir, 'inbox', SILENT_NUDGE_FILE)), 'a run that reported is never nudged').toBe(false)
     f.emit('agent_start')
     f.emit('agent_settled')
-    expect(lines(join(dir, 'reports.jsonl')).map(r => r.origin ?? 'worker')).toEqual(['worker', 'silent'])
+    expect(lines(join(dir, 'reports.jsonl')).length, 'the next silence nudges first').toBe(1)
+    expect(existsSync(join(dir, 'inbox', SILENT_NUDGE_FILE)), 'and the nudge is queued').toBe(true)
   })
 
   it('delivers inputs from the router once the session runs, in the order written, the way the router asked', async () => {
@@ -145,9 +162,9 @@ describe('the worker role', () => {
     f.emit('session_start')
     await until(() => f.sent.length === 2)
     expect(f.sent).toEqual([{ text: 'the brief', deliverAs: 'followUp' }, { text: 'also check CI', deliverAs: 'steer' }])
-    expect(readdirSync(join(dir, 'inbox')), 'not read yet: the run has not taken them').toEqual(['1-0000.json', '2-0001.json'])
+    expect(inboxFiles(dir), 'not read yet: the run has not taken them').toEqual(['1-0000.json', '2-0001.json'])
     f.emit('agent_settled', { aborted: false })
-    expect(readdirSync(join(dir, 'inbox'))).toEqual([])
+    expect(inboxFiles(dir)).toEqual([])
     f.emit('session_shutdown')
   })
 
@@ -161,7 +178,7 @@ describe('the worker role', () => {
     writeFileSync(join(dir, 'inbox', '1-0000.json'), '{ "text": "the brief is trunca')
     f.emit('session_start')
     await until(() => existsSync(join(dir, 'inbox', '1-0000.json.corrupt')))
-    expect(readdirSync(join(dir, 'inbox'))).toEqual(['1-0000.json.corrupt'])
+    expect(inboxFiles(dir)).toEqual(['1-0000.json.corrupt'])
     expect(lines(join(dir, 'events.jsonl')).some(e => e.type === 'inbox_error'), 'the router can see it happened').toBe(true)
     f.emit('session_shutdown')
   })
@@ -177,11 +194,11 @@ describe('the worker role', () => {
     f.emit('session_start')
     await until(() => f.sent.length === 1)
     f.emit('agent_settled', { aborted: true })
-    expect(readdirSync(join(dir, 'inbox')), 'the abort gave it back: keep the copy').toEqual(['1-0000.json'])
+    expect(inboxFiles(dir), 'the abort gave it back: keep the copy').toEqual(['1-0000.json'])
     await until(() => f.sent.length === 2)
     expect(f.sent[1]).toEqual({ text: 'changes requested', deliverAs: 'followUp' })
     f.emit('agent_settled', { aborted: false })
-    expect(readdirSync(join(dir, 'inbox')), 'the second run read it').toEqual([])
+    expect(inboxFiles(dir), 'the second run read it').toEqual([])
     f.emit('session_shutdown')
   })
 
@@ -198,7 +215,7 @@ describe('the worker role', () => {
     writeFileSync(join(dir, 'inbox', '1-0000.json'), JSON.stringify({ text: 'the brief', mode: 'followUp' }))
     f.emit('session_start')
     await until(() => lines(join(dir, 'events.jsonl')).some(r => r.type === 'inbox_error'))
-    expect(readdirSync(join(dir, 'inbox')), 'a refusal is not a delivery').toEqual(['1-0000.json'])
+    expect(inboxFiles(dir), 'a refusal is not a delivery').toEqual(['1-0000.json'])
     deaf = false
     await until(() => f.sent.length === 1)
     expect(f.sent).toEqual([{ text: 'the brief', deliverAs: 'followUp' }])
