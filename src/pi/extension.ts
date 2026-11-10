@@ -47,7 +47,9 @@ export const standingAskEntitled = (
 ): boolean => {
   if (!ticket || ticket.ended) return false
   const last = ticket.assignments[ticket.assignments.length - 1]
-  if (!last || last.state !== 'ended' || last.endedReason !== 'release') return false
+  if (!last || last.state !== 'ended' || last.endedReason !== 'released') return false
+  // The core writes 'released' (core/tickets.ts). An earlier draft of this rule tested 'release',
+  // matched nothing, and the re-grant fired in tests and never on the board. The live check found it.
   return !liveWorkers.some(w => ticket.id !== undefined && w.ticketId === ticket.id)
 }
 
