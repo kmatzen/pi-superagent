@@ -102,13 +102,17 @@ describe('herdr workers', () => {
   it('starts a worker as pi in its own tab, with the role and the bridge directory in its environment', async () => {
     const dir = tmp()
     const m = memoryHerdr()
-    const session = await new HerdrWorkers(options(dir, m.herdr)).launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    const session = await new HerdrWorkers(options(dir, m.herdr)).launch({ ticket, thread: '#7', workspace: '/w/7', env: { GH_TOKEN: 'bot-token' }, report: () => {} })
     expect(m.calls[0]).toMatch(/^tabCreate #7 · DO: rotate the keys /)
     expect(m.calls[0]).toContain('"PI_SUPERAGENT_ROLE":"worker"')
     expect(m.calls[0]).toContain(`"PI_SUPERAGENT_WORKER_DIR":"${join(dir, 'workers', session.sessionId)}"`)
-    // --no-extensions: a worker session must not load the operator's harness extensions with the operator's credentials.
+    expect(m.calls[0], 'the bot token the router named reaches the tab env')
+      .toContain('"GH_TOKEN":"bot-token"')
+    // The worker loads the operator's harness (operator, 2026-11-10: "agents should have all the power"): a
+    // session with no context meter and no compaction skill packs up at a fraction of its window, and the fleet
+    // read that as early termination. The bot's GH_TOKEN is named in the tab env at the launch site.
     // It must load this package's own entry: measured 2026-11-08, three prompts sat undrained in a worker's inbox and the pane never reported, because nothing in the pane read them.
-    expect(m.calls[1]).toBe(`agentStart ${agentName('#7', session.sessionId)} --session-id ${session.sessionId} --no-extensions --extension ${roleModule}`)
+    expect(m.calls[1]).toBe(`agentStart ${agentName('#7', session.sessionId)} --session-id ${session.sessionId} --extension ${roleModule}`)
     expect(session.watch).toContain('superagent')
   })
 
