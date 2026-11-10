@@ -575,6 +575,23 @@ describe('follow-up owners', () => {
       expect(followupOwners(trigger('2'), h.repo)).toEqual([ticketId])
     }
   })
+  it('resumes a ticket stopped because its conversation closed, and never one whose Mandate was withdrawn', () => {
+    // The stop's kind is the door. Measured 2026-11-10: the router's closure stop recorded a person's stop, so the
+    // person who reopened the issue and replied to it met `wake`'s refusal on all three doors (comment, reopen,
+    // relabel), which is what the operator's "nobody is answering my comment" report was.
+    for (const [kind, opens] of [['conversation', true], ['operator', false], ['loop', false]] as const) {
+      const h = harness()
+      const ticketId = accepted(h).ticketId!
+      h.tick(1)
+      h.engine.stopTicket(ticketId, 'the conversation closed on GitHub', kind)
+      expect(h.repo.tickets.get(ticketId)!.ended).toMatchObject({ outcome: 'stopped', kind })
+      h.engine.receive(trigger('7'))
+      h.settle()
+      const ticket = h.repo.tickets.get(ticketId)!
+      expect(ticket.assignments, `${kind} stop`).toHaveLength(opens ? 2 : 1)
+      expect(ticket.ended === undefined, `${kind} stop resumes: ${opens}`).toBe(opens)
+    }
+  })
   it('wakes an ended ticket for a message attached to it that its worker read only for context or before its last report', () => {
     for (const read of ['context', 'report'] as const) {
       const h = harness()

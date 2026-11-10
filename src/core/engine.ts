@@ -1,7 +1,7 @@
 /** The domain Engine: the single entry point of the core, and the role interfaces its callers receive. */
 import { UserError } from './errors.ts'
 import { isoTime, liveTicket } from './model.ts'
-import type { ChannelRef, Decision, PolicyEffect, ThreadRef, Ticket, Trigger } from './model.ts'
+import type { ChannelRef, Decision, PolicyEffect, ThreadRef, Ticket, TicketStopKind, Trigger } from './model.ts'
 import type { Candidate, Repositories } from './ports.ts'
 import type { EngineOptions } from './part.ts'
 import { Assignments, type WorkerReport } from './assignments.ts'
@@ -157,7 +157,7 @@ export class Engine {
    * A person stops a ticket, which withdraws its Mandate: it ends and receives nothing more.
    * @throws UserError when the ticket is unknown.
    */
-  stopTicket(ticketId: string, reason?: string): Ticket { return this.repo.atomic(() => this.tickets.stop(ticketId, reason)) }
+  stopTicket(ticketId: string, reason?: string, kind?: TicketStopKind): Ticket { return this.repo.atomic(() => this.tickets.stop(ticketId, reason, kind)) }
   /**
    * A person retries a ticket whose worker reported failed or blocked (or whose input delivery failed): the stalled
    * Assignment ends and a new one starts under the same Mandate.
