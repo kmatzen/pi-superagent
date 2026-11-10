@@ -74,6 +74,9 @@ interface Live {
   workspace: string
   quietReported: boolean
   deadlineReported: boolean
+  /** The state of the last report the worker itself posted. A crash records a session ending; it does not
+   *  overwrite this, because a worker whose last word was `ready` finished the work. */
+  lastState: string
   assignmentId: string
 }
 
@@ -182,6 +185,10 @@ export class PiExecutor {
       })
       throw error
     }
+    if (origin === 'worker') {
+      const live = this.live.get(ticket.id)
+      if (live) live.lastState = filed.state
+    }
     this.options.reported?.(ticket, assignmentId, origin, followed.length ? { ...filed, pullRequests: followed } : filed)
   }
 
@@ -190,7 +197,7 @@ export class PiExecutor {
     const live: Live = {
       session, unsubscribe: () => {}, pendingRead: [], busy,
       startedAt: born, lastEventAt: born, events: 0, workspace: session.workspace ?? this.options.worktreeFor(ticket),
-      quietReported: false, deadlineReported: false, assignmentId: assignment.id,
+      quietReported: false, deadlineReported: false, lastState: '', assignmentId: assignment.id,
     }
     live.unsubscribe = session.subscribe(event => {
       live.lastEventAt = Date.now()
@@ -202,7 +209,12 @@ export class PiExecutor {
         const ids = live.pendingRead.splice(0)
         if (ids.length) this.engine.inputsRead(ticket.id, ids)
       } else if (event.type === 'failed') {
-        this.file(ticket, assignment.id, 'crash', report('failed', `the worker crashed: ${event.error}`))
+        // A crash is the session dying, not the work failing. Filing `failed` over a worker's own `ready` erased
+        // a finished run, and the router relaunched tickets whose pull requests were already open for review
+        // (measured 2026-11-10: four relaunched after their panes closed, two of them shipped). Keep the report
+        // the worker made and record the death in the summary.
+        const said = live.lastState && live.lastState !== 'failed' ? live.lastState : 'failed'
+        this.file(ticket, assignment.id, 'crash', report(said, `the worker crashed: ${event.error}`))
         // A dead session does no work: free its slot now, or every crash costs a worker until the next restart.
         if (this.live.get(ticket.id) === live) { live.unsubscribe(); this.live.delete(ticket.id); live.session.dispose() }
       }
