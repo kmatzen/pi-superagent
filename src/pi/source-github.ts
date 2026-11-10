@@ -80,6 +80,9 @@ export interface GithubSourceOptions {
 export type LabelGrant = { fire: true, ask?: { actor: string, at: string } } | { fire: false }
 
 export const REQUEST_LABEL = 'agent-requested'
+/** The board's standing queue marker. `REQUEST_LABEL` is a one-shot grant the router spends and takes off after
+ *  each ask, so counting it measures nothing; `agent-ready` is what says an issue wants an agent right now. */
+export const QUEUE_LABEL = 'agent-ready'
 
 const sinceKey = (repo: string) => `source:github:${repo}:since`
 /** Group rows by a key, keeping the order in which the keys first appear. */
