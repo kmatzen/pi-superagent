@@ -464,6 +464,9 @@ describe('the router extension', () => {
     f.decide('accept')
     await f.running.tick()
     expect(f.running.load().starved, 'a live ticket is no longer starvation').toBe(0)
+    f.workers[0]?.events.forEach(l => l({type: 'failed', error: 'its pane closed'}))
+    await settle()
+    expect(f.running.load().starved, 'a delivered run awaiting merge is a claim the board holds, not a free slot').toBe(0)
   })
 
   it('the silence question frees the agent as well, and the next comment starts a fresh worker', async () => {
