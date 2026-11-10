@@ -227,7 +227,12 @@ export class PiExecutor {
     }
       // An idle session queues a mode-tagged message and never starts it: an operator reply sat as "3 awaiting input".
     const mode = live.busy ? 'followUp' : 'steer'
-    for (const input of visible) live.session.prompt(String(input.text), mode)
+    const texts = visible.map(i => String(i.text))
+    // One prompt for the whole batch. Each `prompt` call is its own steering message, and pi steers the session
+    // with the first while the rest queue: a review that arrived as five comments was answered one comment at a
+    // time, with the other four invisible to the worker. Operator report 2026-11-09.
+    live.session.prompt(texts.length === 1 ? texts[0]!
+      : `${texts.length} messages arrived since your last turn. Read them together before you answer:\n\n${texts.join('\n\n')}`, mode)
     this.engine.inputsDelivered(ticket.id, assignment.id, visible.map(i => i.id))
     live.pendingRead.push(...visible.map(i => i.id))
   }

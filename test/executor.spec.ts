@@ -202,7 +202,12 @@ describe('PiExecutor', () => {
     f.executor.start(t, assignment())
     await f.executor.idle()
     f.executor.deliver(t, assignment())
-    expect(f.sessions[0]!.prompts.slice(1).map(p => p.text)).toEqual(['input i1', 'trigger:i2'])
+    const batch = f.sessions[0]!.prompts.slice(1).map(p => p.text)
+    // One message for the batch: pi steers the session with the first prompt and queues the rest, so a review
+    // that arrived as several comments got answered one comment at a time with the rest invisible.
+    expect(batch.length, 'the batch arrives as one message').toBe(1)
+    expect(batch[0]).toContain('input i1')
+    expect(batch[0]).toContain('trigger:i2')
     expect(f.calls_of('inputsDelivered')[0]!.args).toEqual(['T1', 'A1', ['i1', 'i2']])
     expect(f.calls_of('inputsRead')).toEqual([])
     f.sessions[0]!.emit({ type: 'turnStarted' })
