@@ -176,8 +176,14 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // hands the board over on every poll rather than the metric making a second API call.
   let openBoard: readonly IssueState[] = []
   const starvation = (): { starved: number; oldestStarvedH: number } => {
-    const live = new Set(repos.tickets.open().flatMap(t => t.channels.map(c => c.thread)))
-    const waiting = openBoard.filter(i => i.labels.includes(QUEUE_LABEL) && !live.has(`#${i.issue}`))
+    // The queue is labelled work the engine has never put anyone on: no ticket, or a ticket with only a queued
+    // launch behind it. A live session, a delivered run awaiting merge, and an ask waiting on a person are all
+    // claims the board already holds, and no free slot changes them. Measured 2026-11-10: asks sat unstarted for
+    // 45 hours while every published number read healthy.
+    const claimed = new Set(repos.tickets.open()
+      .filter(t => { const a = t.assignments.at(-1); return a && a.state !== 'pending' })
+      .flatMap(t => t.channels.map(c => c.thread)))
+    const waiting = openBoard.filter(i => i.labels.includes(QUEUE_LABEL) && !claimed.has(`#${i.issue}`))
     const hours = (iso: string) => (Date.now() - Date.parse(iso)) / 3.6e6
     const oldest = waiting.reduce((m, i) => Math.max(m, hours(i.updatedAt)), 0)
     return { starved: waiting.length, oldestStarvedH: Math.round(oldest * 10) / 10 }
