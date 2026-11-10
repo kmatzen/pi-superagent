@@ -49,6 +49,33 @@ const ticket = { id: 'abcd1234ef', title: 'DO: rotate the keys', channels: [{ th
 const options = (dir: string, herdr: Herdr) => ({ herdr, stateDir: dir, log: openLog(dir), pollMs: 10, livenessMs: 20, lingerMs: 10 })
 
 describe('herdr workers', () => {
+  it('closes a retired worker\'s tab at a busy agent, and never touches a live worker\'s', async () => {
+    // Measured 2026-11-10: 18 of 32 worker tabs belonged to ended tickets, three of them a second agent still
+    // working a ticket that had moved on. The keep-on-busy rule had no end, so retirement never finished.
+    const dir = tmp()
+    const m = memoryHerdr()
+    const retiredDir = join(dir, 'workers', 'sa-old-1111')
+    mkdirSync(retiredDir, { recursive: true })
+    writeFileSync(join(retiredDir, 'worker.json'), JSON.stringify({
+      dir: retiredDir, sessionId: 'old', ticketId: 't-old', agent: 'sa-old-1111', tabId: 'w1:t9', paneId: 'w1:p9',
+      workspace: '/w/old', startedAt: new Date(Date.now() - 3.6e6).toISOString(),
+      endedAt: new Date(Date.now() - 3.6e6).toISOString(),
+    }))
+    const liveDir = join(dir, 'workers', 'sa-live-5555')
+    mkdirSync(liveDir, { recursive: true })
+    writeFileSync(join(liveDir, 'worker.json'), JSON.stringify({
+      dir: liveDir, sessionId: 'live', ticketId: 't-live', agent: 'sa-live-5555', tabId: 'w1:t7', paneId: 'w1:p7',
+      workspace: '/w/live', startedAt: new Date(Date.now() - 3.6e6).toISOString(),
+    }))
+    m.agents.set('sa-old-1111', { name: 'sa-old-1111', pane_id: 'w1:p9', agent: 'pi', agent_status: 'working' })
+    m.agents.set('sa-live-5555', { name: 'sa-live-5555', pane_id: 'w1:p7', agent: 'pi', agent_status: 'working' })
+    const workers = new HerdrWorkers({ ...options(dir, m.herdr), retireGraceMs: 10, lingerMs: 10 })
+    await workers.retireOrphans(new Set(['live']))
+    await until(() => m.calls.includes('tabClose w1:t9'))
+    expect(m.calls.filter(c => c === 'tabClose w1:t9'), 'the retired tab closes at a busy agent').toHaveLength(1)
+    expect(m.calls, 'a worker this router adopted is never interrupted, busy or not').not.toContain('tabClose w1:t7')
+  })
+
   it('names a worker the way herdr requires, uniquely per launch', () => {
     expect(agentName('#159', '4f02aa')).toBe('sa-gh159-4f02')
     expect(agentName('#59', 'ab12cd')).toBe('sa-gh59-ab12')
