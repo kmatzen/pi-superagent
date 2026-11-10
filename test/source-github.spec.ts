@@ -489,6 +489,28 @@ describe('GithubSource', () => {
     expect(f.kv.get('source:github:o/r:label-grants'), 'the journal prunes to labelled issues, so the counter is what caps the loop').toEqual([])
   })
 
+  it('an unlabelled issue is standing work, and an ask to the operator is not', async () => {
+    // Operator, 2026-11-10: "the labels were a requirement of the old fleet-board system which is now dead.
+    // unlabeled issues should absolutely be processed." Measured the same day: 17 of 20 open asks carried no
+    // label, and the queue-label fence meant the fleet was forbidden to touch every one of them.
+    const f = fixture([], [
+      issue({ issue: 220, title: 'rename the Export button to Ship', labels: [] }),
+      issue({ issue: 221, title: 'MERGE transmute 1290 once its gates are green', labels: [] }),
+      issue({ issue: 222, title: 'the panel is blank after a reload', labels: [], author: 'superagent[bot]' }),
+    ])
+    f.store.set('source:github:o/r:issues', ['#220', '#221', '#222'])
+    f.store.set('source:github:o/r:label-grants', ['#220', '#221', '#222'])
+    const asked: string[] = []
+    const source = new GithubSource(f.api, {
+      repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested', queueLabel: 'agent-ready',
+      regrant: (_issue, key) => { asked.push(key); return true },
+    }, f.store)
+    source.bootstrap()
+    const fired = (await source.poll()).map(tr => tr.text)
+    expect(fired, 'a plain open issue is work with no label on it').toEqual(['rename the Export button to Ship'])
+    expect(asked, 'the ask verb and the engine authorship both keep an ask out of the queue').toEqual(['#220'])
+  })
+
   it('a grant on the issue is the label path, and the re-grant never fires on top of it', async () => {
     const f = fixture([], [issue({ issue: 217, title: 'DO: land the panel', labels: ['agent-ready', 'agent-requested'] })])
     f.store.set('source:github:o/r:issues', ['#217'])
@@ -517,17 +539,20 @@ describe('GithubSource', () => {
     expect(labelsOn, 'a refused re-grant writes nothing to the board').toEqual([])
   })
 
-  it('an issue the queue marker does not name is left alone, grant spent or not', async () => {
+  it('a label-less issue is standing work, and the router is the only thing that says no', async () => {
+    // The queue marker used to decide this, and the operator abolished the marker's authority on 2026-11-10.
+    // What keeps a finished issue from churning is the router's predicate (an ended assignment whose worker
+    // released, no live worker) and REGRANT_CAP of two launches a day, measured live on issues 357, 355, 209.
     const f = fixture([], [issue({ issue: 216, title: 'DONE: shipped last week' })])
     f.store.set('source:github:o/r:issues', ['#216'])
     f.store.set('source:github:o/r:label-grants', ['#216'])
     let called = 0
     const source = new GithubSource(f.api, {
       repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested',
-      regrant: () => { called++; return true },
+      regrant: () => { called++; return false },
     }, f.store)
     source.bootstrap()
-    expect(await source.poll()).toHaveLength(0)
-    expect(called, 'no queue marker, no ask for a re-grant').toBe(0)
+    expect(await source.poll(), 'the source asks, and the router answers no').toHaveLength(0)
+    expect(called, 'the absence of a label no longer keeps an issue out of the queue').toBe(1)
   })
 })

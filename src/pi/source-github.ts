@@ -96,6 +96,16 @@ export const REQUEST_LABEL = 'agent-requested'
  *  each ask, so counting it measures nothing; `agent-ready` is what says an issue wants an agent right now. */
 export const QUEUE_LABEL = 'agent-ready'
 
+/**
+ * Labels are obsolete (operator, 2026-11-10: "the labels were a requirement of the old fleet-board system which
+ * is now dead. unlabeled issues should absolutely be processed", and "These labels are obsolete"). An ask to the
+ * operator is now what its title says, plus anything the engine's own account opened — the engine files its asks
+ * with the operator's name on them, and the fleet must not recruit itself to answer them.
+ */
+export const ASK_VERB = /^(DECIDE|MERGE|APPROVE|CHOOSE|PICK|ANSWER|LABEL|UNBLOCK)\b/
+export const isOperatorAsk = (issue: { title: string; author?: string }, self?: string): boolean =>
+  ASK_VERB.test(issue.title.trim()) || (self !== undefined && issue.author === self)
+
 const sinceKey = (repo: string) => `source:github:${repo}:since`
 /** Group rows by a key, keeping the order in which the keys first appear. */
 const groupRows = <T,>(rows: readonly T[], key: (row: T) => string): Map<string, T[]> =>
@@ -269,11 +279,10 @@ export class GithubSource {
         grants.add(key)
         this.spending.push(issue.issue)
         if (grant.fire) out.push(this.requestTrigger(issue, 'label', key, grant.ask))
-      } else if (this.options.regrant
-        && issue.labels.includes(this.options.queueLabel ?? QUEUE_LABEL)
-        && !issue.labels.includes(this.options.requestLabel ?? REQUEST_LABEL)) {
-        // A standing ask with no grant on it: the queue marker says it still wants an agent, and the
-        // one-shot label is gone, spent by the worker that already ran. The ROUTER decides, because it is
+      } else if (this.options.regrant && !isOperatorAsk(issue, this.options.self)) {
+        // A standing ask is an open issue that is not an ask to the operator — labels are obsolete, so the
+        // queue marker no longer says anything (operator, 2026-11-10: 17 of 20 open asks carried no label at
+        // all, and the fence meant the fleet was forbidden to touch them). The ROUTER decides, because it is
         // the only party that knows a worker ended on this thread. Measured live 2026-11-10: the grant
         // journal is pruned to the issues that still carry the label, so a condition on the journal can
         // never be true on a real board — this branch fired in tests and nowhere else.
