@@ -778,6 +778,14 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       pollMs = Date.now() - pollAt
     }
     for (const trigger of triggers) engine.receive(trigger)
+    // One worker per thread: the sweep runs after intake so it sees the ticket the poll just opened, and it
+    // stops the younger duplicate, which releases its agent, its tab and its slot like any other stop.
+    for (const id of duplicateLiveTickets(repos.tickets.open(), executor.workers())) {
+      log.line('warn', 'ticket.duplicate_swept', { ticket: id })
+      try { engine.stopTicket(id, 'duplicate live ticket on the same thread; the older ticket keeps the job') } catch {
+        // A ticket that refuses to stop (already ended between the scan and here) is the outcome we wanted.
+      }
+    }
     const reconcileAt = Date.now()
     enter('reconcile')
     try {
@@ -1266,6 +1274,45 @@ function workerToken(file: string, warn: (event: string, fields: Record<string, 
 }
 
 /** The panel's POST secret, made once per state directory: pause and stop are writes, and localhost is not a credential. */
+/**
+ * Tickets to retire because the thread already has an older ticket with a live worker.
+ *
+ * Measured 2026-11-10 on issue 145: ticket 7db2a21c's assignment ended at 08:35, a new trigger opened ticket
+ * 69548839 at 08:36 (both correct), and at 16:44 a trigger re-dispatched the OLD ticket while the new one was
+ * already running. Two open tickets, one issue, two agents in two work dirs, both publishing pull requests.
+ *
+ * An intake filter cannot fix this: a thread legitimately carries several open tickets over its life, and
+ * triggers for a live thread are how a human's answer and follow-ups reach the running worker. Proven by
+ * extension.spec.ts: refusing triggers killed both the answer-restart and the follow-up path.
+ *
+ * The invariant lives at dispatch: at most one ticket per thread may have a live worker. Earliest worker wins,
+ * ties break on id, so the sweep does not move under a rerun.
+ */
+export function duplicateLiveTickets(
+  open: readonly Ticket[],
+  liveWorkers: readonly { ticketId?: string }[],
+): string[] {
+  const live = new Set(liveWorkers.map(w => w.ticketId).filter(Boolean) as string[])
+  const started = (t: Ticket): string =>
+    t.assignments[t.assignments.length - 1]?.startedAt ?? t.createdAt
+  const byThread = new Map<string, Ticket[]>()
+  for (const t of open) {
+    if (!live.has(t.id)) continue
+    for (const c of t.channels) {
+      const list = byThread.get(c.thread) ?? []
+      list.push(t)
+      byThread.set(c.thread, list)
+    }
+  }
+  const stop = new Set<string>()
+  for (const list of byThread.values()) {
+    if (list.length < 2) continue
+    const keep = [...list].sort((a, b) => (started(a) < started(b) ? -1 : started(a) > started(b) ? 1 : a.id < b.id ? -1 : 1))[0]!
+    for (const t of list) if (t.id !== keep.id) stop.add(t.id)
+  }
+  return [...stop]
+}
+
 export function panelToken(dataDir: string): string {
   const file = join(dataDir, 'panel-token')
   try { const seen = readFileSync(file, 'utf8').trim(); if (seen) return seen } catch { /* the first start makes it */ }
