@@ -131,6 +131,12 @@ Two numbers, because one number answered two questions silently and disagreed wi
 
 - **`starved`** — labelled asks the engine has never put anyone on: no ticket, or a ticket whose only assignment
   is a queued launch. Answers *what would a free slot unblock?* Age is `oldestStarvedH`.
+  Measured 2026-11-10, that sentence overpromises for part of the queue: the mandate to launch comes from the
+  one-shot `agent-requested` grant, and a standing `agent-ready` label whose grant was spent by earlier workers
+  entitles the ask to nothing. Issue 274 sat 49.4 hours with 6 of 8 launch slots free for exactly that reason
+  (one ticket, two assignments, both `ended`). So a free slot unblocks a queued-launch ask, and unblocks nothing
+  for a grant-spent one; the panel cannot tell you which is which yet, which is the open ask in board issue 358.
+
 - **`unanswered`** — labelled asks with no worker on them now. A live session, a queued launch, `ready` awaiting
   review, and `blocked` awaiting a person all clear it. Answers *what does the board still owe an answer to?*
 - The gap `unanswered - starved` is work that ran and ended on a ticket nobody reviewed. Capacity does not close
