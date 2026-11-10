@@ -197,7 +197,10 @@ export class PiExecutor {
     const live: Live = {
       session, unsubscribe: () => {}, pendingRead: [], busy,
       startedAt: born, lastEventAt: born, events: 0, workspace: session.workspace ?? this.options.worktreeFor(ticket),
-      quietReported: false, deadlineReported: false, lastState: '', assignmentId: assignment.id,
+      quietReported: false, deadlineReported: false,
+      // A worker this process adopted already has a report on the record, and a crash must not erase it: after a
+      // restart the router's memory of what a worker finished lives in that record, not in this map.
+      lastState: assignment.report?.state ?? '', assignmentId: assignment.id,
     }
     live.unsubscribe = session.subscribe(event => {
       live.lastEventAt = Date.now()
