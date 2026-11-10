@@ -780,6 +780,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     for (const trigger of triggers) engine.receive(trigger)
     // One worker per thread: the sweep runs after intake so it sees the ticket the poll just opened, and it
     // stops the younger duplicate, which releases its agent, its tab and its slot like any other stop.
+    // A running assignment with no worker is the one state every worker-walking sweep cannot see, so it gets its
+    // own sweep, on the same 15-minute window as the quiet rule: long enough that a launch in flight is never
+    // swept, short enough that a corpse holds a slot for minutes, not hours.
+    for (const id of staleRunningTickets(repos.tickets.open(), executor.workers(), Date.now(), 15 * 60_000)) {
+      const a = repos.tickets.get(id)?.assignments.at(-1)
+      if (!a) continue
+      log.line('warn', 'assignment.stale_running', { ticket: id, assignment: a.id, startedAt: a.startedAt })
+      releaseIfWaiting(id, a.id, 'stale')
+    }
     for (const id of duplicateLiveTickets(repos.tickets.open(), executor.workers())) {
       log.line('warn', 'ticket.duplicate_swept', { ticket: id })
       try { engine.stopTicket(id, 'duplicate live ticket on the same thread; the older ticket keeps the job') } catch {
@@ -1288,6 +1297,8 @@ function workerToken(file: string, warn: (event: string, fields: Record<string, 
  * The invariant lives at dispatch: at most one ticket per thread may have a live worker. Earliest worker wins,
  * ties break on id, so the sweep does not move under a rerun.
  */
+const awaitsAHumanTop = (state: string): boolean => state === 'blocked' || state === 'waiting'
+
 export function duplicateLiveTickets(
   open: readonly Ticket[],
   liveWorkers: readonly { ticketId?: string }[],
@@ -1311,6 +1322,37 @@ export function duplicateLiveTickets(
     for (const t of list) if (t.id !== keep.id) stop.add(t.id)
   }
   return [...stop]
+}
+
+/**
+ * Tickets whose last assignment says `running` while no worker exists to run it.
+ *
+ * Measured 2026-11-10: after a restart the router adopted two sessions, both agents went idle, their live
+ * entries went with the idle sessions, and the tickets stayed `running` in the store for 7 hours. Every sweep
+ * in the router walks the live workers — the quiet rule included — so an assignment that outlived its worker
+ * is invisible to all of them: 2 of 8 launch slots held by a corpse, the ticket un-dispatchable, the agents
+ * idle in tabs nobody talks to.
+ *
+ * The report is respected: a worker that told the fleet it awaits a human is parked, not stale, and the answer
+ * path owns it. `graceMs` keeps a launch that has not registered yet out of the sweep.
+ */
+export function staleRunningTickets(
+  open: readonly Ticket[],
+  liveWorkers: readonly { ticketId?: string }[],
+  nowMs: number,
+  graceMs: number,
+): string[] {
+  const live = new Set(liveWorkers.map(w => w.ticketId).filter(Boolean) as string[])
+  const out: string[] = []
+  for (const t of open) {
+    const a = t.assignments[t.assignments.length - 1]
+    if (!a || a.state !== 'running' || live.has(t.id)) continue
+    if (awaitsAHumanTop(String(a.report?.state ?? ''))) continue
+    const started = Date.parse(a.startedAt ?? t.createdAt)
+    if (!Number.isFinite(started) || nowMs - started < graceMs) continue
+    out.push(t.id)
+  }
+  return out
 }
 
 export function panelToken(dataDir: string): string {
