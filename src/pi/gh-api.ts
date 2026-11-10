@@ -280,9 +280,9 @@ export function ghPulls(options: GhOptions = {}): PullApi {
     async pull(repo, number) {
       try {
         const r = JSON.parse(await call(['api', `repos/${repo}/pulls/${number}`])) as
-          { state: string; merged_at?: string | null; closed_at?: string | null; created_at: string }
+          { state: string; merged_at?: string | null; closed_at?: string | null; mergeable?: boolean | null; created_at: string }
         const closedAt = r.merged_at ?? r.closed_at
-        return { open: r.state === 'open', merged: Boolean(r.merged_at), createdAt: r.created_at, ...(closedAt ? { closedAt } : {}) }
+        return { open: r.state === 'open', merged: Boolean(r.merged_at), mergeable: r.mergeable ?? null, createdAt: r.created_at, ...(closedAt ? { closedAt } : {}) }
       } catch (error) {
         if (!/HTTP 404|Not Found/i.test(String(error))) throw error
         if (await repoReadable(repo)) return undefined

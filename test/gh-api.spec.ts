@@ -196,9 +196,9 @@ esac
 describe('ghPulls', () => {
   it('reads a pull request as merged, closed or open, and one GitHub does not have as absent', async () => {
     const api = ghPulls({ bin: fakePullsGh().bin })
-    expect(await api.pull('x/y', 9)).toEqual({ open: false, merged: true, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T10:00:00Z' })
-    expect(await api.pull('x/y', 10)).toEqual({ open: false, merged: false, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T11:00:00Z' })
-    expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, createdAt: '2026-11-05T09:00:00Z' })
+    expect(await api.pull('x/y', 9)).toEqual({ open: false, merged: true, mergeable: null, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T10:00:00Z' })
+    expect(await api.pull('x/y', 10)).toEqual({ open: false, merged: false, mergeable: null, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T11:00:00Z' })
+    expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, mergeable: null, createdAt: '2026-11-05T09:00:00Z' })
     expect(await api.pull('x/y', 404)).toBeUndefined()
     await expect(api.pull('x/y', 502), 'any other failure is an error, not a closed pull request').rejects.toThrow(/502/)
   })
@@ -293,7 +293,7 @@ esac
 `)
     chmodSync(bin, 0o755)
     const api = ghPulls({ bin, tokenFile: token })
-    expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, createdAt: '2026-11-08T00:00:00Z' })
+    expect(await api.pull('x/y', 11)).toEqual({ open: true, merged: false, mergeable: null, createdAt: '2026-11-08T00:00:00Z' })
     expect(readFileSync(join(dir, 'used.log'), 'utf8').trim()).toBe('pulls-secret')
   })
 })

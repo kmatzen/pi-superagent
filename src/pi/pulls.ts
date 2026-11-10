@@ -9,6 +9,9 @@ export interface PullRef { repo: string; number: number }
 export interface PullState {
   open: boolean
   merged: boolean
+  /** GitHub's own verdict, and `null` while GitHub is still computing it. `false` is a merge conflict: nobody
+   *  spoke on the thread, so no comment path fires, and a finished, unmergeable pull request sits unseen. */
+  mergeable?: boolean | null
   createdAt: string
   closedAt?: string
 }
@@ -90,6 +93,8 @@ export interface FollowerOptions {
    * The burn is what tripped the hourly API limit, and a tripped limit blinds the reads that DO matter.
    */
   cooldownMs?: number
+  /** How often one stuck merge conflict is repeated to its ticket. Default 6 h. */
+  conflictEveryMs?: number
   /**
    * Most pull requests one pass reads, whatever is due. The 120 s budget above is wall-clock, so it binds only
    * while the loop keeps its cadence; when a tick is entered late, every follow is due at once and the pass pays
@@ -272,9 +277,30 @@ export class PullFollower {
     }
     // Open: any ticket holding a close on this thread holds one that never happened.
     this.heal(id, pull)
+    await this.conflict(id, pull, state, now)
     // The reopened follow is in `followed` from the next pass; reading its talk here as well would read it twice.
     if (reopen || local) return
     await this.listen(id, pull, state.createdAt)
+  }
+
+  /** A pull request that stopped merging cleanly is a fact the ticket never hears from a comment: no person
+   *  spoke, so nothing launched a worker. Measured 2026-11-10 — one fleet pull request sat unmergeable for
+   *  16 hours and a second for 15, work finished and unreachable, because the follower reads talk for review
+   *  and merge state for closing, and a conflict is neither. One notice, then silence for `conflictEveryMs`:
+   *  a conflict repeated every 120 s launches a worker every 120 s on news that has not changed. */
+  private conflict(id: string, pull: PullRef, state: PullState, now: number): void {
+    const key = `pulls:${id}:conflict`
+    if (state.mergeable !== false) {
+      if (this.options.positions.get<string>(key) !== 'clean') this.options.positions.set(key, 'clean')
+      return
+    }
+    const last = Number(this.options.positions.get<string>(key) ?? 0)
+    if (now - last < (this.options.conflictEveryMs ?? 6 * 60 * 60_000)) return
+    this.options.positions.set(key, String(now))
+    this.options.receive(this.trigger(id, pull, 'github', 'None', new Date(now).toISOString(),
+      'GitHub reports this pull request no longer merges cleanly: it has a merge conflict against its base. '
+        + 'Rebase or merge the base branch, resolve the conflict, push the branch, and report the new head.',
+      'conflict', `conflict:${id}:${now}`))
   }
 
   private async listen(id: string, pull: PullRef, createdAt: string): Promise<void> {
@@ -316,7 +342,7 @@ export class PullFollower {
   }
 
   private trigger(id: string, pull: PullRef, author: string, association: string, at: string, text: string,
-                  via: 'comment' | 'review', triggerId: string): Trigger {
+                  via: 'comment' | 'review' | 'conflict', triggerId: string): Trigger {
     return {
       id: triggerId,
       source: 'github',
