@@ -460,13 +460,16 @@ describe('the router extension', () => {
     await f.running.tick()
     expect(f.running.load().starved, 'a labelled ask with no worker is counted').toBe(1)
     expect(f.running.load().oldestStarvedH, 'and its age is published').toBeGreaterThanOrEqual(0.9)
+    expect(f.running.load().unanswered, 'board debt sees it too').toBe(1)
     await settle()
     f.decide('accept')
     await f.running.tick()
     expect(f.running.load().starved, 'a live ticket is no longer starvation').toBe(0)
+    expect(f.running.load().unanswered, 'a worker on it clears the debt as well').toBe(0)
     f.workers[0]?.events.forEach(l => l({type: 'failed', error: 'its pane closed'}))
     await settle()
     expect(f.running.load().starved, 'a delivered run awaiting merge is a claim the board holds, not a free slot').toBe(0)
+    expect(f.running.load().unanswered, 'a delivered run awaiting review is not board debt either').toBe(0)
   })
 
   it('the silence question frees the agent as well, and the next comment starts a fresh worker', async () => {
