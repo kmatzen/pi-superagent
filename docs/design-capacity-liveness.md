@@ -1,4 +1,12 @@
 # Keeping the fleet running: liveness that does not depend on the worker
+> **Amendment, 2026-11-10: labels are obsolete.** The operator retired the queue marker the day it was found
+> that 17 of 20 open asks carried no label and the fleet was forbidden to touch them: "unlabelled issues should
+> absolutely be processed." Where a line below says *labelled asks*, read **open issues that are not an ask to
+> the operator** — `isOperatorAsk` in `src/pi/source-github.ts`, which reads the title verb (`DECIDE`, `MERGE`,
+> `APPROVE`, `CHOOSE`, `PICK`, `ANSWER`, `LABEL`, `UNBLOCK`) and the engine's own authorship. What keeps a
+> finished issue from churning is not a label: it is `standingAskEntitled` (an ended assignment whose worker
+> released, no live worker, no report awaiting a human, no open pull request on the ticket) and `REGRANT_CAP`
+> of two launches per issue per day. Lines below keep their original wording where they record a measurement.
 
 Status: L2 shipped (2026-11-10); L1, L3, L4 proposed. Owner: the router's operator. Affects `src/pi` (executor,
 extension), the panel's load line, `formal/`, and one scheduled audit. No `src/core` change is required for the
@@ -129,7 +137,7 @@ reply. Without L4, L1's reaper turns a poison ticket into a worker factory.
 Two numbers, because one number answered two questions silently and disagreed with an independent audit twice on
 2026-11-10: PR 56 counted a spent grant label, PR 58 counted an open ticket as a worker.
 
-- **`starved`** — labelled asks the engine has never put anyone on: no ticket, or a ticket whose only assignment
+- **`starved`** — open issues (labels obsolete, see the amendment) the engine has never put anyone on: no ticket, or a ticket whose only assignment
   is a queued launch. Answers *what would a free slot unblock?* Age is `oldestStarvedH`.
   Measured 2026-11-10, that sentence overpromises for part of the queue: the mandate to launch comes from the
   one-shot `agent-requested` grant, and a standing `agent-ready` label whose grant was spent by earlier workers
