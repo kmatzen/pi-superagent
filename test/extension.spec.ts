@@ -443,6 +443,30 @@ describe('the router extension', () => {
     expect(thread, 'a death after `ready` never buys a second worker').not.toContain('fresh worker')
   })
 
+  it('opens one ticket per issue: a label on an issue with live work is refused, and counted', async () => {
+    // Measured 2026-11-10: issue 145 had two running tickets and issue 235 had had eight, so the same job ran
+    // twice in two checkouts. The refusal keeps the open count at one; a silent guard would read as a lost ask.
+    const issues: IssueState[] = []
+    const githubApi: GithubApi = {
+      comments: async () => [] as IssueComment[],
+      issues: async () => [...issues],
+      postComment: async () => {},
+    }
+    const f = fixture(true, undefined, undefined, undefined, { githubApi })
+    const open = () => (f.running.load() as unknown as { open: number }).open
+    expect(open()).toBe(0)
+    issues.push({ issue: 470, title: 'DO: tune the LoRA sweep', body: 'Tune it.', author: 'octocat',
+      association: 'OWNER', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      labels: ['agent-ready', 'agent-requested'] })
+    await f.running.tick()
+    await settle()
+    expect(open(), 'the ask opened one ticket').toBe(1)
+    issues[0] = { ...issues[0]!, title: 'DO: tune the LoRA sweep (re-labelled)' }
+    await f.running.tick()
+    await settle()
+    expect(open(), 'a second ask on live work opens no second ticket').toBe(1)
+  })
+
   it('publishes the queue the cap hides: labelled work with no live ticket, and how long it has waited', async () => {
     // Measured 2026-11-10: four labelled asks sat unstarted, the oldest 45 hours, while the tick published
     // `running=8 cap=8` and every panel number read healthy. Starvation has to be a number the loop emits.
