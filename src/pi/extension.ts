@@ -445,6 +445,27 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // thread reads as an answer that ended, not as a request that vanished.
     outbox.flush()
     await outbox.drained()
+  /**
+   * The operator's rule, 2026-11-10: an issue stays open until every pull request connected to it is merged
+   * or closed. A ticket ends when its last recorded follow closes, and a close written down by a read that
+   * failed — GitHub answers 404 for a repository this account cannot see — ends it early, and the issue then
+   * shut on work that is open. So GitHub, not the ticket's memory, answers here, and a pull request the read
+   * cannot classify blocks the close too: an unknown is not a merge.
+   */
+  const openPullsOn = async (ticket: Ticket | undefined): Promise<string[]> => {
+    const blocking: string[] = []
+    for (const follow of ticket?.follows ?? []) {
+      if (!follow.thread.startsWith('github:')) continue
+      const pull = parseThread(follow.thread.slice('github:'.length), home)
+      if (!pull) continue
+      try {
+        const state = await pullApi.pull(pull.repo, pull.number)
+        if (!state || state.open) blocking.push(pullUrl(pull))
+      } catch { blocking.push(pullUrl(pull)) }
+    }
+    return blocking
+  }
+
     for (const ticketId of closing.splice(0)) {
       const ticket = repos.tickets.get(ticketId)
       const issue = Number((ticket?.channels[0]?.address as { issue?: string } | undefined)?.issue)
@@ -454,6 +475,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         // number closes the pull request: only a number GitHub does not know as a pull is safe to close here.
         if (await pullApi.pull(home, issue)) {
           log.line('info', 'issue.close_skipped', { ticket: ticketId, issue: `#${issue}`, why: 'the thread is a pull request' })
+          continue
+        }
+        const blocking = await openPullsOn(ticket)
+        if (blocking.length > 0) {
+          log.line('info', 'issue.close_skipped', { ticket: ticketId, issue: `#${issue}`,
+            why: `open or unreadable: ${blocking.join(' ').slice(0, 160)}` })
           continue
         }
         await githubApi.closeIssue?.(issue)
