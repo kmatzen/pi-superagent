@@ -353,7 +353,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // hours while 13 tickets queued (measured 2026-11-08). Free the agent when it posts the question; a reply starts
   // a fresh one, and the issue is its memory. `ready` is excluded: that report ends the ticket, and ending it
   // needs the worker's own turn-end bookkeeping (measured: releasing on ready left the ticket unended).
-  const awaitsAHuman = (state: string): boolean => state === 'blocked' || state === 'waiting'
+  // One rule, one definition. The quiet rule and the stalled sweep below ask the same question of a
+  // report, and this predicate used to exist twice, 1000 lines apart, with identical bodies.
+  const awaitsAHuman = awaitsAHumanState
 
   const reported = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun): void => {
     let fresh = false
@@ -1324,7 +1326,7 @@ function workerToken(file: string, warn: (event: string, fields: Record<string, 
  * The invariant lives at dispatch: at most one ticket per thread may have a live worker. Earliest worker wins,
  * ties break on id, so the sweep does not move under a rerun.
  */
-const awaitsAHumanTop = (state: string): boolean => state === 'blocked' || state === 'waiting'
+export const awaitsAHumanState = (state: string): boolean => state === 'blocked' || state === 'waiting'
 
 export function duplicateLiveTickets(
   open: readonly Ticket[],
@@ -1381,7 +1383,7 @@ export function stalledTickets(
   for (const t of open) {
     const a = t.assignments[t.assignments.length - 1]
     if (!a || live.has(t.id)) continue
-    if (awaitsAHumanTop(String(a.report?.state ?? ''))) continue
+    if (awaitsAHumanState(String(a.report?.state ?? ''))) continue
     // A queued launch needs free slots to be stalled: with the cap full, a pending assignment is waiting its
     // turn, and sweeping it would churn the queue the operator built the cap to protect.
     if (a.state === 'pending' && freeSlots <= 0) continue
