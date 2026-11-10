@@ -124,6 +124,19 @@ Each ticket carries a relaunch budget (3), stored on the assignment, decremented
 the ticket parks with a visible ask naming the cause of each attempt, and it never churns again without a human
 reply. Without L4, L1's reaper turns a poison ticket into a worker factory.
 
+## Metric definitions (shipped, live in the tick line)
+
+Two numbers, because one number answered two questions silently and disagreed with an independent audit twice on
+2026-11-10: PR 56 counted a spent grant label, PR 58 counted an open ticket as a worker.
+
+- **`starved`** — labelled asks the engine has never put anyone on: no ticket, or a ticket whose only assignment
+  is a queued launch. Answers *what would a free slot unblock?* Age is `oldestStarvedH`.
+- **`unanswered`** — labelled asks with no worker on them now. A live session, a queued launch, `ready` awaiting
+  review, and `blocked` awaiting a person all clear it. Answers *what does the board still owe an answer to?*
+- The gap `unanswered - starved` is work that ran and ended on a ticket nobody reviewed. Capacity does not close
+  it; only review does. Measured at deploy: `starved=2`, `unanswered=4`, oldest 46.9h.
+- The label counted is the standing `agent-ready`, never the one-shot `agent-requested` grant the router spends.
+
 ## Invariants
 
 Add to `formal/Ticket.tla` (names indicative):

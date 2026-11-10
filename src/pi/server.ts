@@ -12,7 +12,7 @@ export interface PanelSource {
   engine: Engine
   assessor: SessionAssessor
   config: RouterConfig
-  load(): { running: number; parked: number; queued: number; maxWorkers: number; starved?: number; oldestStarvedH?: number }
+  load(): { running: number; parked: number; queued: number; maxWorkers: number; starved?: number; oldestStarvedH?: number; unanswered?: number }
   /** The router's live workers: which ticket, where, and when each last spoke. */
   workers(): Array<{ ticketId: string; sessionId: string; workspace: string; lastEventAt: string; events: number; quietSeconds: number; watch?: string; busy?: boolean }>
   /** The panel shares the router's event loop, so a slow request is evidence of starvation, not noise. */
@@ -110,7 +110,7 @@ export function renderPanel(m: Model): string {
   }
   return page('superagent', `
 <section id="overview"><h2>Needs a person <span class="count">(${m.needsPerson.length})</span></h2>${asks}
-<ul class="count">${quiet(m.load.running, 'workers on a run')}${quiet(m.load.parked, 'workers parked between runs')}${quiet(m.load.starved ?? 0, `labelled asks waiting for a slot${m.load.oldestStarvedH ? `, oldest ${m.load.oldestStarvedH}h` : ''}`)}${quiet(m.counts.evaluating, 'evals in progress')}${quiet(m.counts.filtered24h, 'triggers filtered in 24 h')}${m.paused ? '<li><strong>processing is paused</strong></li>' : ''}</ul></section>
+<ul class="count">${quiet(m.load.running, 'workers on a run')}${quiet(m.load.parked, 'workers parked between runs')}${quiet(m.load.starved ?? 0, `labelled asks waiting for a slot${m.load.oldestStarvedH ? `, oldest ${m.load.oldestStarvedH}h` : ''}`)}${quiet(m.load.unanswered ?? 0, 'labelled asks with nobody on them')}${quiet(m.counts.evaluating, 'evals in progress')}${quiet(m.counts.filtered24h, 'triggers filtered in 24 h')}${m.paused ? '<li><strong>processing is paused</strong></li>' : ''}</ul></section>
 <section id="source"><h2>Source <span class="count">(${m.source.repo ? `GitHub issues: ${esc(m.source.repo)}` : 'no source configured'})</span></h2>
 <p class="count">${m.counts.triggers24h} triggers in the last 24 h, ${m.counts.filtered24h} filtered, ${m.counts.threads} threads known.</p>
 </section>

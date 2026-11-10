@@ -82,7 +82,7 @@ export interface RunningRouter {
   setPaused(v: boolean): void
   isPaused(): boolean
   /** Workers on a run (against the cap), parked between runs, and queued: the panel's load line. */
-  load(): { running: number; parked: number; queued: number; maxWorkers: number; starved: number; oldestStarvedH: number }
+  load(): { running: number; parked: number; queued: number; maxWorkers: number; starved: number; oldestStarvedH: number; unanswered: number }
 }
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] })
@@ -175,18 +175,23 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // unstarted, the oldest 45 hours, while every published number read healthy. The source owns the labels, so it
   // hands the board over on every poll rather than the metric making a second API call.
   let openBoard: readonly IssueState[] = []
-  const starvation = (): { starved: number; oldestStarvedH: number } => {
-    // The queue is labelled work the engine has never put anyone on: no ticket, or a ticket with only a queued
-    // launch behind it. A live session, a delivered run awaiting merge, and an ask waiting on a person are all
-    // claims the board already holds, and no free slot changes them. Measured 2026-11-10: asks sat unstarted for
-    // 45 hours while every published number read healthy.
-    const claimed = new Set(repos.tickets.open()
-      .filter(t => { const a = t.assignments.at(-1); return a && a.state !== 'pending' })
-      .flatMap(t => t.channels.map(c => c.thread)))
-    const waiting = openBoard.filter(i => i.labels.includes(QUEUE_LABEL) && !claimed.has(`#${i.issue}`))
+  const starvation = (): { starved: number; oldestStarvedH: number; unanswered: number } => {
+    // Two questions, two numbers, because one number answered both silently and disagreed with an audit twice.
+    // `starved` = labelled asks nobody has ever been put on (what a free slot unblocks). `unanswered` = labelled
+    // asks with no worker on them now. Definitions: docs/design-capacity-liveness.md.
+    const threads = (t: Ticket) => t.channels.map(c => c.thread)
+    const open = repos.tickets.open()
+    const claimed = new Set(open.filter(t => { const a = t.assignments.at(-1); return a && a.state !== 'pending' }).flatMap(threads))
+    const onIt = new Set(open.filter(t => ['running', 'pending', 'ready', 'blocked'].includes(t.assignments.at(-1)?.state ?? '')).flatMap(threads))
+    const labelled = openBoard.filter(i => i.labels.includes(QUEUE_LABEL))
+    const waiting = labelled.filter(i => !claimed.has(`#${i.issue}`))
     const hours = (iso: string) => (Date.now() - Date.parse(iso)) / 3.6e6
     const oldest = waiting.reduce((m, i) => Math.max(m, hours(i.updatedAt)), 0)
-    return { starved: waiting.length, oldestStarvedH: Math.round(oldest * 10) / 10 }
+    return {
+      starved: waiting.length,
+      oldestStarvedH: Math.round(oldest * 10) / 10,
+      unanswered: labelled.filter(i => !onIt.has(`#${i.issue}`)).length,
+    }
   }
   const github = githubApi
     ? new GithubSource(githubApi, {
