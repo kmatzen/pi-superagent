@@ -187,3 +187,43 @@ look at the last report (L2 in human form) before closing the panes of tickets t
 
 The audit that produced this document is three scripts in the operator's local scripts directory — the ticket
 census, the board/PR reconcile, and the stuck-ticket probe — and they are the scheduled check that L3 replaces.
+
+## Approved policies, not yet implemented (2026-11-10)
+
+The operator approved both of these. Nothing in the code implements them yet, so this section is the
+handoff. Measured reason: 14 of 22 open tickets sat parked on one report summary, `the worker finished its
+run without calling ticket_report`, and 5 standing asks sat 57 hours in the queue with 8 free slots.
+
+### 1. A silent worker gets one nudge, then the failure a person owns
+
+Today `worker-role.ts` files the failure on `agent_settled` whenever no `ticket_report` landed in that run
+(`SILENT_FINISH`). New rule: the first silence writes a nudge into the worker's own inbox and files no
+report; the second consecutive silence files the failure, which is the case a human owns.
+
+- The nudge rides the inbox as a `.json` file with `{ text, mode: 'followUp' }`. `drain()` sends it, so no
+  router change and no state machine change. `003-execution.md` still sees one report per assignment.
+- **One nudge per worker, not per run.** A counter reset on `agent_start` lets a worker that finishes
+  silently be nudged forever. Proved by test, and the reason the first implementation was reverted.
+- Four tests encode the old rule and must be restated with it, not deleted: the refused-pull-request report
+  (a refused report is no report, so the first silence nudges), the busy-events test (a `selfNudge` event
+  joins the log), the reported-then-silent test (the next silent run is nudged), and the two inbox-listing
+  tests (the nudge file is not a router input, so filter it out).
+
+### 2. A worker that ends its turn re-earns the launch, with a cap
+
+`agent-requested` is spent by the first worker, so a standing `agent-ready` ask entitles nothing after it.
+New rule: when a worker for an ask ends, the ask gets one fresh grant, and the cap is small (two per issue
+per day). The queue sweep in `extension.ts` then starts it.
+
+- The cap must be a stored counter with a date, not a label count: labels are the operator's surface, and a
+  label the router adds and removes is a surface that lies.
+- The starved metric must count a re-granted ask as entitled, or `starved=0` becomes a lie again; the gloss
+  above this section is the one that fixes the reading, this section fixes the number.
+
+## The reconcile pass (approved, same date)
+
+Four sites release a worker, each with its own predicate: a closed pull request, the stalled-launch sweep,
+the duplicate-worker sweep, and the 15-minute quiet rule. Fold them into one pass over live workers with a
+named rule list, and delete the duplicated `awaitsAHuman` predicate (a closure copy and a module copy).
+That file is 1496 lines and every liveness fix of this week landed in it; the fold is the seam for splitting
+the tick loop from the rules. Behaviour must not change, so the tests pin each rule as it moves.
