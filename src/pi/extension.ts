@@ -664,6 +664,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         return herdrWorkers.launch({
           ticket, thread: channel?.thread ?? ticket.id, workspace: workspace.dir, report,
           env: {
+            // The bot's token is the worker's `gh` identity, named in the launch instead of inherited from a
+            // shell file. Operator, 2026-11-10: the bot user is preferred on gh whenever possible, and an
+            // inherited GH_TOKEN is whatever the launching shell happened to hold.
+            ...(token ? { GH_TOKEN: token } : {}),
             ...(cfg.blockedCommands?.length ? { PI_SUPERAGENT_BLOCKED: cfg.blockedCommands.join(',') } : {}),
             ...(cfg.allowDelegation ? { PI_SUPERAGENT_ALLOW_DELEGATION: '1' } : {}),
           },
