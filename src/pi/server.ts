@@ -167,12 +167,21 @@ export function createPanelServer(src: PanelSource): { server: Server; url(port:
     if (stopping && req.method === 'POST') {
       const id = decodeURIComponent(stopping[1]!)
       if (!src.repos.tickets.get(id)) return json(res, 404, { error: 'no such ticket' })
-      try {
-        src.engine.stopTicket(id, 'stopped by the operator')
-        return json(res, 200, { stopped: id })
-      } catch (error) {
-        return json(res, 409, { error: String(error instanceof Error ? error.message : error) })
-      }
+      let body = ''
+      req.on('data', c => { body += c })
+      req.on('end', () => {
+        // A body the caller cannot format is the caller's mistake, and the stop is what was asked for: the
+        // default reason stands, because refusing a stop over a broken string would put the lever out of reach.
+        let reason = 'stopped by the operator'
+        try { reason = String(JSON.parse(body || '{}').reason || reason).slice(0, 400) } catch { /* the default */ }
+        try {
+          src.engine.stopTicket(id, reason)
+          json(res, 200, { stopped: id, reason })
+        } catch (error) {
+          json(res, 409, { error: String(error instanceof Error ? error.message : error) })
+        }
+      })
+      return
     }
     if (url.pathname === '/api/ticket' && ticket) return json(res, 200, src.repos.tickets.get(ticket) ?? { error: 'no such ticket' })
     if (url.pathname === '/ticket' && ticket) {
