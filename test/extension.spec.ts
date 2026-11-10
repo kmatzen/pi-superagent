@@ -11,7 +11,7 @@ import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
 import type { PullApi, PullState } from '../src/pi/pulls.ts'
 import { paneKeysScrubbed, scrubPaneEnv } from './setup.ts'
 
-import { REGRANT_CAP, regrantPlan } from '../src/pi/extension.ts'
+import { REGRANT_CAP, regrantPlan, standingAskEntitled } from '../src/pi/extension.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ext-')); dirs.push(d); return d }
@@ -1806,5 +1806,23 @@ describe('the standing queue re-grant', () => {
     expect(regrantPlan(counters, '#214', '2026-11-11'), 'the day rolls and the ask may launch again')
       .toMatchObject({ day: '2026-11-11', perIssue: { '#214': 1 } })
     expect(REGRANT_CAP, 'two per issue per day, the number in the design note').toBe(2)
+  })
+})
+
+describe('who may re-earn the launch', () => {
+  const ended = { state: 'ended', endedReason: 'release' }
+  const ticket = (over: Record<string, unknown> = {}) => ({ id: 't1', assignments: [ended], ...over })
+  it('a standing ask whose worker ended, with nothing live on it, is entitled', () => {
+    expect(standingAskEntitled(ticket() as never, [])).toBe(true)
+    expect(standingAskEntitled(ticket() as never, [{ ticketId: 'other' }]), 'another ticket is not this one').toBe(true)
+  })
+  it('a worker running now, a live agent, finished work, or no work at all is not', () => {
+    expect(standingAskEntitled(ticket() as never, [{ ticketId: 't1' }]), 'the worker is live').toBe(false)
+    expect(standingAskEntitled(ticket({ ended: { kind: 'report' } }) as never, []), 'the work is delivered').toBe(false)
+    expect(standingAskEntitled(ticket({ assignments: [{ state: 'running' }] }) as never, []), 'a worker runs').toBe(false)
+    expect(standingAskEntitled(ticket({ assignments: [{ state: 'pending' }] }) as never, []), 'a launch is queued').toBe(false)
+    expect(standingAskEntitled(ticket({ assignments: [{ state: 'ended', endedReason: 'stop' }] }) as never, []),
+      'a stopped assignment is the operator speaking').toBe(false)
+    expect(standingAskEntitled(undefined, []), 'an issue with no ticket is intake\'s to answer').toBe(false)
   })
 })
