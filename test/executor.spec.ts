@@ -68,7 +68,8 @@ const input = (id: string, kind: 'text' | 'trigger', extra: Record<string, unkno
 
 const ticket = (over: Partial<Ticket> = {}): Ticket =>
   ({ id: 'T1', undelivered: [], inputs: [], ...over } as unknown as Ticket)
-const assignment = (id = 'A1'): Assignment => ({ id, ticketId: 'T1', state: 'pending' } as unknown as Assignment)
+const assignment = (id = 'A1', report?: { state: string; summary: string }): Assignment =>
+  ({ id, ticketId: 'T1', state: 'pending', ...(report ? { report: { ...report, at: '2026-11-10T00:00:00Z' } } : {}) }) as unknown as Assignment
 
 describe('PiExecutor', () => {
   it('names the running worker so the operator can find it, and counts its events', async () => {
@@ -319,6 +320,20 @@ describe('PiExecutor', () => {
     const crash = f.calls_of('reported').at(-1)!
     expect(crash.args.slice(0, 3)).toEqual(['T1', 'A1', 'crash'])
     expect(crash.args[3]).toMatchObject({ state: 'ready', summary: /the worker crashed: its pane closed/ })
+  })
+
+  it('an adopted worker keeps the report already on the record through a crash, so a restart does not erase it', async () => {
+    const f = fixture()
+    let emit: ((e: { type: string; error?: string }) => void) | undefined
+    const s = { sessionId: 'adopted', workspace: '/w/1', prompt: async () => {}, abort: () => {}, dispose: () => {},
+      emit: (e: { type: string; error?: string }) => emit?.(e),
+      subscribe: (l: (e: { type: string; error?: string }) => void) => { emit = l; return () => {} } }
+    f.executor.adopt(ticket(), assignment('A1', { state: 'ready', summary: 'the pull request is open' }), () => s as never)
+    await f.executor.idle()
+    s.emit({ type: 'failed', error: 'its pane closed after the restart' })
+    const crash = f.calls_of('reported').at(-1)!
+    expect(crash.args.slice(0, 3)).toEqual(['T1', 'A1', 'crash'])
+    expect(crash.args[3]).toMatchObject({ state: 'ready' })
   })
 
   it('a failed launch on a ticket that ended meanwhile does not stall every launch after it', async () => {
