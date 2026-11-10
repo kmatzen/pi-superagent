@@ -1,6 +1,6 @@
 /** Trigger ingestion, thread correlation, subscription fan-out, and evaluation queuing. */
 import { key } from './ids.ts'
-import { isoTime, liveTicket, threadKey } from './model.ts'
+import { isoTime, liveTicket, resumableBySpeech, threadKey } from './model.ts'
 import type { Ticket, Trigger } from './model.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Tickets } from './tickets.ts'
@@ -38,9 +38,13 @@ export class Intake extends EnginePart {
       for (const ticketId of thread.subscriptions) {
         const ticket = this.repo.tickets.get(ticketId)
         // Only a person's message on a non-context thread resumes an ended ticket; bots and CI do not (the Executor re-reads
-        // threads when it resumes), and a human-stopped ticket receives nothing because its Mandate was withdrawn.
+        // threads when it resumes). A stop withdraws the Mandate only when a person asked for the stop from the panel, or
+        // when the repeat guard stopped a loop: the router's conversation stop ends the thread, not the mandate, and the
+        // person who closed the issue is the one who reopens it. One predicate, in model.ts, is this door and `wake`'s.
         const followed = !!thread.context?.includes(ticketId)
-        const resumes = trigger.human && ticket?.ended?.by !== 'human' && !followed
+        const resumes = trigger.human && !!ticket
+          && (liveTicket(ticket) || !ticket.ended || ticket.ended.by !== 'human' || resumableBySpeech(ticket))
+          && !followed
         if (!ticket || (!liveTicket(ticket) && !resumes)) continue
         reached.set(ticketId, { ticket, context: followed && (reached.get(ticketId)?.context ?? true) })
       }

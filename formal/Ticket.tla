@@ -58,7 +58,7 @@ Init ==
   /\ pullOpen = {}
   /\ gone = {}
   /\ tickets = [k \in TicketIds |-> [state |-> "free", asg |-> <<>>, lastReport |-> "none",
-                                     subs |-> {}, humanIn |-> {}]]
+                                     subs |-> {}, humanIn |-> {}, stopKind |-> "none"]]
   /\ batch = {} /\ delivered = {} /\ evalQ = {} /\ evaluating = {}
   /\ ackPend = {} /\ ackSent = {}
 
@@ -74,7 +74,8 @@ Deliver(m) ==
      IN evalQ' = IF Human(m) /\ owners # {} THEN evalQ ELSE evalQ \cup {m}
   /\ tickets' = [k \in TicketIds |->
         IF ThreadOf(m) \in tickets[k].subs /\
-           (tickets[k].state = "live" \/ (Human(m) /\ (tickets[k].state = "done" \/ tickets[k].state = "dropped")))
+           (tickets[k].state = "live" \/ (Human(m) /\ (tickets[k].state = "done" \/ tickets[k].state = "dropped"
+             \/ (tickets[k].state = "stopped" /\ tickets[k].stopKind = "conversation"))))
         THEN [tickets[k] EXCEPT !.humanIn = IF Human(m) THEN @ \cup {m} ELSE @]
         ELSE tickets[k]]
   /\ delivered' = delivered \cup {m}
@@ -103,7 +104,8 @@ VerdictAccept(th, k) ==
   /\ LET b == {m \in batch : ThreadOf(m) = th} IN
      /\ b # {}
      /\ tickets' = [tickets EXCEPT ![k] = [state |-> "live", asg |-> <<"pend">>, lastReport |-> "none",
-                                           subs |-> {th}, humanIn |-> {m \in b : Human(m)}]]
+                                           subs |-> {th}, humanIn |-> {m \in b : Human(m)},
+                                           stopKind |-> "none"]]
      /\ LET cand == {m \in b : Human(m) /\ m \notin ackPend \cup ackSent} IN
         IF cand = {} THEN ackPend' = ackPend
         ELSE \E m0 \in cand : ackPend' = ackPend \cup {m0}
@@ -246,26 +248,43 @@ Resurrect(k) ==
   /\ UNCHANGED <<pullOpen, working, gone, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
 (* Tickets.wake (tickets.ts): an ended ticket resumes under its unchanged Mandate on a
-  person's undelivered message. Its first guard is the claim checked below:
-  `if (!ticket || liveTicket(ticket) || ticket.ended?.by === 'human' || !ticket.undelivered.length) return`
-  — a ticket a person stopped never resumes, through any door. *)
+  person's undelivered message. A stop withdraws the Mandate, so it closes the door — with one
+  exception the operator's own notices promise: the conversation stop, whose ending was GitHub
+  closing the thread, and the person who closed it is the one who reopens it (TicketStopKind).
+  A ticket a person stopped from the panel, and the repeat guard's stop, resume through no door. *)
 Wake(k) ==
-  /\ tickets[k].state \in {"done", "dropped"}
+  /\ (tickets[k].state \in {"done", "dropped"}
+      \/ (tickets[k].state = "stopped" /\ tickets[k].stopKind = "conversation"))
   /\ tickets[k].humanIn # {}
   /\ Len(tickets[k].asg) < MaxAsg
   /\ tickets' = [tickets EXCEPT ![k].state = "live",
                              ![k].asg = Append(tickets[k].asg, "pend"),
                              ![k].lastReport = "none",
-                             ![k].humanIn = {}]
+                             ![k].humanIn = {},
+                             ![k].stopKind = "none"]
   /\ UNCHANGED <<pullOpen, working, gone, released, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
-(* Tickets.stop (tickets.ts), from a stop Decision (engine.ts), the panel API, or a
-  conversation closed on GitHub: end(by = 'human', outcome = 'stopped'); every
-  unfinished Assignment ends with it. *)
+(* Tickets.stop (tickets.ts): end(by = 'human', outcome = 'stopped'); every unfinished
+  Assignment ends with it. `stopKind` is whose act it was: "operator" from the panel, "loop"
+  from the router's repeat guard, "conversation" from GitHub closing the thread. Only the
+  last one leaves the Wake door open. *)
+StopByRouter(th, k, kind) ==
+  /\ tickets[k].state = "live"
+  /\ th \in tickets[k].subs
+  /\ kind \in {"loop", "conversation"}
+  /\ tickets' = [tickets EXCEPT ![k].state = "stopped",
+                             ![k].stopKind = kind,
+                             ![k].asg = [i \in 1..Len(tickets[k].asg) |-> "end"]]
+  /\ evaluating' = evaluating \ {th}
+  /\ batch' = batch \ {m \in batch : ThreadOf(m) = th}
+  /\ working' = working \ {k}
+  /\ UNCHANGED <<pullOpen, gone, released, delivered, evalQ, ackPend, ackSent>>
+
 StopByHuman(th, k) ==
   /\ tickets[k].state = "live"
   /\ th \in tickets[k].subs
   /\ tickets' = [tickets EXCEPT ![k].state = "stopped",
+                             ![k].stopKind = "operator",
                              ![k].asg = [i \in 1..Len(tickets[k].asg) |-> "end"]]
   /\ evaluating' = evaluating \ {th}
   /\ batch' = batch \ {m \in batch : ThreadOf(m) = th}
@@ -301,6 +320,7 @@ Next ==
   \/ \E k \in TicketIds : Retry(k)
   \/ \E k \in TicketIds : Wake(k)
   \/ \E th \in Threads, k \in TicketIds : StopByHuman(th, k)
+  \/ \E th \in Threads, k \in TicketIds, kind \in {"loop", "conversation"} : StopByRouter(th, k, kind)
   \/ \E a \in Msgs : SendAck(a)
 
 Fairness ==
@@ -319,13 +339,19 @@ TypeOK ==
   /\ released \in [TicketIds -> BOOLEAN]
   /\ batch \in SUBSET Msgs
   /\ tickets \in [TicketIds -> [state: States, asg: Seq(AsgStates), lastReport: Reports,
-                                subs: SUBSET Threads, humanIn: SUBSET Msgs]]
+                                subs: SUBSET Threads, humanIn: SUBSET Msgs,
+                                stopKind: {"none", "operator", "loop", "conversation"}]]
   /\ delivered \in SUBSET Msgs /\ evalQ \in SUBSET Msgs /\ evaluating \in SUBSET Threads
   /\ ackPend \in SUBSET Msgs /\ ackSent \in SUBSET Msgs
 
 (* I1. A ticket a person stopped is never live again — `wake`, `attach` and intake all
    check `ended.by === 'human'`; "stopped" is absorbing in every transition. *)
-I1_StopAbsorbing == [][\A k \in TicketIds : tickets[k].state = "stopped" => tickets[k].state' = "stopped"]_vars
+(* I1. A stop is absorbing, for the stops that withdraw the Mandate: the panel's and the
+   repeat guard's. The conversation stop is the exception the operator's notices promise —
+   GitHub closed the thread, and the person who closed it can reopen it (see `Wake`). *)
+I1_StopAbsorbing == [][\A k \in TicketIds
+  : tickets[k].state = "stopped" /\ tickets[k].stopKind # "conversation"
+    => tickets[k].state' = "stopped"]_vars
 
 (* I2. "Done" implies the worker reported `ready`: the only producer of "done" is
    Report(k, "ready"). Silent success is unrepresentable. *)
