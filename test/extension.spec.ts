@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import superagent, { activationRefusal, createRouterExtension, configFrom, duplicateLiveTickets, panelToken, staleRunningTickets, sweepHomes, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import superagent, { activationRefusal, createRouterExtension, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepHomes, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
@@ -471,7 +471,7 @@ describe('the router extension', () => {
       .toEqual([])
   })
 
-  it('sweeps a running assignment whose worker is gone, and leaves the ones that are waiting', () => {
+  it('sweeps a running assignment whose worker is gone, and a queued launch with free slots', () => {
     // Measured 2026-11-10: after a restart the router adopted two sessions, both agents went idle, and their
     // tickets stayed 'running' in the store for 7 hours. 2 of 8 launch slots sat held by a corpse while 5
     // standing asks went unworked. Every other sweep walks the live workers, so it saw nothing.
@@ -482,16 +482,26 @@ describe('the router extension', () => {
         assignments: [{ id: `${id}-a`, state, startedAt, ...(report ? { report: { state: report } } : {}) }] }) as never
     const live = (ids: string[]) => ids.map(ticketId => ({ ticketId }))
     const old = t('464b69a8', '2026-11-10T06:28:00.000Z')
-    expect(staleRunningTickets([old], live([]), now, grace), 'running with no worker and 9 hours of age goes').toEqual(['464b69a8'])
-    expect(staleRunningTickets([old], live(['464b69a8']), now, grace), 'a live worker means it is not stale').toEqual([])
+    expect(stalledTickets([old], live([]), now, grace, 4), 'running with no worker and 9 hours of age goes').toEqual(['464b69a8'])
+    expect(stalledTickets([old], live(['464b69a8']), now, grace, 4), 'a live worker means it is not stale').toEqual([])
     const fresh = t('a1', '2026-11-10T15:49:00.000Z')
-    expect(staleRunningTickets([fresh], live([]), now, grace), 'a launch a minute old is a launch in flight').toEqual([])
+    expect(stalledTickets([fresh], live([]), now, grace, 4), 'a launch a minute old is a launch in flight').toEqual([])
     const asked = t('a2', '2026-11-10T06:28:00.000Z', 'running', 'blocked')
-    expect(staleRunningTickets([asked], live([]), now, grace), 'a worker that asked a human is parked, not stale').toEqual([])
+    expect(stalledTickets([asked], live([]), now, grace, 4), 'a worker that asked a human is parked, not stale').toEqual([])
     const done = t('a3', '2026-11-10T06:28:00.000Z', 'ended')
-    expect(staleRunningTickets([done], live([]), now, grace), 'an ended assignment is not running').toEqual([])
+    expect(stalledTickets([done], live([]), now, grace, 4), 'an ended assignment is not running').toEqual([])
     const both = t('b1', '2026-11-10T04:33:00.000Z')
-    expect(staleRunningTickets([old, both], live([]), now, grace), 'both real corpses get swept').toEqual(['464b69a8', 'b1'])
+    expect(stalledTickets([old, both], live([]), now, grace, 4), 'both real corpses get swept').toEqual(['464b69a8', 'b1'])
+    const q = (id: string, createdAt: string, state = 'pending', report?: string) =>
+      ({ id, createdAt, channels: [{ source: 'github', thread: `#${id}` }],
+        assignments: [{ id: `${id}-a`, state, ...(report ? { report: { state: report } } : {}) }] }) as never
+    const standing = q('974dee0c', '2026-11-08T01:41:00.000Z')
+    expect(stalledTickets([standing], live([]), now, grace, 4), 'a queued launch with 4 free slots is stalled, not waiting').toEqual(['974dee0c'])
+    expect(stalledTickets([standing], live([]), now, grace, 0), 'with the cap full it is waiting its turn, so leave the queue alone').toEqual([])
+    const justQueued = q('q2', '2026-11-10T15:49:30.000Z')
+    expect(stalledTickets([justQueued], live([]), now, grace, 4), '30 seconds in the queue is a launch in flight').toEqual([])
+    const askedQueue = q('q3', '2026-11-08T01:41:00.000Z', 'pending', 'waiting')
+    expect(stalledTickets([askedQueue], live([]), now, grace, 4), 'a ticket waiting a person is parked, not stalled').toEqual([])
   })
 
   it('publishes the queue the cap hides: labelled work with no live ticket, and how long it has waited', async () => {

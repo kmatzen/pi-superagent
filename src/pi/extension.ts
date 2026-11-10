@@ -783,10 +783,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // A running assignment with no worker is the one state every worker-walking sweep cannot see, so it gets its
     // own sweep, on the same 15-minute window as the quiet rule: long enough that a launch in flight is never
     // swept, short enough that a corpse holds a slot for minutes, not hours.
-    for (const id of staleRunningTickets(repos.tickets.open(), executor.workers(), Date.now(), 15 * 60_000)) {
+    for (const id of stalledTickets(repos.tickets.open(), executor.workers(), Date.now(), 15 * 60_000, Math.max(0, (cfg.maxConcurrent ?? 4) - executor.workers().length))) {
       const a = repos.tickets.get(id)?.assignments.at(-1)
       if (!a) continue
-      log.line('warn', 'assignment.stale_running', { ticket: id, assignment: a.id, startedAt: a.startedAt })
+      log.line('warn', 'assignment.stalled', { ticket: id, assignment: a.id, state: a.state, startedAt: a.startedAt })
       releaseIfWaiting(id, a.id, 'stale')
     }
     for (const id of duplicateLiveTickets(repos.tickets.open(), executor.workers())) {
@@ -1325,7 +1325,13 @@ export function duplicateLiveTickets(
 }
 
 /**
- * Tickets whose last assignment says `running` while no worker exists to run it.
+ * Tickets whose work is queued or running in the store while nothing runs it.
+ *
+ * Two stalls, both measured 2026-11-10 on one laptop. (1) `running` with no worker: after a restart the router
+ * adopted two sessions, the agents went idle, the live entries left, the store kept `running`. (2) `pending`
+ * that never started: five accepted asks — board issues 163, 166, 274, 355, 357 — sat `pending` with 8 of 8
+ * launch slots free, and only a router restart at 16:18Z moved them. Measured at 15:50Z the fleet had started
+ * no worker in 7.8 hours with those five asks queued, so the queue is the defect, not the board.
  *
  * Measured 2026-11-10: after a restart the router adopted two sessions, both agents went idle, their live
  * entries went with the idle sessions, and the tickets stayed `running` in the store for 7 hours. Every sweep
@@ -1336,19 +1342,26 @@ export function duplicateLiveTickets(
  * The report is respected: a worker that told the fleet it awaits a human is parked, not stale, and the answer
  * path owns it. `graceMs` keeps a launch that has not registered yet out of the sweep.
  */
-export function staleRunningTickets(
+export function stalledTickets(
   open: readonly Ticket[],
   liveWorkers: readonly { ticketId?: string }[],
   nowMs: number,
   graceMs: number,
+  freeSlots: number,
 ): string[] {
   const live = new Set(liveWorkers.map(w => w.ticketId).filter(Boolean) as string[])
   const out: string[] = []
   for (const t of open) {
     const a = t.assignments[t.assignments.length - 1]
-    if (!a || a.state !== 'running' || live.has(t.id)) continue
+    if (!a || live.has(t.id)) continue
     if (awaitsAHumanTop(String(a.report?.state ?? ''))) continue
+    // A queued launch needs free slots to be stalled: with the cap full, a pending assignment is waiting its
+    // turn, and sweeping it would churn the queue the operator built the cap to protect.
+    if (a.state === 'pending' && freeSlots <= 0) continue
+    // The model's launch-queue state is 'pending'; 'queued' is the panel's word for the same thing.
+    if (a.state !== 'running' && a.state !== 'pending') continue
     const started = Date.parse(a.startedAt ?? t.createdAt)
+    // A queued launch has no startedAt, so its age is the ticket's: the ask has been standing, not the run.
     if (!Number.isFinite(started) || nowMs - started < graceMs) continue
     out.push(t.id)
   }
