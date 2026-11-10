@@ -9,7 +9,7 @@ const runGit = promisify(execFile)
 import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
-import {GithubSource, REPLY_MARKER, type GithubApi, type IssueState, QUEUE_LABEL, REQUEST_LABEL} from './source-github.ts'
+import {GithubSource, isOperatorAsk, REPLY_MARKER, type GithubApi, type IssueState, QUEUE_LABEL, REQUEST_LABEL} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type ReconcileReport } from './pulls.ts'
@@ -42,7 +42,9 @@ import { briefFor, ghAccounts, loadSdk, policyOf, pullBrief, scopeOf, type Route
  * check 2026-11-10 proved the label journal cannot answer this question.
  */
 export const standingAskEntitled = (
-  ticket: { id?: string, ended?: unknown, assignments: readonly { state: string, endedReason?: string }[] } | undefined,
+  ticket: { id?: string, ended?: unknown,
+    assignments: readonly { state: string, endedReason?: string, report?: { state?: string } }[],
+    follows?: readonly { closed?: unknown }[] } | undefined,
   liveWorkers: readonly { ticketId?: string }[],
 ): boolean => {
   if (!ticket || ticket.ended) return false
@@ -50,6 +52,16 @@ export const standingAskEntitled = (
   if (!last || last.state !== 'ended' || last.endedReason !== 'released') return false
   // The core writes 'released' (core/tickets.ts). An earlier draft of this rule tested 'release',
   // matched nothing, and the re-grant fired in tests and never on the board. The live check found it.
+  // A report that awaits a human parks the work on a person, not on the fleet: `ready` with a pull request out
+  // for review, or `blocked` awaiting an answer. The queue label kept these out of the re-grant by accident;
+  // labels are obsolete (operator, 2026-11-10), so the predicate has to say it on purpose. A worker that reported
+  // ready and then died must not be replaced by a second worker opening a competing pull request.
+  if (awaitsAHumanState(last.report?.state ?? '')) return false
+  // The same park, seen from the other side: the ticket follows a pull request that has not landed, so the
+  // change exists and a fresh worker would compete with it. Measured on the live board the day the label fence
+  // came down: an unlabelled ticket with a pull request under review became re-grantable, and the delivery
+  // test caught the second worker before the board did.
+  if ((ticket.follows ?? []).some(f => !f.closed)) return false
   return !liveWorkers.some(w => ticket.id !== undefined && w.ticketId === ticket.id)
 }
 
@@ -212,20 +224,21 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   let openBoard: readonly IssueState[] = []
   const starvation = (): { starved: number; oldestStarvedH: number; unanswered: number } => {
     // Two questions, two numbers, because one number answered both silently and disagreed with an audit twice.
-    // `starved` = labelled asks nobody has ever been put on (what a free slot unblocks). `unanswered` = labelled
-    // asks with no worker on them now. Definitions: docs/design-capacity-liveness.md.
+    // `starved` = open work nobody has ever been put on (what a free slot unblocks). `unanswered` = open work
+    // with no worker on it now. Labels are obsolete (operator, 2026-11-10), so the filter is the ask test, not a
+    // label. Definitions: docs/design-capacity-liveness.md.
     const threads = (t: Ticket) => t.channels.map(c => c.thread)
     const open = repos.tickets.open()
     const claimed = new Set(open.filter(t => { const a = t.assignments.at(-1); return a && a.state !== 'pending' }).flatMap(threads))
     const onIt = new Set(open.filter(t => ['running', 'pending', 'ready', 'blocked'].includes(t.assignments.at(-1)?.state ?? '')).flatMap(threads))
-    const labelled = openBoard.filter(i => i.labels.includes(QUEUE_LABEL))
-    const waiting = labelled.filter(i => !claimed.has(`#${i.issue}`))
+    const board = openBoard.filter(i => !isOperatorAsk(i, cfg.githubSelf ?? cfg.self))
+    const waiting = board.filter(i => !claimed.has(`#${i.issue}`))
     const hours = (iso: string) => (Date.now() - Date.parse(iso)) / 3.6e6
     const oldest = waiting.reduce((m, i) => Math.max(m, hours(i.updatedAt)), 0)
     return {
       starved: waiting.length,
       oldestStarvedH: Math.round(oldest * 10) / 10,
-      unanswered: labelled.filter(i => !onIt.has(`#${i.issue}`)).length,
+      unanswered: board.filter(i => !onIt.has(`#${i.issue}`)).length,
     }
   }
   const github = githubApi
