@@ -456,7 +456,7 @@ describe('the router extension', () => {
     await f.running.tick()
     issues.push({ issue: 465, title: 'DO: age the launch order', body: 'Let the oldest labelled ask launch first.',
       author: 'octocat', association: 'OWNER', createdAt: new Date(Date.now() - 3.6e6).toISOString(),
-      updatedAt: new Date(Date.now() - 3.6e6).toISOString(), labels: ['agent-requested'] })
+      updatedAt: new Date(Date.now() - 3.6e6).toISOString(), labels: ['agent-ready'] })
     await f.running.tick()
     expect(f.running.load().starved, 'a labelled ask with no worker is counted').toBe(1)
     expect(f.running.load().oldestStarvedH, 'and its age is published').toBeGreaterThanOrEqual(0.9)
