@@ -13,7 +13,7 @@
 # meaning, so a scheduled check can act on it without reading prose.
 set -uo pipefail
 
-usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] {init OWNER/REPO|start|stop|restart|status|remedy|intake NUMBERS}"; }
+usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] {init OWNER/REPO|start|stop|stop-ticket ID [REASON]|restart|status|remedy|intake NUMBERS}"; }
 
 # Flags come first because every path below derives from the state directory: parsed after them, --state
 # moved the router's tab but left its stop marker, its place file and its settings in the default one.
@@ -465,11 +465,35 @@ remedy() {
   esac
 }
 
+
+# Stop ONE ticket from the command line. The panel already had this lever and the engine always did; the
+# operator's shell did not, so a duplicate worker on a live job could not be retired without opening a browser.
+# The reason goes to the ticket record, because a stop with no reason is a mystery for the next reader.
+stop_ticket() {
+  local id="${1:-}" reason; shift || true
+  reason="$*"
+  [ -n "$id" ] || { echo "usage: superagent stop-ticket <ticket-id> [reason]"; return 2; }
+  [ -n "$reason" ] || reason="stopped from the command line by $(id -un)"
+  local port token
+  port="$(cat "$STATE/panel.port" 2>/dev/null)"
+  token="$(cat "$STATE/panel-token" 2>/dev/null)"
+  if [ -z "$port" ] || [ -z "$token" ]; then
+    echo "stop-ticket: no panel to ask (run 'superagent start' with a panelPort, and the port lands in $STATE/panel.port)"; return 1
+  fi
+  local out
+  out="$(curl -sS -m 15 -X POST -H "x-superagent-token: $token" -H 'content-type: application/json' \
+    --data "$(python3 -c 'import json,sys; print(json.dumps({"reason": sys.argv[1]}))' "$reason")" \
+    "http://127.0.0.1:$port/api/tickets/$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$id")/stop" 2>&1)"
+  echo "$out"
+  case "$out" in *'"stopped"'*) return 0 ;; *) return 1 ;; esac
+}
+
 case "${CMD:-status}" in
   start)
     if [ -n "${RESPECT_STOP:-}" ] && [ -f "$STOP_MARKER" ]; then echo "left stopped: manual stop marker present"; exit 0; fi
     start ;;
   stop) stop ;;
+  stop-ticket) shift; stop_ticket "$@" ;;
   restart)
     if [ -n "${RESPECT_STOP:-}" ] && [ -f "$STOP_MARKER" ]; then echo "left stopped: manual stop marker present"; exit 0; fi
     restart_router ;;
