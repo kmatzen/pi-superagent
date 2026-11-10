@@ -9,7 +9,7 @@ const runGit = promisify(execFile)
 import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
-import {GithubSource, REPLY_MARKER, type GithubApi, REQUEST_LABEL} from './source-github.ts'
+import {GithubSource, REPLY_MARKER, type GithubApi, type IssueState, REQUEST_LABEL} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type ReconcileReport } from './pulls.ts'
@@ -82,7 +82,7 @@ export interface RunningRouter {
   setPaused(v: boolean): void
   isPaused(): boolean
   /** Workers on a run (against the cap), parked between runs, and queued: the panel's load line. */
-  load(): { running: number; parked: number; queued: number; maxWorkers: number }
+  load(): { running: number; parked: number; queued: number; maxWorkers: number; starved: number; oldestStarvedH: number }
 }
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] })
@@ -171,10 +171,22 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     onCredentialRedacted: (count, where) => log.line('warn', 'github.credential_redacted', { where, count }),
     followed: () => followedPulls(repos.tickets.open(), cfg.githubRepo ?? ''),
   }) : undefined)
+  // Labelled work with no live ticket: the queue `running=8 cap=8` hides. Measured 2026-11-10: four asks sat
+  // unstarted, the oldest 45 hours, while every published number read healthy. The source owns the labels, so it
+  // hands the board over on every poll rather than the metric making a second API call.
+  let openBoard: readonly IssueState[] = []
+  const starvation = (): { starved: number; oldestStarvedH: number } => {
+    const live = new Set(repos.tickets.open().flatMap(t => t.channels.map(c => c.thread)))
+    const waiting = openBoard.filter(i => i.labels.includes(REQUEST_LABEL) && !live.has(`#${i.issue}`))
+    const hours = (iso: string) => (Date.now() - Date.parse(iso)) / 3.6e6
+    const oldest = waiting.reduce((m, i) => Math.max(m, hours(i.updatedAt)), 0)
+    return { starved: waiting.length, oldestStarvedH: Math.round(oldest * 10) / 10 }
+  }
   const github = githubApi
     ? new GithubSource(githubApi, {
         repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, requestLabel: REQUEST_LABEL,
         onWarn: (event, fields) => log.line('warn', event, fields),
+        onOpen: (open) => { openBoard = open },
       }, repos.kv)
     : undefined
   github?.bootstrap()
@@ -872,6 +884,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       n: sweeps, inflight: repos.threads.active().filter(t => t.evaluating).length,
       running: executor.running, parked: executor.parked, cap: executor.capacity,
       open: repos.tickets.open().length, ms: finished - started,
+      ...starvation(),
       gapMs, pollMs, reconcileMs, evaluateMs, drainMs,
       gh: ghCalls - callsAtStart, ghTotal: ghCalls,
       pullsDue: pulls.due, pullsRead: pulls.read, pullsDeferred: pulls.deferred, readsAtOnce: pulls.atOnce,
@@ -1139,6 +1152,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       parked: executor.parked,
       queued: open.filter(t => { const a = t.assignments.at(-1); return !a || a.state === 'pending' }).length,
       maxWorkers: cfg.maxConcurrent ?? 4,
+      ...starvation(),
     }
   }
 

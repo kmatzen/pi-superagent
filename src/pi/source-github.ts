@@ -70,6 +70,9 @@ export interface GithubSourceOptions {
   requestLabel?: string
   /** Says so when a label the router has spent cannot be taken off the issue. */
   onWarn?: (event: string, fields: Record<string, unknown>) => void
+  /** The open board on every poll. The router publishes how much labelled work waits for a slot, and this is
+   *  the only place that has the labels: nobody downstream may re-read GitHub to find out. */
+  onOpen?: (open: readonly IssueState[]) => void
 }
 
 /** What the label path makes of one `agent-requested` label: fire the ask, or refuse it as already answered.
@@ -194,6 +197,7 @@ export class GithubSource {
     const out: Trigger[] = []
     const grants = new Set(this.store.get<string[]>(grantsKey(this.options.repo)) ?? [])
     const openKeys = new Set(open.map(i => `#${i.issue}`))
+    this.options.onOpen?.(open)
     // A closed issue leaves the seen set, so reopening it fires afresh: closing, then reopening, is a person saying go again.
     for (const key of [...seen]) if (!openKeys.has(key)) seen.delete(key)
     for (const issue of open) {

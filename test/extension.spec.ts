@@ -443,6 +443,29 @@ describe('the router extension', () => {
     expect(thread, 'a death after `ready` never buys a second worker').not.toContain('fresh worker')
   })
 
+  it('publishes the queue the cap hides: labelled work with no live ticket, and how long it has waited', async () => {
+    // Measured 2026-11-10: four labelled asks sat unstarted, the oldest 45 hours, while the tick published
+    // `running=8 cap=8` and every panel number read healthy. Starvation has to be a number the loop emits.
+    const issues: IssueState[] = []
+    const githubApi: GithubApi = {
+      comments: async () => [] as IssueComment[],
+      issues: async () => [...issues],
+      postComment: async () => {},
+    }
+    const f = fixture(true, undefined, undefined, undefined, { githubApi })
+    await f.running.tick()
+    issues.push({ issue: 465, title: 'DO: age the launch order', body: 'Let the oldest labelled ask launch first.',
+      author: 'octocat', association: 'OWNER', createdAt: new Date(Date.now() - 3.6e6).toISOString(),
+      updatedAt: new Date(Date.now() - 3.6e6).toISOString(), labels: ['agent-requested'] })
+    await f.running.tick()
+    expect(f.running.load().starved, 'a labelled ask with no worker is counted').toBe(1)
+    expect(f.running.load().oldestStarvedH, 'and its age is published').toBeGreaterThanOrEqual(0.9)
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.running.load().starved, 'a live ticket is no longer starvation').toBe(0)
+  })
+
   it('the silence question frees the agent as well, and the next comment starts a fresh worker', async () => {
     // Measured 2026-11-09, minutes after the release rule shipped: 6 tickets still held workers that had finished
     // before the deploy. Their next report was going to be this sweep — the question the router asks a worker that
