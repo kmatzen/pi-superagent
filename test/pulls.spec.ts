@@ -3,6 +3,31 @@ import { followedPulls, parsePull, parseThread, PullFollower, threadOfPull, thre
 import { REPLY_MARKER, type IssueComment, type PrReview } from '../src/pi/source-github.ts'
 import type { Ticket, Trigger } from '../src/core/index.ts'
 
+  it('a thread this account cannot read goes into backoff, and the burn stops', async () => {
+    // Measured 2026-11-10: 330 read failures in 4000 log lines on eight threads, five of them followed by no
+    // live ticket, because a 404 on a private repository is a permanent answer and the follower asked again
+    // every interval. The API budget is shared with the reads that decide whether a ticket closes.
+    const boom = async () => { throw new Error('HTTP 404 reading pull request x/y#9, and this account cannot read x/y either') }
+    const f = follower({ pull: boom })
+    let first = 0
+    for (let pass = 0; pass < 4; pass++) {
+      // Three failures is the threshold: below it, a repository having a bad minute keeps its reads, and a
+      // repository that comes back into sight is seen on the next interval.
+      await f.reconcile(f.following('x/y#9'))
+      first = f.calls.filter(c => c.startsWith('pull ')).length
+      f.tick(121_000)
+    }
+    await f.reconcile(f.following('x/y#9'))
+    await f.reconcile(f.following('x/y#9'))
+    expect(f.calls.filter(c => c.startsWith('pull ')).length, 'after three failures the backoff asks nothing').toBe(first)
+    const g = follower({ pull: boom }, [], { cooldownMs: 0 })
+    for (let pass = 0; pass < 4; pass++) { await g.reconcile(g.following('x/y#9')); g.tick(121_000) }
+    const before = g.calls.filter(c => c.startsWith('pull ')).length
+    g.tick(121_000)
+    await g.reconcile(g.following('x/y#9'))
+    expect(g.calls.filter(c => c.startsWith('pull ')).length, 'with no backoff, every interval asks again, which is the burn').toBeGreaterThan(before)
+  })
+
 describe('the pull requests tickets follow', () => {
   const ticket = (id: string, follows: Array<{ thread: string; closed?: boolean }>) =>
     ({ id, follows: follows.map(f => ({ thread: f.thread, closed: f.closed ? { at: 'x' } : undefined })) }) as never
@@ -49,7 +74,7 @@ const created = new Date(Date.now() - HOUR).toISOString()
 const later = new Date(Date.now() - HOUR / 2).toISOString()
 
 function follower(api: Partial<PullApi>, open: string[] | null = [],
-                 limits: { maxReads?: number; budgetMs?: number; maxAtOnce?: number } = {}) {
+                 limits: { maxReads?: number; budgetMs?: number; maxAtOnce?: number; cooldownMs?: number } = {}) {
   const kv = new Map<string, unknown>()
   const calls: string[] = []
   const closed: Array<{ id: string; outcome: string; at: string }> = []
@@ -81,6 +106,7 @@ function follower(api: Partial<PullApi>, open: string[] | null = [],
     ...(limits.maxReads === undefined ? {} : { maxReads: limits.maxReads }),
     ...(limits.budgetMs === undefined ? {} : { budgetMs: limits.budgetMs }),
     ...(limits.maxAtOnce === undefined ? {} : { maxAtOnce: limits.maxAtOnce }),
+    ...(limits.cooldownMs === undefined ? {} : { cooldownMs: limits.cooldownMs }),
   })
   const following = (...threads: string[]) => [{ follows: threads.map(t => ({ thread: `github:${t}`, own: true })) }] as unknown as Ticket[]
   const recorded = (...threads: string[]) => [{ follows: threads.map(t => ({ thread: `github:${t}`, own: true, closed: { at: created, outcome: 'closed' as const } })) }] as unknown as Ticket[]
