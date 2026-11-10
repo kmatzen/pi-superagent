@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import superagent, { activationRefusal, createRouterExtension, configFrom, panelToken, sweepHomes, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import superagent, { activationRefusal, createRouterExtension, configFrom, duplicateLiveTickets, panelToken, sweepHomes, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
@@ -441,6 +441,34 @@ describe('the router extension', () => {
     const thread = posted.map(p => p.body).join('\n')
     expect(thread, 'the receipt the person reads is the finished run').toContain('#464 ready: open for review')
     expect(thread, 'a death after `ready` never buys a second worker').not.toContain('fresh worker')
+  })
+
+  it('sweeps a second live worker on one thread, and keeps the one that started first', () => {
+    // The real pair from 2026-11-10 on issue 145, read out of the running store: the older ticket's assignment
+    // ended at 08:35, a new trigger opened the younger at 08:36, and at 16:44 BOTH got workers, so the same job
+    // ran in two work dirs and published two pull requests. An intake filter cannot fix this, and proved it:
+    // filtering triggers swallowed the fired grant and follow-ups on live work.
+    const t = (id: string, startedAt: string, thread = '#145') =>
+      ({ id, createdAt: '2026-11-06T16:52:00.000Z', channels: [{ source: 'github', thread }],
+        assignments: [{ id: `${id}-a`, state: 'running', startedAt }] }) as never
+    const live = (ids: string[]) => ids.map(ticketId => ({ ticketId }))
+    const older = t('7db2a21c', '2026-11-08T16:44:00.000Z')
+    const younger = t('69548839', '2026-11-08T16:44:30.000Z')
+    expect(duplicateLiveTickets([older, younger], live(['7db2a21c', '69548839'])), 'the younger duplicate goes')
+      .toEqual(['69548839'])
+    expect(duplicateLiveTickets([older, younger], live(['7db2a21c'])), 'one worker on the thread is not a duplicate')
+      .toEqual([])
+    expect(duplicateLiveTickets([older, younger], live(['7db2a21c', '69548839'])).sort(), 'and it is deterministic')
+      .toEqual(['69548839'])
+    const same = t('aaa', '2026-11-08T16:44:00.000Z'), tie = t('bbb', '2026-11-08T16:44:00.000Z')
+    expect(duplicateLiveTickets([same, tie], live(['aaa', 'bbb'])), 'a tie breaks on id, so a rerun says the same')
+      .toEqual(['bbb'])
+    const other = t('ccc', '2026-11-08T16:44:00.000Z', '#210')
+    expect(duplicateLiveTickets([older, other], live(['7db2a21c', 'ccc'])), 'a different thread is its own job')
+      .toEqual([])
+    const idle = t('ddd', '2026-11-08T16:44:00.000Z')
+    expect(duplicateLiveTickets([older, idle], live(['7db2a21c'])), 'an open ticket with no worker is left alone')
+      .toEqual([])
   })
 
   it('publishes the queue the cap hides: labelled work with no live ticket, and how long it has waited', async () => {
