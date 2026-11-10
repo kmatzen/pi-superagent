@@ -448,7 +448,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // churn can put a session back on it. Re-asking is then a deliberate act — `superagent intake #NNN`,
       // which relabels — which is what "new inbound speech" is allowed to look like.
       try {
-        engine.stopTicket(ticket.id, `the same result was reported ${times} times, so the ticket stops here`)
+        engine.stopTicket(ticket.id, `the same result was reported ${times} times, so the ticket stops here`, 'loop')
         log.line('info', 'ticket.repeat_stopped', { ticket: ticket.id, times, state: run.state })
       } catch { /* it ended by its own report, which is the same quiet */ }
     }
@@ -776,12 +776,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
           continue
         }
         try {
-          engine.stopTicket(ticket.id, 'the conversation closed on GitHub')
+          engine.stopTicket(ticket.id, 'the conversation closed on GitHub', 'conversation')
           outbox.send({
             id: `closed:${ticket.id}`,
             channel,
             kind: 'notice', ticketId: ticket.id,
-            text: 'Stopped: this conversation closed on GitHub. Reopen it to run the request again.',
+            text: 'Stopped: this conversation closed on GitHub. Reopen it, or comment on it, and the work resumes.',
           })
           log.line('info', 'ticket.conversation_closed', { ticket: ticket.id, thread: channel.thread })
         } catch {
@@ -804,6 +804,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // appends the fresh Assignment and the resumed marker, and the next poll launches it.
       else if (assignment && assignment.state === 'ended' && assignment.endedReason === 'released'
         && ticket.undelivered.length && !executor.workers().some(w => w.ticketId === ticket.id)) engine.wake(ticket.id)
+    }
+    // The other half of the conversation door. Intake attaches a person's message to a ticket the router stopped
+    // because its conversation closed, and `wake` starts a worker on it — but the loop above visits open tickets
+    // only, so the attachment had no partner: measured 2026-11-10, #350's reply at 00:21:59 became an Input on a
+    // ticket that nothing visited, and the ask died there with the label that spent it. `wake` holds the guard.
+    for (const stopped of repos.tickets.active()) {
+      if (stopped.ended?.kind !== 'conversation' || !stopped.undelivered.length) continue
+      if (executor.workers().some(w => w.ticketId === stopped.id)) continue
+      engine.wake(stopped.id)
     }
     // A worker quiet for 15 minutes gets a question on the panel, not the issue: a long build is not news.
     for (const quiet of executor.quiet(cfg.workerQuietMinutes ?? 15)) {
