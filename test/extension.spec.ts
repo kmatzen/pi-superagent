@@ -411,6 +411,38 @@ describe('the router extension', () => {
     expect(starts(), 'one fresh worker per ticket, not a loop').toBe(2)
   })
 
+  it('a worker that reported ready and then died does not get a fresh worker: the change is already a pull request', async () => {
+    // Measured 2026-11-10: four panes closed and the router relaunched all four tickets, two of them runs that
+    // had reported the work shipped with the pull request open for a human merge. A crash is the session dying,
+    // not the work failing, and a shipped change does not need a second worker making it twice.
+    const issues: IssueState[] = []
+    const posted: Array<{ issue: number; body: string }> = []
+    const githubApi: GithubApi = {
+      comments: async () => [] as IssueComment[],
+      issues: async () => [...issues],
+      postComment: async (issue, body) => { posted.push({ issue, body }) },
+    }
+    const f = fixture(true, undefined, undefined, undefined, { githubApi })
+    await f.running.tick()
+    issues.push({ issue: 464, title: 'DO: flip the reader flag', body: 'Flip the reader flag behind a test.', author: 'octocat',
+      association: 'OWNER', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), labels: [] })
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    await until(() => !!f.workers[0]?.report)
+    f.workers[0]!.report!({ state: 'ready', summary: 'open for review', pullRequests: ['https://github.com/o/r/pull/99'] })
+    await f.running.tick()
+    f.workers[0]!.events.forEach(l => l({ type: 'failed', error: 'its pane closed' }))
+    await f.running.tick()
+    await settle()
+    expect(f.workers, 'the delivery exists, so no fresh worker').toHaveLength(1)
+    const thread = posted.map(p => p.body).join('\n')
+    expect(thread, 'the receipt the person reads is the finished run').toContain('#464 ready: open for review')
+    expect(thread, 'a death after `ready` never buys a second worker').not.toContain('fresh worker')
+  })
+
   it('the silence question frees the agent as well, and the next comment starts a fresh worker', async () => {
     // Measured 2026-11-09, minutes after the release rule shipped: 6 tickets still held workers that had finished
     // before the deploy. Their next report was going to be this sweep — the question the router asks a worker that

@@ -309,6 +309,18 @@ describe('PiExecutor', () => {
     expect(f.calls_of('reported')[0]!.args[3]).toMatchObject({ state: 'failed', summary: /could not start a worker: prepare command failed/ })
   })
 
+  it('a crash after the worker reported ready keeps the finished state, so the router does not relaunch a shipped run', async () => {
+    const f = fixture({})
+    f.executor.start(ticket(), assignment())
+    await f.executor.idle()
+    const s = f.sessions[0]!
+    s.report('ready', 'the pull request is open for review', null)
+    s.emit({ type: 'failed', error: 'its pane closed' })
+    const crash = f.calls_of('reported').at(-1)!
+    expect(crash.args.slice(0, 3)).toEqual(['T1', 'A1', 'crash'])
+    expect(crash.args[3]).toMatchObject({ state: 'ready', summary: /the worker crashed: its pane closed/ })
+  })
+
   it('a failed launch on a ticket that ended meanwhile does not stall every launch after it', async () => {
     const f = fixture({}, { launch: 'T1', report: 'T1' })
     f.executor.start(ticket(), assignment())
