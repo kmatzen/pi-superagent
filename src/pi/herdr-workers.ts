@@ -103,10 +103,13 @@ export class HerdrWorkers {
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.options.herdr.agentStart({
-          // --no-extensions: the harness in ~/.pi/agent is the operator's, and a worker session that loads
-          // it runs the operator's watchers with the operator's credentials.
+          // The worker loads the operator's harness on purpose (operator, 2026-11-10: "agents should have all
+          // the power"). Measured the same day, the cost of the old `--no-extensions`: a worker had no context
+          // meter and no compaction affordance, so it packed up at a fraction of its window and the fleet read
+          // that as early termination. The role module rides alongside, and the bot's GH_TOKEN is named in the
+          // tab env at the launch site, not inherited.
           name, kind: 'pi', pane, timeoutMs: this.options.startTimeoutMs ?? 120_000,
-          args: ['--session-id', sessionId, '--no-extensions', '--extension', roleModule],
+          args: ['--session-id', sessionId, '--extension', roleModule],
         })
       } catch (error) {
         if (!(error instanceof HerdrError && error.code === 'agent_pane_busy') || attempt >= 30) throw error
