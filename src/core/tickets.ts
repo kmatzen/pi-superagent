@@ -1,8 +1,8 @@
 /** Tickets: their lifecycle from an accept to their end, their Subscriptions and their Inputs. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
-import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
+import { latestAssignment, latestReport, liveTicket, readUntil, resumableBySpeech, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
+import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome, TicketStopKind,
   Trigger, TriggerDisposition } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
@@ -157,8 +157,8 @@ export class Tickets extends EnginePart {
    * Stops a ticket on behalf of a human, ending any active assignments.
    * @throws UserError when the ticket is unknown.
    */
-  stop(ticketId: string, reason?: string): Ticket {
-    this.end(ticketId, 'human', 'stopped', this.now(), reason)
+  stop(ticketId: string, reason?: string, kind: TicketStopKind = 'operator'): Ticket {
+    this.end(ticketId, 'human', 'stopped', this.now(), reason, kind)
     return this.require(ticketId)
   }
   /**
@@ -276,11 +276,13 @@ export class Tickets extends EnginePart {
    */
   wake(ticketId: string): void {
     const ticket = this.repo.tickets.get(ticketId)
-    if (!ticket || ticket.ended?.by === 'human' || !ticket.undelivered.length) return
+    if (!ticket || !ticket.undelivered.length) return
     // A live ticket whose worker was freed (`release`) is wakeable like an ended one: the person's answer is the
-    // request that starts the next worker, and nothing else is listening for it.
+    // request that starts the next worker, and nothing else is listening for it. Of the stopped ones, a stop that
+    // withdrew the Mandate (a person's, the loop guard's) has no door; the conversation stop does.
     const last = latestAssignment(ticket)
     if (liveTicket(ticket) && !(last?.state === 'ended' && last.endedReason === 'released')) return
+    if (ticket.ended?.by === 'human' && !resumableBySpeech(ticket)) return
     const policy = this.policy()
     if (policy.paused) return
     if (!policy.revalidate(ticket.mandate)) { this.refuse(ticket); return }
@@ -371,7 +373,7 @@ export class Tickets extends EnginePart {
    * ends the ticket included (see `readBefore`), and neither acknowledged, answered nor handed back: one may have come while
    * the worker wrote the report that ends the ticket, or after its turn ended, and either way it can no longer hand it back.
    */
-  end(ticketId: string, by: TicketEndBy, outcome: TicketOutcome, at = this.now(), reason?: string): void {
+  end(ticketId: string, by: TicketEndBy, outcome: TicketOutcome, at = this.now(), reason?: string, kind?: TicketStopKind): void {
     const ticket = this.require(ticketId)
     if (!liveTicket(ticket)) return
     const stopping = ticket.assignments.filter(assignment => assignment.state !== 'ended')
@@ -381,7 +383,7 @@ export class Tickets extends EnginePart {
     const left = this.untaken(ticket, ticket.inputs.flatMap(input => input.kind === 'trigger'
       && (!readBefore(input, until) || ticket.undelivered.includes(input.id)) ? [input.id] : []))
     // An end dated earlier, such as a PR's merge, does not move the ticket's last change back.
-    ticket.ended = { at, by, outcome, ...why }; ticket.undelivered = []; ticket.updatedAt = this.now()
+    ticket.ended = { at, by, outcome, ...why, ...(kind ? { kind } : {}) }; ticket.undelivered = []; ticket.updatedAt = this.now()
     delete ticket.attention; delete ticket.delivery
     // The Assignments the end stops end with it; the ticket's end says why.
     for (const assignment of stopping) { assignment.state = 'ended'; assignment.endedAt = at }

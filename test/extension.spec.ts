@@ -498,6 +498,32 @@ describe('the router extension', () => {
     expect(f.receipts('482'), 'an absent thread stops nothing').not.toContain('closed on GitHub')
     expect(JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text), 'the ticket stays live').toHaveLength(1)
   })
+
+  it('the reply on a conversation the router stopped starts a worker again', async () => {
+    // Measured 2026-11-10 on the live board, the issue behind the test above: GitHub answered `closed` so the stop
+    // was right, and the operator reopened at 00:21:50 and replied at 00:21:59. Both became Inputs on a ticket with
+    // no door: the router stopped it through the panel's stop, which records a person's stop, and that is the one
+    // stop `wake` refuses. The reply reached nothing, and the notices had promised the opposite.
+    const f = fixture()
+    f.addComment('483', 'octocat', 'rotate the api tokens')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    f.feed.issues.length = 0
+    f.feed.comments.length = 0
+    f.feed.closedIssues = [483]
+    await f.running.tick()
+    expect(f.receipts('483')).toContain('closed on GitHub')
+    f.feed.closedIssues = []
+    f.addComment('483', 'octocat', 'reopened it, the tokens still fail')
+    await f.running.tick()
+    await settle()
+    await f.running.tick()
+    expect(f.workers, 'the reopened conversation gets a worker again').toHaveLength(2)
+    expect(JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text), 'and the ticket is live').toHaveLength(1)
+  })
   it('three failed polls say the front door is deaf in health.json, and a good poll clears it', async () => {
     let deaf = false
     const githubApi: GithubApi = {
