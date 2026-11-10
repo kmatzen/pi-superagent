@@ -227,3 +227,15 @@ the duplicate-worker sweep, and the 15-minute quiet rule. Fold them into one pas
 named rule list, and delete the duplicated `awaitsAHuman` predicate (a closure copy and a module copy).
 That file is 1496 lines and every liveness fix of this week landed in it; the fold is the seam for splitting
 the tick loop from the rules. Behaviour must not change, so the tests pin each rule as it moves.
+
+### What the fold shipped, and what it did not (2026-11-10)
+
+Shipped: the duplicated predicate is gone. `awaitsAHumanState` is the one rule, exported, and the closure
+in the router aliases it; `awaitsAHumanTop` and its copy of the body no longer exist. The stalled sweep and
+the quiet rule now ask the same function the same question.
+
+Not shipped: the single call site. The three sweeps still run in three places in the tick, and the order is
+a fact this document now has to carry: the stalled-launch sweep and the duplicate sweep run after intake,
+and the quiet rule runs after the launch loop, because its release depends on the report it files in the
+same step. A move that keeps that order provable needs the three sweeps' tests to move with them, and the
+first attempt at the move lost scope twice in the splice. It is a half-day of careful work, not a fold.
