@@ -11,6 +11,8 @@ import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
 import type { PullApi, PullState } from '../src/pi/pulls.ts'
 import { paneKeysScrubbed, scrubPaneEnv } from './setup.ts'
 
+import { REGRANT_CAP, regrantPlan } from '../src/pi/extension.ts'
+
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ext-')); dirs.push(d); return d }
 afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
@@ -1789,4 +1791,20 @@ describe('the tick keeps its cadence', () => {
     await until(() => (JSON.parse(healthOf(f.dir)) as { tick: { state: string } }).tick.state === 'ok', 5_000)
     expect(trailOf(f.dir), 'the pass that owns the guard is the one that clears it').toMatch(/ tick n=/)
   }, 30_000)
+})
+
+describe('the standing queue re-grant', () => {
+  const day = '2026-11-10'
+  it('gives a standing ask its launch back a bounded number of times, and no more', () => {
+    let counters = regrantPlan(undefined, '#214', day)
+    expect(counters, 'the first ask is granted').toMatchObject({ day, perIssue: { '#214': 1 } })
+    counters = regrantPlan(counters, '#214', day)
+    expect(counters?.perIssue['#214'], 'the second is granted').toBe(2)
+    expect(regrantPlan(counters, '#214', day), 'the third is the cap').toBeUndefined()
+    expect(regrantPlan(counters, '#215', day), 'a cap on one ask is not a cap on the board').toMatchObject(
+      { perIssue: { '#214': 2, '#215': 1 } })
+    expect(regrantPlan(counters, '#214', '2026-11-11'), 'the day rolls and the ask may launch again')
+      .toMatchObject({ day: '2026-11-11', perIssue: { '#214': 1 } })
+    expect(REGRANT_CAP, 'two per issue per day, the number in the design note').toBe(2)
+  })
 })

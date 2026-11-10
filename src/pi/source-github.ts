@@ -35,6 +35,8 @@ export interface GithubApi {
   pullsOpen?(): Promise<number[]>
   /** Submitted reviews (approve / request changes) with ids above the cursor, oldest first. */
   reviews?(sinceId: number): Promise<PrReview[]>
+  /** Puts a label on an issue: the standing-ask re-grant, where the router hands the launch back. */
+  addLabel?(issue: number, label: string): Promise<void>
   /** Takes a label off an issue. The router uses it to spend the intake grant it has just heard. */
   removeLabel?(issue: number, label: string): Promise<void>
   /** One issue's state, asked directly: 'unknown' when the read failed, which is never a reason to stop. */
@@ -70,6 +72,16 @@ export interface GithubSourceOptions {
   requestLabel?: string
   /** Says so when a label the router has spent cannot be taken off the issue. */
   onWarn?: (event: string, fields: Record<string, unknown>) => void
+  /**
+   * The standing queue re-earns its launch. `agent-ready` says an issue wants an agent now; the
+   * `agent-requested` grant it carries is one-shot, so a standing ask whose worker ended was entitled to
+   * nothing (measured 2026-11-10: 5 standing asks queued 57 hours with 8 free slots). The router answers
+   * yes within a cap and says no after it, and the counter lives in the router's store, because a label
+   * the router adds and removes without memory is a surface that lies to the board.
+   */
+  regrant?: (issue: number, key: string) => boolean
+  /** The standing queue marker, `QUEUE_LABEL` on the board. */
+  queueLabel?: string
   /** The open board on every poll. The router publishes how much labelled work waits for a slot, and this is
    *  the only place that has the labels: nobody downstream may re-read GitHub to find out. */
   onOpen?: (open: readonly IssueState[]) => void
@@ -121,6 +133,8 @@ export class GithubSource {
   private lastOpen: ReadonlySet<string> | undefined
   /** Issues to take the intake label off, staged with the positions so a crash re-fires, never drops. */
   private spending: number[] = []
+  /** Issues to put the request label back on, at the same deferral point as the spending. */
+  private regranting: number[] = []
   /** Issues whose label write has already been complained about: a token without rights fails every poll. */
   private readonly labelWarned = new Set<number>()
   /** Issues whose label author has already been complained about: an unreadable events feed is one fact, not a poll's worth of them. */
@@ -166,6 +180,19 @@ export class GithubSource {
         this.options.onWarn?.('intake.label_failed', { issue: `#${issue}`, error: String(error).slice(0, 200) })
       }
     }
+
+    for (const issue of this.regranting) {
+      // The board shows the launch coming too. A token without label rights costs visibility only: the
+      // trigger fired in the poll that queued this, and the journal is the guard against a second fire.
+      try { await this.api.addLabel?.(issue, this.options.requestLabel ?? REQUEST_LABEL) }
+      catch (error) {
+        if (!this.labelWarned.has(issue)) {
+          this.labelWarned.add(issue)
+          this.options.onWarn?.('regrant.label_failed', { issue, error: String(error).slice(0, 200) })
+        }
+      }
+    }
+    this.regranting = []
     return [...(await this.issueTriggers()), ...(await this.commentTriggers()), ...(await this.reviewTriggers())]
   }
 
@@ -242,6 +269,17 @@ export class GithubSource {
         grants.add(key)
         this.spending.push(issue.issue)
         if (grant.fire) out.push(this.requestTrigger(issue, 'label', key, grant.ask))
+      } else if (this.options.regrant
+        && issue.labels.includes(this.options.queueLabel ?? QUEUE_LABEL) && grants.has(key)) {
+        // A standing ask with a spent grant and no live worker: the queue marker says it still wants an
+        // agent, and the one-shot label said it could not have one. The router's counter decides. This
+        // poll emits the trigger and queues the label write; the journal clears with the positions, the
+        // same deferred commit the label path uses, so a crash re-fires the ask and never drops it.
+        if (this.options.regrant(issue.issue, key)) {
+          grants.delete(key)
+          this.regranting.push(issue.issue)
+          out.push(this.requestTrigger(issue, 'label', key))
+        }
       }
     }
     // A grant is spent while the label sits on the issue, and is handed back when the label comes off: taking

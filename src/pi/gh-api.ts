@@ -213,6 +213,17 @@ export function ghApi(options: GithubApiOptions): GithubApi {
 
     // GitHub answers 404/422 for a label that is not on the issue, which is the state the caller wanted: not a
     // failure. A permission answer is, and the source logs it and keeps the grant journal as the guard.
+    // POST adds to the label set; PUT would replace it, and the board's other labels are not the
+    // router's to decide. A label already present is the state the caller wanted, so 422 is quiet.
+    async addLabel(issue, label) {
+      try {
+        await call(['api', '-X', 'POST', `repos/${options.repo}/issues/${issue}/labels`, '-f', `labels[]=${label}`])
+      } catch (error) {
+        if (/HTTP 404|HTTP 422|already|not found/i.test(String(error))) return
+        throw error
+      }
+    },
+
     async removeLabel(issue, label) {
       try { await call(['api', '-X', 'DELETE', `repos/${options.repo}/issues/${issue}/labels/${encodeURIComponent(label)}`]) }
       catch (error) {
