@@ -1810,7 +1810,7 @@ describe('the standing queue re-grant', () => {
 })
 
 describe('who may re-earn the launch', () => {
-  const ended = { state: 'ended', endedReason: 'release' }
+  const ended = { state: 'ended', endedReason: 'released' }
   const ticket = (over: Record<string, unknown> = {}) => ({ id: 't1', assignments: [ended], ...over })
   it('a standing ask whose worker ended, with nothing live on it, is entitled', () => {
     expect(standingAskEntitled(ticket() as never, [])).toBe(true)
@@ -1823,6 +1823,9 @@ describe('who may re-earn the launch', () => {
     expect(standingAskEntitled(ticket({ assignments: [{ state: 'pending' }] }) as never, []), 'a launch is queued').toBe(false)
     expect(standingAskEntitled(ticket({ assignments: [{ state: 'ended', endedReason: 'stop' }] }) as never, []),
       'a stopped assignment is the operator speaking').toBe(false)
+    expect(standingAskEntitled(ticket({ assignments: [{ state: 'ended', endedReason: 'release' }] }) as never, []),
+      'the core writes released, not release: the string this rule was first written with matches nothing')
+      .toBe(false)
     expect(standingAskEntitled(undefined, []), 'an issue with no ticket is intake\'s to answer').toBe(false)
   })
 })
