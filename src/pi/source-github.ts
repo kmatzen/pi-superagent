@@ -270,13 +270,17 @@ export class GithubSource {
         this.spending.push(issue.issue)
         if (grant.fire) out.push(this.requestTrigger(issue, 'label', key, grant.ask))
       } else if (this.options.regrant
-        && issue.labels.includes(this.options.queueLabel ?? QUEUE_LABEL) && grants.has(key)) {
-        // A standing ask with a spent grant and no live worker: the queue marker says it still wants an
-        // agent, and the one-shot label said it could not have one. The router's counter decides. This
-        // poll emits the trigger and queues the label write; the journal clears with the positions, the
-        // same deferred commit the label path uses, so a crash re-fires the ask and never drops it.
+        && issue.labels.includes(this.options.queueLabel ?? QUEUE_LABEL)
+        && !issue.labels.includes(this.options.requestLabel ?? REQUEST_LABEL)) {
+        // A standing ask with no grant on it: the queue marker says it still wants an agent, and the
+        // one-shot label is gone, spent by the worker that already ran. The ROUTER decides, because it is
+        // the only party that knows a worker ended on this thread. Measured live 2026-11-10: the grant
+        // journal is pruned to the issues that still carry the label, so a condition on the journal can
+        // never be true on a real board — this branch fired in tests and nowhere else.
+        //
+        // This poll emits the trigger and queues the label write; the counter in the router caps the
+        // loop, and the journal stays out of it.
         if (this.options.regrant(issue.issue, key)) {
-          grants.delete(key)
           this.regranting.push(issue.issue)
           out.push(this.requestTrigger(issue, 'label', key))
         }
