@@ -351,6 +351,27 @@ describe('the router extension', () => {
     expect(f.receipts('460')).toContain('ready: keys rotated')
   })
 
+  it('a review that arrived as several comments reaches the worker as one message', async () => {
+    // Operator report 2026-11-09: pull-request feedback lands as a run of comments, and delivery pushed one
+    // prompt per comment, so pi steered the first and queued the rest. The worker answered comment one with the
+    // rest of the review invisible to it, and the person watched it re-ask what comment three had already said.
+    const f = fixture(true)
+    f.addComment('520', 'octocat', 'bump the base image')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await until(() => f.workers.length === 1)
+    f.addComment('520', 'octocat', 'rename the flag to --dry-run')
+    f.addComment('520', 'octocat', 'and add a test for the empty case')
+    await f.running.tick()
+    await until(() => f.workers[0]!.prompts.some(p => p.includes('rename the flag')))
+    const batch = f.workers[0]!.prompts.filter(p => p.includes('rename the flag') || p.includes('empty case'))
+    expect(batch.length, 'one message carries both comments').toBe(1)
+    expect(batch[0]).toContain('octocat: rename the flag to --dry-run')
+    expect(batch[0]).toContain('octocat: and add a test for the empty case')
+    expect(batch[0], 'and the worker is told the review is a whole').toMatch(/2 messages arrived/)
+  })
+
   it('the router records the pid that owns its panel, which is the proof the start script can read', async () => {
     // The start script must not kill a stranger holding the panel port, and PR 36 proved ownership by reading
     // the port owner's environment. A router rewrites its process title, so on macOS there is no environment to
