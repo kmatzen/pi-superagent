@@ -37,6 +37,8 @@ export interface GithubApi {
   reviews?(sinceId: number): Promise<PrReview[]>
   /** Takes a label off an issue. The router uses it to spend the intake grant it has just heard. */
   removeLabel?(issue: number, label: string): Promise<void>
+  /** One issue's state, asked directly: 'unknown' when the read failed, which is never a reason to stop. */
+  issueState?(issue: number): Promise<'open' | 'closed' | 'unknown'>
   /**
    * Who applied a label, and when — the newest `labeled` event naming it, the only read GitHub offers for
    * "who asked". Absent, the label path falls back to the grant journal alone.
@@ -125,6 +127,12 @@ export class GithubSource {
   /** Threads open as of the last poll ('#N', issues and pull requests): absence is how GitHub says
    *  a conversation ended — merged, closed, or deleted all look the same from here, and all mean stop. */
   openThreads(): ReadonlySet<string> | undefined { return this.lastOpen }
+
+  /** One thread's state, asked of GitHub directly. 'unknown' when the read failed: a ticket stays alive on an
+   *  unreadable answer, because the inference this replaces stopped a live ticket whose issue was open. */
+  issueState(issue: number): Promise<'open' | 'closed' | 'unknown'> {
+    return this.api.issueState?.(issue) ?? Promise.resolve('unknown')
+  }
 
   /** A cold start reads a day back: enough to catch a request made while the router was down. */
   bootstrap(): void {

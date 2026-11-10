@@ -277,6 +277,17 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // string to the worker and mark the answer read.
     : input.kind === 'text' ? input.text : `[${input.kind}]`
 
+  // The release rule, in one place: a settled report frees the agent, whoever filed it. It lived twice — in
+  // this callback and in the silence sweep, which files through the domain and so never reached this code —
+  // and the second copy is what freed the 6 tickets that the first one could not see (measured 2026-11-09).
+  const releaseIfWaiting = (ticketId: string, assignmentId: string, state: string): void => {
+    const ticket = repos.tickets.get(ticketId)
+    if (!ticket || ticket.ended) return
+    engine.release(ticketId, assignmentId)
+    executorRef?.release(ticket)
+    log.line('info', 'worker.released', { ticket: ticketId, assignment: assignmentId, state })
+  }
+
   // One message per assignment, ending and text; a failed launch drops the text, since it retries every poll.
   const announce = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun, relaunched: boolean): void => {
     const channel = ticket.channels[0]
@@ -311,11 +322,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // whenever a person is the only thing it can be waiting for — it asked, it needs an answer, or it finished
     // its turn and its own pull request waits for a human merge. A ticket the report ENDED needs none of this:
     // ending disposes the worker through `stop`. formal/Ticket.tla R1/R3/R5 are the claims.
-    if (origin === 'worker' && (awaitsAHuman(run.state) || run.state === 'ready')
-      && !repos.tickets.get(ticket.id)?.ended) {
-      engine.release(ticket.id, assignmentId)
-      executorRef?.release(ticket)
-      log.line('info', 'worker.released', { ticket: ticket.id, assignment: assignmentId, state: run.state })
+    if (origin === 'worker' && (awaitsAHuman(run.state) || run.state === 'ready')) {
+      releaseIfWaiting(ticket.id, assignmentId, run.state)
     }
     pullEnded(ticket.id)
     // The report the person reads has gone out; these two bound what a finished ticket can do next.
@@ -759,6 +767,14 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         if (!channel || channel.source !== 'github' || !channel.thread.startsWith('#') || openThreads.has(channel.thread)) continue
         // A merge closes the issue it names: the ticket ends with its pull request once the work finishes, not as a stop.
         if (ticket.follows?.some(f => f.own && f.closed)) continue
+        // Absence from the open list is the hint; GitHub's answer on this issue is the fact. Measured
+        // 2026-11-09: a thread missing from the list stopped a live ticket whose issue was open all along, and
+        // the stopped ticket then took no comment, so a person's reply reached nothing.
+        const state = github?.issueState ? await github.issueState(Number(channel.thread.slice(1))) : 'closed'
+        if (state !== 'closed') {
+          if (state === 'unknown') log.line('warn', 'conversation.state_unknown', { ticket: ticket.id, thread: channel.thread })
+          continue
+        }
         try {
           engine.stopTicket(ticket.id, 'the conversation closed on GitHub')
           outbox.send({
@@ -802,13 +818,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // report predated the deploy, because this sweep — the one report they were going to file — went straight
       // to the ticket and left the Session in place. The report goes first: it belongs to the running Assignment
       // that the release then ends.
-      const ticket = repos.tickets.get(quiet.ticketId)
-      const running = ticket?.assignments.at(-1)
-      if (ticket && running && running.state === 'running') {
-        engine.release(ticket.id, running.id)
-        executorRef?.release(ticket)
-        log.line('info', 'worker.released', { ticket: ticket.id, assignment: running.id, state: 'quiet' })
-      }
+      const running = repos.tickets.get(quiet.ticketId)?.assignments.at(-1)
+      if (running?.state === 'running') releaseIfWaiting(quiet.ticketId, running.id, 'quiet')
     }
     // The operator's deadline, not the router's: report and let a person decide. A worker mid-legitimate
     // work must never be terminated by a clock the router owns, so this speaks and does not kill.

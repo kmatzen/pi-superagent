@@ -132,6 +132,18 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       return rows.filter(r => /\/issues\/\d+/.test(r.url)).map(({ url, ...rest }) => rest)
     },
 
+    async issueState(issue) {
+      // The fact one sweep needs, asked directly. A page of open issues is a hint: absence from it is how a
+      // live ticket got stopped on 2026-11-09 while its issue sat open. 'unknown' on a failed read, so the
+      // caller keeps the ticket alive rather than acting on a guess.
+      try {
+        const row = JSON.parse(await call(['api', `repos/${options.repo}/issues/${issue}`])) as { state?: string }
+        return row.state === 'closed' ? 'closed' : 'open'
+      } catch {
+        return 'unknown'
+      }
+    },
+
     async issues(state) {
       // GitHub pages at 100; an unpaginated read hides every issue past the newest page, forever.
       const rows: Array<{ number: number; title: string; body?: string | null; labels?: Array<{ name: string }>; user?: { login: string }; author_association?: string; created_at: string; updated_at: string; pull_request?: unknown }> = []

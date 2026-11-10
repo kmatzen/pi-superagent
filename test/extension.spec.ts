@@ -17,7 +17,9 @@ afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true 
 
 // addComment opens the issue from the agent's own account, which is never a request, then posts a
 // person's comment, which is.
-type Feed = { issues: IssueState[]; comments: IssueComment[]; posts: Array<{ issue: number; body: string; repo?: string }> }
+type Feed = { issues: IssueState[]; comments: IssueComment[]; posts: Array<{ issue: number; body: string; repo?: string }>
+  /** The issues GitHub answers 'closed' for: the fact the router now asks for, instead of inferring it. */
+  closedIssues?: number[] }
 
 /** The tools under test answer synchronously; the cast keeps the test readable. */
 type SyncTool = { content: Array<{ text: string }> }
@@ -80,7 +82,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
                    judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
                    maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number } = {}) {
   const dir = reuse ?? tmp()
-  const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [] }
+  const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [], closedIssues: [] }
   const closes: number[] = []
   const spent: Array<{ issue: number; label: string }> = []
   // One ordered log of the writes to GitHub, so a test can pin the order a person reads the thread in.
@@ -88,6 +90,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   const api: GithubApi = options.githubApi ?? {
     // The fakes deliver everything and let the source's own rules do the filtering, as server.spec does.
     issues: async () => [...feed.issues],
+    issueState: async (issue: number) => ((feed.closedIssues ?? []).includes(issue) ? 'closed' : 'open') as 'closed' | 'open',
     comments: async () => [...feed.comments],
     postComment: async (issue, body, repo) => { calls.push(`post:${issue}`); feed.posts.push({ issue, body, ...(repo ? { repo } : {}) }) },
     closeIssue: async issue => { calls.push(`close:${issue}`); closes.push(issue) },
@@ -471,9 +474,29 @@ describe('the router extension', () => {
     expect(f.workers).toHaveLength(1)
     f.feed.issues.length = 0
     f.feed.comments.length = 0
+    f.feed.closedIssues = [481] // GitHub is asked, and answers: this conversation is closed
     await f.running.tick()
     expect(f.receipts('481')).toContain('closed on GitHub')
     expect(JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text)).toHaveLength(0)
+  })
+
+  it('a thread missing from the open list is not a closed conversation, and the ticket keeps its worker', async () => {
+    // Measured 2026-11-09 on the live board: #350 sat open on GitHub the whole time, absent from the engine's
+    // open-issues read, and the engine stopped its ticket with "the conversation closed on GitHub". The stopped
+    // ticket then took no comment, so the operator's reply at 00:21 reached nothing, and the notice that told
+    // them to reopen it led to a reopen that wakes nothing.
+    const f = fixture()
+    f.addComment('482', 'octocat', 'rotate the api tokens')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    f.feed.issues.length = 0
+    f.feed.comments.length = 0
+    await f.running.tick()
+    expect(f.receipts('482'), 'an absent thread stops nothing').not.toContain('closed on GitHub')
+    expect(JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text), 'the ticket stays live').toHaveLength(1)
   })
   it('three failed polls say the front door is deaf in health.json, and a good poll clears it', async () => {
     let deaf = false
