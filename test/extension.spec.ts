@@ -1020,7 +1020,7 @@ describe('a pull request per ticket', () => {
       reviews: async () => [],
     }
     return {
-      api, comments,
+      api, comments, states,
       open: (repo: string, n: number) => states.set(`${repo}#${n}`, { open: true, merged: false, createdAt: created }),
       end: (repo: string, n: number, merged: boolean, closedAt = new Date().toISOString()) =>
         states.set(`${repo}#${n}`, { open: false, merged, createdAt: created, closedAt }),
@@ -1056,6 +1056,42 @@ describe('a pull request per ticket', () => {
     expect(ticket().ended).toMatchObject({ outcome: 'merged', by: 'executor' })
     expect(f.receipts('490')).toContain('#490 merged: https://github.com/o/r/pull/77. This ticket is done.')
     expect(f.receipts('490')).not.toContain('Stopped: this conversation closed')
+  })
+
+  it('the issue stays open while a pull request it is waiting on is open, and a read that answers nothing holds it open', async () => {
+    // The operator's rule, 2026-11-10, after issues closed with a pull request still open: the ticket ends when
+    // its last recorded follow closes, and a recorded close can come from a read that never succeeded. The
+    // closer asks GitHub about every pull request the ticket followed, and an open one — or one GitHub will not
+    // answer about — stops the close. An unknown is not a merge.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '490')
+    pulls.open('o/r', 77)
+    pulls.open('o/r', 78)
+    f.workers[0]!.report!({ state: 'ready', summary: 'two branches',
+      pullRequests: ['https://github.com/o/r/pull/77', 'https://github.com/o/r/pull/78'] })
+    await f.running.tick()
+    pulls.end('o/r', 77, true)
+    await f.running.tick()
+    expect(ticket().ended, 'one merge of two ends nothing').toBeUndefined()
+    expect(f.calls, 'the issue is not closed while the second pull request is open').not.toContain('close:490')
+    pulls.end('o/r', 78, true)
+    await f.running.tick()
+    expect(ticket().ended).toMatchObject({ outcome: 'merged' })
+    // The close rides the outbox flush, so it lands one pass behind the receipt.
+    await f.running.tick()
+    // The issue is still in the feed (nobody wrote `Closes #490`), so closing it is the engine's job, and it is
+    // the engine's job only once every pull request the ticket followed is done.
+    expect(f.calls, 'with every pull request merged the issue closes').toContain('close:490')
+    const g = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const second = await working(g, '491')
+    pulls.open('o/r', 79)
+    g.workers[0]!.report!({ state: 'ready', summary: 'one branch', pullRequests: ['https://github.com/o/r/pull/79'] })
+    await g.running.tick()
+    pulls.states.delete('o/r#79')
+    await g.running.tick()
+    expect(g.calls, 'a pull request GitHub answers nothing about holds the issue open').not.toContain('close:491')
+    void second
   })
 
   it('a pull request closed without merging ends the ticket, and the issue says how to start again', async () => {
