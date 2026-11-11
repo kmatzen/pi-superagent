@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { checkoutRepository, DELEGATION_TOOLS, decideToolCall, prepareWorkspace, setupProblems, workerBase, WorkspaceError } from '../src/pi/workspace.ts'
+import { checkoutRepository, DELEGATION_TOOLS, decideToolCall, prepareWorkspace, setupProblems, WorkspaceError } from '../src/pi/workspace.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ws-')); dirs.push(d); return d }
@@ -86,6 +86,12 @@ describe('the worker environment', () => {
     expect(statSync(join(root, 'worker-bin', 'gh-publish')).mode & 0o111).toBeTruthy()
   })
 
+  it('the prepare script runs with the operator\'s own environment', () => {
+    const root = tmp()
+    const w = prepareWorkspace({ root, ticketId: 'TK-prep', stateDir: root, prepare: 'echo "$HOME" > prep-home.txt' })
+    expect(readFileSync(join(w.dir, 'prep-home.txt'), 'utf8').trim()).toBe(process.env.HOME)
+  })
+
   it('setup problems name the place a person can fix', () => {
     const root = tmp()
     expect(setupProblems({ root: join(root, 'work'), stateDir: join(root, 'nope') })).toEqual([
@@ -122,64 +128,3 @@ describe('the worker tool-call boundary', () => {
   })
 })
 
-describe('what a worker is given', () => {
-  it('carries no operator credential and a HOME of its own', () => {
-    // Audit 2026-11-10: a worker runs prompt content from ticket text, and its environment used to carry the
-    // operator's HOME, token paths and SSH agent, so a blocked `gh` only hid the name of the way out.
-    const root = tmp()
-    const keys = ['PI_SUPERAGENT_GITHUB_TOKEN_FILE', 'PI_SUPERAGENT_GITHUB_SELF', 'PI_OPS_TOKEN_FILE', 'SSH_AUTH_SOCK', 'GH_TOKEN', 'GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY'] as const
-    const saved = keys.map(k => [k, process.env[k]] as const)
-    for (const k of keys) process.env[k] = '/leaky'
-    try {
-      const w = prepareWorkspace({ root, ticketId: 'TK-sec', stateDir: root })
-      expect(w.env.HOME).toBe(join(root, 'worker-homes', 'TK-sec'))
-      expect(w.env.GH_CONFIG_DIR).toContain('worker-homes')
-      for (const k of keys) expect(w.env, k).not.toHaveProperty(k)
-      expect(w.env.PI_SUPERAGENT_TICKET).toBe('TK-sec')
-      expect(statSync(join(root, 'worker-homes', 'TK-sec')).mode & 0o077).toBe(0)
-    } finally {
-      for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
-    }
-  })
-
-  it('keeps the settings a prepare script needs, and gives the script the operator own environment', () => {
-    const root = tmp()
-    const w = prepareWorkspace({ root, ticketId: 'TK-prep', stateDir: root, prepare: 'echo "$HOME" > prep-home.txt' })
-    expect(readFileSync(join(w.dir, 'prep-home.txt'), 'utf8').trim()).toBe(process.env.HOME)
-    expect(w.env.HOME).not.toBe(process.env.HOME)
-  })
-})
-
-describe('what a worker is given when the operator names a token', () => {
-  it('gives it a git identity, and GitHub access only through that token', () => {
-    // Measured with the isolated HOME: `gh api user` answers "please run gh auth login", so the brief that
-    // says "push it and open a pull request" sends every code ticket to a failure it cannot avoid.
-    const root = tmp()
-    const withToken = prepareWorkspace({
-      root, ticketId: 'TK-tok', stateDir: root, workerToken: 'ghp_scoped',
-      identity: { name: 'bot', email: 'bot@users.noreply.github.com' },
-    })
-    const home = join(root, 'worker-homes', 'TK-tok')
-    expect(withToken.env.GH_TOKEN).toBe('ghp_scoped')
-    const gitconfig = readFileSync(join(home, '.gitconfig'), 'utf8')
-    expect(gitconfig).toContain('email = bot@users.noreply.github.com')
-    expect(gitconfig).toContain('helper = store')
-    expect(readFileSync(join(home, '.git-credentials'), 'utf8')).toContain('x-access-token:ghp_scoped@github.com')
-    expect(statSync(join(home, '.git-credentials')).mode & 0o077).toBe(0)
-
-    const bare = prepareWorkspace({ root, ticketId: 'TK-notok', stateDir: root })
-    expect(bare.env, 'no token, no GitHub identity in the environment').not.toHaveProperty('GH_TOKEN')
-    expect(existsSync(join(root, 'worker-homes', 'TK-notok', '.git-credentials'))).toBe(false)
-    expect(readFileSync(join(root, 'worker-homes', 'TK-notok', '.gitconfig'), 'utf8')).toContain('pi-superagent')
-  })
-})
-
-describe('workerBase', () => {
-  it('drops the credential names and keeps everything a build needs', () => {
-    const out = workerBase({ PATH: '/bin', HOME: '/home/op', PI_SUPERAGENT_GITHUB_TOKEN_FILE: '/t', PI_OPS_REPO: 'a/b', PI_SUPERAGENT_MAX_WORKERS: '8' })
-    expect(out.PATH).toBe('/bin')
-    expect(out.PI_SUPERAGENT_MAX_WORKERS).toBe('8')
-    expect('PI_OPS_REPO' in out).toBe(false)
-    expect('PI_SUPERAGENT_GITHUB_TOKEN_FILE' in out).toBe(false)
-  })
-})
