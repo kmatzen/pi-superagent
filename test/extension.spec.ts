@@ -85,7 +85,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
                    workerQuietMinutes?: number; pullApi?: PullApi; blocked?: string[];
                    judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
                    maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number;
-                   workerStartMs?: number } = {}) {
+                   workerStartMs?: number; closeRecheckMs?: number } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [], closedIssues: [] }
   const closes: number[] = []
@@ -126,6 +126,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     ...(options.watchRepoIsAsks ? { watchRepoIsAsks: true } : {}),
     ...(options.workerTokenFile ? { workerTokenFile: options.workerTokenFile } : {}),
     ...(options.workerStartMs ? { workerStartMs: options.workerStartMs } : {}),
+    ...(options.closeRecheckMs === undefined ? {} : { closeRecheckMs: options.closeRecheckMs }),
   }
   const workers: Spy[] = []
   const judge: Spy = { prompts: [], report: undefined, disposed: false, events: [] }
@@ -1382,6 +1383,27 @@ describe('a pull request per ticket', () => {
     await f.running.tick()
     expect(f.receipts('504'), 'the streak was broken by a report that said something new').not.toMatch(/reported \d+ times/)
     expect(ticket().ended, 'the ticket is still the worker\'s to finish').toBeUndefined()
+  })
+
+  it('a close that waited on an open pull request happens once that pull request lands', async () => {
+    // A recorded close can be a read that failed: the ticket ends, GitHub says the pull request is still open,
+    // and the close waits. It used to wait forever, because a finished ticket is no longer followed.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api, closeRecheckMs: 0 })
+    const ticket = await working(f, '495')
+    pulls.open('o/r', 81)
+    f.workers[0]!.report!({ state: 'ready', summary: 'one branch', pullRequests: ['https://github.com/o/r/pull/81'] })
+    await f.running.tick()
+    pulls.end('o/r', 81, true)
+    await f.running.tick()
+    expect(ticket().ended, 'the ticket ends with its merge').toMatchObject({ outcome: 'merged' })
+    pulls.open('o/r', 81) // GitHub's answer when the close comes: still open (the shape of a recorded close that was a failed read)
+    await f.running.tick()
+    await f.running.tick()
+    expect(f.calls, 'an open pull request holds the issue open').not.toContain('close:495')
+    pulls.end('o/r', 81, true)
+    await f.running.tick()
+    expect(f.calls, 'the waiting close is asked again, and the issue closes').toContain('close:495')
   })
 
   it('a reference that is not a pull request URL is refused to the worker, and completes nothing', async () => {

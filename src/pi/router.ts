@@ -21,6 +21,8 @@ export interface RouterConfig {
   workerTokenFile?: string
   /** Milliseconds a worker session gets to reach its prompt (PI_SUPERAGENT_WORKER_START_MS); the default is 2 minutes. */
   workerStartMs?: number
+  /** How long a close that waits on an open pull request waits before GitHub is asked again; default 10 min. */
+  closeRecheckMs?: number
   /** Report a worker that has run this long without finishing. Reports; never kills. */
   workerDeadlineHours?: number
   /**
