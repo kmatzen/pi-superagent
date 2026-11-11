@@ -13,7 +13,7 @@
 # meaning, so a scheduled check can act on it without reading prose.
 set -uo pipefail
 
-usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] {init OWNER/REPO|start|stop|stop-ticket ID [REASON]|restart|status|remedy|intake NUMBERS}"; }
+usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] {init OWNER/REPO|start|stop|stop-ticket ID [REASON]|restart|status|remedy}"; }
 
 # Flags come first because every path below derives from the state directory: parsed after them, --state
 # moved the router's tab but left its stop marker, its place file and its settings in the default one.
@@ -34,9 +34,10 @@ while [ $# -gt 0 ]; do
       ST_ID="${2:-}"; shift 2
       ST_REASON="$*"; shift ;;
     intake)
-      CMD=intake; shift
-      [ "$#" -ge 1 ] || { usage >&2; exit 2; }
-      SPEC="$*"; shift ;;
+      # Removed with the labels it wrote (operator, 2026-11-10: "These labels are obsolete"). Said out loud and
+      # non-zero, so a stale habit cannot read as a request that went through.
+      echo "superagent intake is gone with the labels: the router takes every open issue that is not an ask on its own." >&2
+      exit 2 ;;
     *) usage >&2; exit 2 ;;
   esac
 done
@@ -221,45 +222,6 @@ stale_health() {
 # wrong one prints filesystem info where a number belongs. The router needs node to run at all.
 health_age_min() { node -e 'const s=require("fs").statSync(process.argv[1]);console.log(Math.floor((Date.now()-s.mtimeMs)/60000))' "$STATE/health.json" 2>/dev/null || echo '?'; }
 setup_needed() { [ -f "$STATE/setup.json" ] && grep -q '"problem": *{' "$STATE/setup.json" 2>/dev/null; }
-
-# intake asks the router to take issues it has already seen. The router records the issues open at its first
-# look as history and never fires them, which is right for a backlog and wrong for real requests: measured
-# 2026-11-08, 64 issues (205-268) sat unseen for three days. The label is the request, and labelling needs
-# write access, so this is a grant, not a trick: `agent-requested` on an issue enqueues it once. The router
-# takes the label off when it hears it, which is what makes it once: GitHub moves an issue's update time when
-# a comment lands, and the router's own receipt is a comment, so a label left on the issue re-asked for every
-# labelled issue on every poll (issue #309). Ask twice, label twice.
-intake() {
-  : "${PI_SUPERAGENT_GITHUB_REPO:?set PI_SUPERAGENT_GITHUB_REPO (superagent init OWNER/REPO)}"
-  : "${PI_SUPERAGENT_GITHUB_TOKEN_FILE:?set PI_SUPERAGENT_GITHUB_TOKEN_FILE}"
-  [ -f "$PI_SUPERAGENT_GITHUB_TOKEN_FILE" ] || { echo "no token file at $PI_SUPERAGENT_GITHUB_TOKEN_FILE" >&2; return 1; }
-  local spec="$1" numbers="" part start end n sent=0 failed=0
-  IFS=', ' read -ra parts <<< "$spec"
-  for part in "${parts[@]}"; do
-    [ -n "$part" ] || continue
-    if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then start="${BASH_REMATCH[1]}"; end="${BASH_REMATCH[2]}"
-    elif [[ "$part" =~ ^[0-9]+$ ]]; then start="$part"; end="$part"
-    else echo "not an issue number or range: $part (use 205-268 or 275)" >&2; return 2; fi
-    (( start >= 1 && end >= start )) || { echo "bad range: $part" >&2; return 2; }
-    (( end - start <= 200 )) || { echo "range too wide: $part (200 issues per run)" >&2; return 2; }
-    for ((n = start; n <= end; n++)); do numbers="$numbers $n"; done
-  done
-  local token code
-  token="$(tr -d '\n' < "$PI_SUPERAGENT_GITHUB_TOKEN_FILE")"
-  for n in $numbers; do
-    code="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-      -H "authorization: token $token" -H 'content-type: application/json' \
-      -d '{"labels":["agent-requested"]}' \
-      "https://api.github.com/repos/$PI_SUPERAGENT_GITHUB_REPO/issues/$n/labels")"
-    case "$code" in
-      200|201|204) sent=$((sent + 1)) ;;
-      *) failed=$((failed + 1)); echo "#$n: GitHub answered $code" >&2 ;;
-    esac
-  done
-  echo "labelled $sent issue(s) as requests, $failed failed; the router takes them on its next poll"
-  [ "$failed" -eq 0 ]
-}
-
 
 start() {
   # A deployment that stores its credential in a world-readable URL is not a deployment to bring up: the
@@ -505,6 +467,5 @@ case "${CMD:-status}" in
     restart_router ;;
   status) status ;;
   remedy) remedy ;;
-  intake) intake "$SPEC" ;;
   *) usage >&2; exit 2 ;;
 esac
