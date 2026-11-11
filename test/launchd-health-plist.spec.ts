@@ -18,7 +18,7 @@ describe('launchd/com.example.superagent-health.plist', () => {
     // ./scripts/superagent, which checks and heals whatever repository that path names today, and predates
     // the remedy mapping. This test is what says so; the fix is to re-render this file and reload the job.
     expect(plist).not.toMatch(/scripts\/superagent<|cd "/)
-    expect(plist).toMatch(/<string>superagent --respect-stop remedy/)
+    expect(plist).toMatch(/superagent --respect-stop remedy/)
   })
 
   it('keeps a deliberate stop deliberate, and never runs as a KeepAlive pair with the router', () => {
@@ -26,6 +26,15 @@ describe('launchd/com.example.superagent-health.plist', () => {
     expect(plist).not.toMatch(/<key>KeepAlive<\/key>/)
     expect(plist).toMatch(/<key>StartInterval<\/key><integer>\d+<\/integer>/)
     expect(plist).toMatch(/superagent backup/) // the daily database copy rides the five-minute job
+  })
+
+  it('lets the remedy exit code reach launchd, so the code contract is readable by the scheduler', () => {
+    // The logger pipelines used to swallow it: the job always exited 0, and "each code keeps one meaning,
+    // so a scheduled check can act on it" (scripts/superagent) was a contract nothing could read (audit
+    // 2026-11-11). pipefail carries remedy's code past the logger; exit "$rc" makes it the job's own.
+    expect(plist).toMatch(/set -o pipefail; superagent --respect-stop remedy/)
+    expect(plist).toMatch(/rc=\$\?; superagent backup/)
+    expect(plist).toMatch(/exit "\$rc"/)
   })
 
   it('names herdr, node and pi on the job PATH, because launchd hands a job an empty one', () => {
