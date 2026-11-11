@@ -63,9 +63,9 @@ Init ==
   /\ ackPend = {} /\ ackSent = {}
 
 (* ------------------------------------------------------------------- intake ----
-  Intake.receive (intake.ts): a message reaches every live subscriber, and an ended,
-  not-human-stopped ticket that a person's message resumes (`resumes` in receive:
-  `ticket?.ended?.by !== 'human'`). It is queued for Eval only when NO ticket's worker
+  Intake.receive (intake.ts): a message reaches every live subscriber, and an ended
+  ticket whose Mandate was not withdrawn, when a person's message resumes it (`resumes`
+  in receive: `!mandateWithdrawn(ticket)`, model.ts — the same facts as I1 below). It is queued for Eval only when NO ticket's worker
   decides it (`if (!this.owners(trigger).length) this.queueForEval(trigger)`);
   a bot's message owns nothing, so it is always queued. *)
 Deliver(m) ==
@@ -264,10 +264,11 @@ Wake(k) ==
                              ![k].stopKind = "none"]
   /\ UNCHANGED <<pullOpen, working, gone, released, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
-(* Tickets.stop (tickets.ts): end(by = 'human', outcome = 'stopped'); every unfinished
-  Assignment ends with it. `stopKind` is whose act it was: "operator" from the panel, "loop"
-  from the router's repeat guard, "conversation" from GitHub closing the thread. Only the
-  last one leaves the Wake door open. *)
+(* Tickets.stop (tickets.ts): end(outcome = 'stopped'); every unfinished Assignment
+  ends with it. `by` is whose act it was ("human" for the panel's, "router" for the
+  router's own) and `stopKind` says which: "operator" from the panel, "loop" from the
+  router's repeat guard, "conversation" from GitHub closing the thread. Only the last
+  one leaves the Wake door open (code: `mandateWithdrawn` in model.ts). *)
 StopByRouter(th, k, kind) ==
   /\ tickets[k].state = "live"
   /\ th \in tickets[k].subs
@@ -344,8 +345,6 @@ TypeOK ==
   /\ delivered \in SUBSET Msgs /\ evalQ \in SUBSET Msgs /\ evaluating \in SUBSET Threads
   /\ ackPend \in SUBSET Msgs /\ ackSent \in SUBSET Msgs
 
-(* I1. A ticket a person stopped is never live again — `wake`, `attach` and intake all
-   check `ended.by === 'human'`; "stopped" is absorbing in every transition. *)
 (* I1. A stop is absorbing, for the stops that withdraw the Mandate: the panel's and the
    repeat guard's. The conversation stop is the exception the operator's notices promise —
    GitHub closed the thread, and the person who closed it can reopen it (see `Wake`). *)
