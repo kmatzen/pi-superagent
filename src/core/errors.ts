@@ -4,6 +4,7 @@ export const USER_ERRORS = {
   unknownProblem: ['missing', 'Unavailable Eval not found'],
   unknownTrigger: ['missing', 'Unknown trigger'],
   unknownAssignment: ['missing', 'Unknown assignment'],
+  unknownOutcome: ['refused', 'Unknown assessment outcome kind "{kind}": answer accept, ignore, stop or unavailable'],
   unknownBlock: ['missing', 'Unknown settings block: {block}'],
   unknownPromptRevision: ['missing', 'Unknown prompt revision {revision}'],
   unknownPromptPart: ['refused', 'Unknown built-in prompt part {part}'],
