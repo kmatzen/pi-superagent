@@ -14,6 +14,7 @@ import { ghApi, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type ReconcileReport } from './pulls.ts'
 import { CommentOutbox } from './outbox.ts'
+import { IssueCloser } from './issue-closer.ts'
 import { PiExecutor } from './executor.ts'
 import { renderCandidateFor, SessionAssessor, type SessionPilot } from './assessor.ts'
 import { openJudge, type Judge } from './judge.ts'
@@ -435,82 +436,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const home = cfg.githubRepo ?? ''
   const pullApi = deps.pullApi ?? ghPulls(accounts.pulls)
 
-  /**
-   * The terminal end of a ticket that finished with nothing to wait on: its issue closes with it. A `ready`
-   * report that opens no pull request ends the ticket inside the engine and left the issue open and labelled,
-   * which is a request intake can hear forever — measured 2026-11-09, #255 was dispatched a fourth time nine
-   * hours after its merge landed. A closed issue is not in intake's hearing; a comment on it, or a reopen, is
-   * a person saying go again, and both doors stay open.
-   */
-  const closedKey = 'closed-issues'
-  const closedHere = (): Record<string, string> => repos.kv.get<Record<string, string>>(closedKey) ?? {}
-  const closing: string[] = []
-  const finishIssue = (ticketId: string): void => {
-    if (cfg.keepIssuesOpen) return
-    const ticket = repos.tickets.get(ticketId)
-    const channel = ticket?.channels[0]
-    if (!ticket?.ended || ticket.ended.by !== 'executor' || !channel || channel.source !== 'github') return
-    // Work still owed: a pull request that has not landed is the ticket waiting on a person, not finished.
-    if ((ticket.follows ?? []).some(f => !f.closed)) return
-    const address = channel.address as { issue?: string; repo?: string }
-    // Only the watched repository's issues: an issue in another repository belongs to that repository's board.
-    if (!address.issue || address.repo) return
-    if (closedHere()[ticket.id]) return
-    closing.push(ticket.id)
-  }
-  const flushCloses = async (): Promise<void> => {
-    if (!closing.length) return
-    // The words first, then the door: the receipt is posted (and awaited) before the issue closes, so the
-    // thread reads as an answer that ended, not as a request that vanished.
-    outbox.flush()
-    await outbox.drained()
-  /**
-   * The operator's rule, 2026-11-10: an issue stays open until every pull request connected to it is merged
-   * or closed. A ticket ends when its last recorded follow closes, and a close written down by a read that
-   * failed — GitHub answers 404 for a repository this account cannot see — ends it early, and the issue then
-   * shut on work that is open. So GitHub, not the ticket's memory, answers here, and a pull request the read
-   * cannot classify blocks the close too: an unknown is not a merge.
-   */
-  const openPullsOn = async (ticket: Ticket | undefined): Promise<string[]> => {
-    const blocking: string[] = []
-    for (const follow of ticket?.follows ?? []) {
-      if (!follow.thread.startsWith('github:')) continue
-      const pull = parseThread(follow.thread.slice('github:'.length), home)
-      if (!pull) continue
-      try {
-        const state = await pullApi.pull(pull.repo, pull.number)
-        if (!state || state.open) blocking.push(pullUrl(pull))
-      } catch { blocking.push(pullUrl(pull)) }
-    }
-    return blocking
-  }
-
-    for (const ticketId of closing.splice(0)) {
-      const ticket = repos.tickets.get(ticketId)
-      const issue = Number((ticket?.channels[0]?.address as { issue?: string } | undefined)?.issue)
-      if (!issue || !githubApi) continue
-      try {
-        // `#7` names an issue and a pull request in the same repository, and PATCH state=closed on the pull
-        // number closes the pull request: only a number GitHub does not know as a pull is safe to close here.
-        if (await pullApi.pull(home, issue)) {
-          log.line('info', 'issue.close_skipped', { ticket: ticketId, issue: `#${issue}`, why: 'the thread is a pull request' })
-          continue
-        }
-        const blocking = await openPullsOn(ticket)
-        if (blocking.length > 0) {
-          log.line('info', 'issue.close_skipped', { ticket: ticketId, issue: `#${issue}`,
-            why: `open or unreadable: ${blocking.join(' ').slice(0, 160)}` })
-          continue
-        }
-        await githubApi.closeIssue?.(issue)
-        repos.kv.set(closedKey, { ...closedHere(), [ticketId]: deps.now?.() ?? new Date().toISOString() })
-        log.line('info', 'issue.closed', { ticket: ticketId, issue: `#${issue}`, outcome: ticket?.ended?.outcome })
-      } catch (error) {
-        // The ticket is ended and its grant is spent, so a failed close costs tidiness, not quiet.
-        log.line('warn', 'issue.close_failed', { ticket: ticketId, issue: `#${issue}`, error: String(error).slice(0, 200) })
-      }
-    }
-  }
+  const closer = new IssueCloser({
+    tickets: repos.tickets, kv: repos.kv, pullApi, home, log,
+    ...(githubApi?.closeIssue ? { closeIssue: (issue: number) => githubApi.closeIssue!(issue) } : {}),
+    flushReplies: async () => { outbox.flush(); await outbox.drained() },
+    ...(cfg.keepIssuesOpen ? { keepIssuesOpen: true } : {}),
+    ...(cfg.closeRecheckMs === undefined ? {} : { recheckMs: cfg.closeRecheckMs }),
+    now: deps.now ?? (() => new Date().toISOString()),
+  })
+  const finishIssue = (ticketId: string): void => closer.finish(ticketId)
 
   /**
    * The blast-radius bound: a ticket that keeps reporting with nothing new to act on must stop recruiting.
@@ -828,8 +762,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   for (const tool of tools) pi.registerTool(tool)
 
   let sweeps = 0
-  process.on('uncaughtException', (error: unknown) => log.line('error', 'uncaught', { error: String(error).slice(0, 300) }))
-  process.on('unhandledRejection', (error: unknown) => log.line('error', 'unhandled_rejection', { error: String(error).slice(0, 300) }))
+  // Removed on stop: every /reload builds a router, and each one used to leave its two listeners behind.
+  const onUncaught = (error: unknown): void => log.line('error', 'uncaught', { error: String(error).slice(0, 300) })
+  const onRejection = (error: unknown): void => log.line('error', 'unhandled_rejection', { error: String(error).slice(0, 300) })
+  process.on('uncaughtException', onUncaught)
+  process.on('unhandledRejection', onRejection)
 
   /**
    * One pass of the loop. `mine` is the generation that owns the cadence guard: a pass the beat abandoned keeps
@@ -857,7 +794,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // flushed its receipt: the person reads the words on the issue before the door closes (see flushCloses).
     // It posts to GitHub, so it is a named stage: a pass parked here says so instead of looking idle (#303).
     enter('closes')
-    await flushCloses()
+    await closer.flush()
     let triggers: Trigger[] = []
     if (github) {
       const pollAt = Date.now()
@@ -1305,16 +1242,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     setPaused: (v: boolean) => { paused = v },
     isPaused: () => paused,
     load: panelLoad,
-    stop: () => { clearInterval(timer); off(); panel?.server.close(); executor.detach() },
+    stop: () => {
+      clearInterval(timer); off(); panel?.server.close(); executor.detach()
+      process.off('uncaughtException', onUncaught)
+      process.off('unhandledRejection', onRejection)
+    },
   }
 }
 
 
-/** A session is the router only when the start script says so; for every other session this is null. */
-/**
- * A number the operator set, or nothing when they set nothing. Garbage fails at startup: a NaN tick
- * interval becomes a 1ms loop, a NaN worker cap silences the fleet, and neither says why.
- */
 export interface SweepReport {
   removed: number
   /** Settled checkouts kept because they hold commits that exist on no remote: deleting these deletes work. */
@@ -1395,7 +1331,8 @@ function workerToken(file: string, warn: (event: string, fields: Record<string, 
   }
 }
 
-/** The panel's POST secret, made once per state directory: pause and stop are writes, and localhost is not a credential. */
+export const awaitsAHumanState = (state: string): boolean => state === 'blocked' || state === 'waiting'
+
 /**
  * Tickets to retire because the thread already has an older ticket with a live worker.
  *
@@ -1410,8 +1347,6 @@ function workerToken(file: string, warn: (event: string, fields: Record<string, 
  * The invariant lives at dispatch: at most one ticket per thread may have a live worker. Earliest worker wins,
  * ties break on id, so the sweep does not move under a rerun.
  */
-export const awaitsAHumanState = (state: string): boolean => state === 'blocked' || state === 'waiting'
-
 export function duplicateLiveTickets(
   open: readonly Ticket[],
   liveWorkers: readonly { ticketId?: string }[],
@@ -1473,6 +1408,7 @@ export function stalledTickets(
   return out
 }
 
+/** The panel's POST secret, made once per state directory: pause and stop are writes, and localhost is not a credential. */
 export function panelToken(dataDir: string): string {
   const file = join(dataDir, 'panel-token')
   try { const seen = readFileSync(file, 'utf8').trim(); if (seen) return seen } catch { /* the first start makes it */ }
@@ -1481,6 +1417,10 @@ export function panelToken(dataDir: string): string {
   return secret
 }
 
+/**
+ * A number the operator set, or nothing when they set nothing. Garbage fails at startup: a NaN tick
+ * interval becomes a 1ms loop, a NaN worker cap silences the fleet, and neither says why.
+ */
 function positiveNumber(name: string, raw: string | undefined): number | undefined {
   if (raw === undefined || raw.trim() === '') return undefined
   const value = Number(raw)
@@ -1488,6 +1428,7 @@ function positiveNumber(name: string, raw: string | undefined): number | undefin
   return value
 }
 
+/** A session is the router only when the start script says so; for every other session this is null. */
 export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   if (env.PI_SUPERAGENT_ROLE !== 'router') return null
   const dataDir = env.PI_SUPERAGENT_STATE
