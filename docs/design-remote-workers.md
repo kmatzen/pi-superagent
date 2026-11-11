@@ -37,8 +37,9 @@ atscloud server (one home for the fleet)          laptop (window)
 
 ## What must move (a checklist, not a hope)
 
-1. **Provision** (`scripts/provision-remote`, re-runnable): node + npm, `pi`, `pi-superagent` from
-   the packed tarball, `gh`, git identity (the bot), tmux, `herdr`, proxy exports, the workers root.
+1. **Provision** (`scripts/provision-remote` + `scripts/provision-harness`, both re-runnable):
+   node + npm, `pi`, `pi-superagent` from the packed tarball, `gh`, git identity (the bot), tmux,
+   `herdr`, proxy exports, the workers root — and the pi harness, skills and extensions included.
 2. **Secrets**: the bot gh token and worker token files, 0600, inside a home directory the audit
    proves is not world-readable (atscloud is multi-user — this is the one security step with teeth).
    The operator's keychain stays on the laptop. API keys stay behind doorman; a worker that needs
@@ -64,6 +65,17 @@ atscloud server (one home for the fleet)          laptop (window)
   are the same controls as today; disk gets the byte budget at the new work root.
 - Nothing about dedupe, receipts, close rules, or formal proofs changes: the engine does not know
   what OS it runs on, and that is the point.
+
+## The harness ships with the fleet
+
+A worker is its harness — skills, extensions, `AGENTS.md`, the voice files, model and trust
+settings. Workers load `~/.pi/agent` on their own box, so the move is not real until the harness is
+there too (`scripts/provision-harness`): a manifest of the portable parts (not sessions, logs,
+backups, caches, `node_modules`), the laptop's home prefix rewritten to the server's in the JSON
+that carries it, provider credentials (`auth.json`) at 0600 beside the git tokens, and the npm
+packages reinstalled from `npm/package.json` — the manifest's truth, not 398 MB of copied
+laptop binaries. The laptop-only services behind some MCP servers and doorman stay laptop-only; a
+worker that needs one asks the way it asks today, and the pilot records which asks need a lane.
 
 ## Pilot, then cut over
 
