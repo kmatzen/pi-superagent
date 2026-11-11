@@ -108,7 +108,12 @@ export class HerdrWorkers {
           // meter and no compaction affordance, so it packed up at a fraction of its window and the fleet read
           // that as early termination. The role module rides alongside, and the bot's GH_TOKEN is named in the
           // tab env at the launch site, not inherited.
-          name, kind: 'pi', pane, timeoutMs: this.options.startTimeoutMs ?? 120_000,
+          // 5 minutes, not the 2 this used to allow: a worker now loads the operator's whole harness
+          // (operator, 2026-11-10: agents should have all the power), and a pi that boots 20 extensions
+          // plus MCP servers does not reach its prompt inside 120 s. Measured the same day: the first
+          // launches after that change failed with "herdr agent start: timed out waiting for agent
+          // startup" on issue #145, and the router retried every poll with no worker on the ticket.
+          name, kind: 'pi', pane, timeoutMs: this.options.startTimeoutMs ?? 300_000,
           args: ['--session-id', sessionId, '--extension', roleModule],
         })
       } catch (error) {

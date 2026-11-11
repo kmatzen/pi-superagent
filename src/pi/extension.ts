@@ -253,7 +253,13 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
           // thread, its worker's assignment ended, nothing live on it. A ticket that finished (ready) is
           // not entitled to a new worker, and neither is one a worker is running on right now.
           const ask = repos.tickets.open().find(t => t.channels[0]?.thread === key)
-          if (!standingAskEntitled(ask, executor.workers())) return false
+          // A thread with no ticket at all is the starved case, and after a router restart it is the common one:
+          // intake only fires on first sight (the seen set is persisted, so a restart does not re-sight an old
+          // issue), and the predicate below needs an ended assignment to reason about. Measured 2026-11-10 at
+          // 23:55Z, minutes after the operator shut the sessions down: nine open issues had never had a ticket,
+          // `starved=9`, and nothing in the engine would start one. No ticket means nothing is being churned,
+          // so the same two-a-day cap is the only bound it needs.
+          if (ask !== undefined && !standingAskEntitled(ask, executor.workers())) return false
           const day = (deps.now ? deps.now() : new Date().toISOString()).slice(0, 10)
           const next = regrantPlan(repos.kv.get<RegrantCounters>(REGRANT_KEY), key, day)
           if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day }); return false }
@@ -642,7 +648,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
   const herdrWorkers = cfg.workers === 'herdr'
     ? new HerdrWorkers({ herdr: deps.herdr ?? herdrCli(cfg.herdrBin), stateDir: cfg.dataDir, log,
-      ...(cfg.herdrWorkspace ? { workspaceLabel: cfg.herdrWorkspace } : {}), ...deps.workerTiming })
+      ...(cfg.herdrWorkspace ? { workspaceLabel: cfg.herdrWorkspace } : {}), ...deps.workerTiming, ...(cfg.workerStartMs ? { startTimeoutMs: cfg.workerStartMs } : {}) })
     : undefined
 
   const executor = new PiExecutor(engine, {
@@ -1494,6 +1500,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const panelPort = positiveNumber('PI_SUPERAGENT_PANEL_PORT', env.PI_SUPERAGENT_PANEL_PORT)
   const keepWorktrees = positiveNumber('PI_SUPERAGENT_KEEP_WORKTREES', env.PI_SUPERAGENT_KEEP_WORKTREES)
   const workerTokenFile = env.PI_SUPERAGENT_WORKER_TOKEN_FILE?.trim()
+  const workerStartMs = positiveNumber('PI_SUPERAGENT_WORKER_START_MS', env.PI_SUPERAGENT_WORKER_START_MS)
   const workerQuietMinutes = positiveNumber('PI_SUPERAGENT_WORKER_QUIET_MINUTES', env.PI_SUPERAGENT_WORKER_QUIET_MINUTES)
   const deadlineHours = positiveNumber('PI_SUPERAGENT_WORKER_DEADLINE_HOURS', env.PI_SUPERAGENT_WORKER_DEADLINE_HOURS)
   const reportCap = positiveNumber('PI_SUPERAGENT_REPORT_CAP', env.PI_SUPERAGENT_REPORT_CAP)
@@ -1511,6 +1518,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(panelPort === undefined ? {} : { panelPort }),
     ...(keepWorktrees === undefined ? {} : { keepWorktrees: Math.floor(keepWorktrees) }),
     ...(workerTokenFile ? { workerTokenFile } : {}),
+    ...(workerStartMs ? { workerStartMs } : {}),
     ...(workerQuietMinutes === undefined ? {} : { workerQuietMinutes }),
     ...(deadlineHours === undefined ? {} : { workerDeadlineHours: deadlineHours }),
     ...(reportCap === undefined ? {} : { reportCap: Math.floor(reportCap) }),

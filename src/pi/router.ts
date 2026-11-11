@@ -19,6 +19,8 @@ export interface RouterConfig {
    * that token instead of as the operator. Unset, the brief tells the worker it cannot push.
    */
   workerTokenFile?: string
+  /** Seconds a worker session gets to reach its prompt; the default is 5 minutes. */
+  workerStartMs?: number
   /** Report a worker that has run this long without finishing. Reports; never kills. */
   workerDeadlineHours?: number
   /**
