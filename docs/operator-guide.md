@@ -316,14 +316,14 @@ curl -X POST -H "x-superagent-request: 1" -H "x-superagent-token: $(cat ~/.pi/su
   -H 'content-type: application/json' -d '{"paused":true}' http://127.0.0.1:8788/api/executor/pause
 ```
 
-## What a worker is given (2026-11-10)
+## What a worker is given (2026-11-11)
 
-A ticket's text is prompt content, so a worker session now starts with `--no-extensions` (the harness in
-`~/.pi/agent` is yours, with your watchers and your credentials) and a `HOME` under
-`<state>/worker-homes/<ticket>`, with `PI_SUPERAGENT_GITHUB_TOKEN_FILE`, `PI_OPS_*`, `SSH_AUTH_SOCK`,
-`GH_TOKEN`, `GITHUB_TOKEN` and cloud credential names removed from its environment.
+A worker runs as you. It is a pi in a herdr tab with your whole harness loaded, your `HOME`, your keys and your
+logins (operator, 2026-11-10: "agents should have all the power"). Its `gh` acts as the bot: the router names
+the bot's token file in the tab (`PI_SUPERAGENT_WORKER_TOKEN_FILE`, from `PI_SUPERAGENT_WORKER_TOKEN_FILE` in
+config.env), and the worker role reads it, so the token never appears on a command line.
 
-The consequence to plan for: a worker can no longer run `gh` as you, so it cannot open a pull request
-with your login. It works in its checkout, commits to its branch, and reports; the router's receipts and
-reports carry the ticket. To hand a worker GitHub access, give it a fine-grained single-repository token
-in that home directory — do not restore the ambient login, which is the operator's whole account.
+What bounds a worker is the guard in its own pi: the commands in `PI_SUPERAGENT_BLOCKED` are refused, and writes
+stay inside its workspace. A per-worker `HOME` existed in the code until 2026-11-11 and never reached a herdr
+worker; it is gone, and the router deletes `<state>/worker-homes` at startup. Plan on that trust: a ticket's text
+is prompt content, so only people you would hand your terminal to should be able to file work.

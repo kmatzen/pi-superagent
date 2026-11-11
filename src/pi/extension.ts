@@ -595,8 +595,6 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         root: cfg.worktreeRoot, ticketId: ticket.id, stateDir: cfg.dataDir,
         ...(cfg.prepare ? { prepare: cfg.prepare } : {}),
         ...(cfg.blockedCommands ? { blockedCommands: cfg.blockedCommands } : {}),
-        ...(token ? { workerToken: token } : {}),
-        ...(cfg.githubSelf ? { identity: { name: cfg.githubSelf, email: `${cfg.githubSelf}@users.noreply.github.com` } } : {}),
       })
       // In asks-only mode the watched repository is the ask board: cloning it put a checkout with no code in
       // it in front of every worker, and a ticket naming no repository then ran for a day in an empty directory.
@@ -992,11 +990,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const pruned = repos.pruneClosedTickets(new Date(Date.now() - 90 * 86_400_000).toISOString())
     if (pruned) log.line('info', 'tickets.pruned', { removed: pruned, olderThanDays: 90 })
     const swept = await sweepWorktrees(cfg.worktreeRoot, openIds, cfg.keepWorktrees ?? 20)
-    const homes = sweepHomes(join(cfg.dataDir, 'worker-homes'), openIds)
-    if (swept.removed || swept.keptWork || homes) {
+    // The per-worker HOMEs are gone from the code; their directory, with a copy of the bot token in each, goes too.
+    rmSync(join(cfg.dataDir, 'worker-homes'), { recursive: true, force: true })
+    if (swept.removed || swept.keptWork) {
       log.line('info', 'worktree.swept', {
         ...swept, keptWorkIds: swept.keptWorkIds.slice(0, 8), seconds: Math.round((Date.now() - beganSweep) / 1000),
-        kept: cfg.keepWorktrees ?? 20, homes,
+        kept: cfg.keepWorktrees ?? 20,
         note: swept.keptWork ? 'settled checkouts with commits on no remote are never deleted' : undefined })
     }
     if (!herdrWorkers) return
@@ -1305,18 +1304,6 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string>, ke
     try { rmSync(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
   }
   return report
-}
-
-/** Each worker gets a HOME under the state directory: configuration skeletons, a few KB, and one per ticket forever. */
-export function sweepHomes(root: string, open: ReadonlySet<string>): number {
-  let names: string[]
-  try { names = readdirSync(root) } catch { return 0 }
-  let removed = 0
-  for (const name of names) {
-    if (open.has(name)) continue
-    try { rmSync(join(root, name), { recursive: true, force: true }); removed++ } catch { /* in use: the next start tries again */ }
-  }
-  return removed
 }
 
 /** Read at every launch, so a rotated token lands on the next worker without a router restart. */

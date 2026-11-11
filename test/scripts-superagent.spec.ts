@@ -37,7 +37,9 @@ let state: string, herdrDir: string
 // place — and so the guard's cases can run the same command from a binary of their choosing.
 const envFor = (extra: Record<string, string> = {}) => ({
   ...process.env, PI_SUPERAGENT_STATE: state, PI_SUPERAGENT_HERDR: FAKE, PI_SUPERAGENT_GRACE: '1', FAKE_HERDR_DIR: herdrDir,
-  PI_SUPERAGENT_PANEL_PORT: String(PANEL_PORT), FAKE_HERDR_READY: join(state, 'ready'), ...extra,
+  PI_SUPERAGENT_PANEL_PORT: String(PANEL_PORT), FAKE_HERDR_READY: join(state, 'ready'),
+  // The checkout these tests run from is often mid-edit; the guard on it has its own test.
+  PI_SUPERAGENT_ALLOW_DIRTY: '1', ...extra,
 })
 const run = (args: string[], extra: Record<string, string> = {}) => spawnSync(SCRIPT, args, { encoding: 'utf8', env: envFor(extra) })
 /** The same command from a binary of the test's choosing: the guard must hold when `superagent` is a symlink. */
@@ -525,6 +527,28 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(run(['restart']).status, 'a clean URL restarts').toBe(0)
   })
 })
+
+  it('start refuses a checkout whose code has uncommitted changes, unless told otherwise', () => {
+    // 2026-11-10: an edit to this script, never committed, ran live and posted on the board.
+    const repo = mkdtempSync(join(tmpdir(), 'sa-guard-'))
+    mkdirSync(join(repo, 'scripts'))
+    mkdirSync(join(repo, 'src'))
+    copyFileSync(SCRIPT, join(repo, 'scripts', 'superagent'))
+    chmodSync(join(repo, 'scripts', 'superagent'), 0o755)
+    writeFileSync(join(repo, 'src', 'x.ts'), 'export const x = 1\n')
+    const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' })
+    git('init', '-q'); git('add', '-A'); git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'seed')
+    writeFileSync(join(repo, 'src', 'x.ts'), 'export const x = 2\n')
+    const bin = join(repo, 'scripts', 'superagent')
+    const refused = runFrom(bin, ['start'], { PI_SUPERAGENT_ALLOW_DIRTY: '' })
+    expect(refused.status).toBe(1)
+    expect(refused.stderr).toContain('uncommitted changes to the code it runs')
+    expect(refused.stderr).toContain('src/x.ts')
+    const forced = runFrom(bin, ['--allow-dirty', 'start'], { PI_SUPERAGENT_ALLOW_DIRTY: '' })
+    expect(forced.stderr, 'the override gets past the guard').not.toContain('uncommitted changes')
+    runFrom(bin, ['stop'], { PI_SUPERAGENT_ALLOW_DIRTY: '' })
+    rmSync(repo, { recursive: true, force: true })
+  })
 
   it('intake is gone with the labels: it says so, exits non-zero, and touches nothing on GitHub', () => {
     const bin = join(state, 'bin'); mkdirSync(bin, { recursive: true })
