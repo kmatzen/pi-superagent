@@ -38,8 +38,8 @@ feed, the only read that answers — and compares that moment with the router's 
 issue. A label older than the router's last reply is an ask it heard and answered; a label newer than it is
 a person asking a second time, which is the door intake keeps open. The check is deliberately *not* "a
 human applied it": `superagent intake` labels with the deployment's own token, so a real ask and the
-router's speech carry the same login (measured 2026-11-09: one board issue labelled by `matzen_adobe`,
-another by `matzenbot_adobe`, both deliberate). An unreadable answer fails open, because losing intake costs
+router's speech carry the same login (measured 2026-11-09: one board issue labelled by the operator login,
+another by the bot login, both deliberate). An unreadable answer fails open, because losing intake costs
 more than the loop the journal already stops. The trigger now names the label's author too: it used to
 credit the issue's author and hardcode `human: true`, which is what made every one of the 8 label triggers
 on one ticket read as the operator asking again.
