@@ -1,7 +1,7 @@
 /** A ticket's pull requests: their threads, their state, and what people say on those outside the watched repository. */
 import { createHash } from 'node:crypto'
 import { isListed } from './authors.ts'
-import { REPLY_MARKER, type IssueComment, type PositionStore, type PrReview } from './source-github.ts'
+import { CURSOR_LAG_MS, REPLY_MARKER, type IssueComment, type PositionStore, type PrReview } from './source-github.ts'
 import type { Ticket, ThreadRef, Trigger } from '../core/index.ts'
 
 export interface PullRef { repo: string; number: number }
@@ -316,7 +316,12 @@ export class PullFollower {
           `github:${id}:${createHash('sha1').update(`${c.author}\u0000${c.at}\u0000${c.body}`).digest('hex').slice(0, 16)}`))
       }
       // Committed once the engine holds what it produced: a crash before this line replays, and ids make replays free.
-      if (newest !== since) this.options.positions.set(sinceKey, new Date(Date.parse(newest) + 1).toISOString())
+      // The cursor sits CURSOR_LAG_MS behind real time (see source-github.ts), so a same-second comment that
+      // surfaces after this read is still ahead of the cursor on the next poll; the dedup makes the re-read free.
+      if (newest !== since) {
+        const settled = Math.min(Date.parse(newest) + 1, (this.options.now?.() ?? Date.now()) - CURSOR_LAG_MS)
+        this.options.positions.set(sinceKey, new Date(Math.max(Date.parse(since), settled)).toISOString())
+      }
       const seen = this.options.positions.get<number>(reviewKey) ?? 0
       let top = seen
       for (const r of await this.options.api.reviews(pull.repo, pull.number)) {

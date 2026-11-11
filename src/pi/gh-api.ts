@@ -230,12 +230,19 @@ export function ghPulls(options: GhOptions = {}): PullApi {
    * in the router's own voice. Absent and unreadable are different answers, and only the first one ends a wait.
    */
   const visibility = new Map<string, boolean>()
+  /**
+   * Whether this account can read a repository, asked once per repository — but only a 404 is a definitive
+   * "no", and only it is cached. A probe that fails any other way (a rate limit, a bad minute) says nothing
+   * about tomorrow: cached, it marked a readable repository unreadable for the life of the process, and every
+   * later 404 on its pulls read as permanently unreadable instead of absent. Uncached, the next pass asks again.
+   */
   const repoReadable = async (repo: string): Promise<boolean> => {
     const known = visibility.get(repo)
     if (known !== undefined) return known
-    // A probe that fails for any reason counts as unreadable: the safe reading of a repository the reader cannot
-    // confirm is that the pull request's state is unknown, which keeps the ticket waiting and says so.
-    const readable = await call(['api', `repos/${repo}`]).then(() => true, () => false)
+    const readable = await call(['api', `repos/${repo}`]).then(() => true, (error: unknown) => {
+      if (!/HTTP 404/.test(String(error))) throw error
+      return false
+    })
     visibility.set(repo, readable)
     return readable
   }
@@ -258,7 +265,9 @@ export function ghPulls(options: GhOptions = {}): PullApi {
         (r: CommentRow) => ({ issue: number, author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
     },
     async reviews(repo, number) {
-      const rows = JSON.parse((await call(['api', `repos/${repo}/pulls/${number}/reviews?per_page=100`])) || '[]') as ReviewRow[]
+      // Paged like every other read: a pull request's reviews past the first 100 were never seen by the
+      // follower, which then ended the ticket's wait on a review it never read.
+      const rows = await paged<ReviewRow>(call, page => `repos/${repo}/pulls/${number}/reviews?page=${page}`, r => r)
       return rows.filter(r => r.submitted_at).map(r => ({
         pr: number, repo, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at!, body: r.body ?? '',
       }))
