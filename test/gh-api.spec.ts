@@ -184,7 +184,7 @@ case "$*" in
   "api repos/x/y/pulls/404") echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
   "api repos/x/y/pulls/502") echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
   "api repos/x/y/issues/11/comments?"*since=*) echo '[{"user":{"login":"rev"},"author_association":"MEMBER","created_at":"2026-11-06T09:00:00Z","body":"rename it"}]' ;;
-  "api repos/x/y/pulls/11/reviews?per_page=100") echo '[{"id":5,"user":{"login":"rev"},"author_association":"OWNER","state":"APPROVED","submitted_at":"2026-11-06T09:30:00Z","body":""},{"id":6,"state":"PENDING"}]' ;;
+  "api repos/x/y/pulls/11/reviews?"*) echo '[{"id":5,"user":{"login":"rev"},"author_association":"OWNER","state":"APPROVED","submitted_at":"2026-11-06T09:30:00Z","body":""},{"id":6,"state":"PENDING"}]' ;;
   "api -X POST repos/x/y/issues/11/comments --input -") cat - > "$(dirname "$0")/posted.json" ;;
   *) echo "unexpected: $*" >&2; exit 1 ;;
 esac
@@ -229,6 +229,30 @@ exit 1
     expect(await api.pull('x/y', 404)).toBeUndefined()
     expect(await api.pull('x/y', 404), 'asked twice, because the follower reads on its interval').toBeUndefined()
     expect(gh.calls().filter(c => c === 'api repos/x/y'), 'visibility is asked once per repository').toHaveLength(1)
+  })
+
+  it('a probe that fails for a reason that is not a 404 is not cached as unreadable', async () => {
+    // Any probe failure used to be cached: one transient 500 marked a readable repository unreadable for the
+    // life of the process, and every later 404 on its pulls read as permanently unreadable instead of absent
+    // (audit 2026-11-11). Only a 404 is a definitive answer about tomorrow.
+    const dir = tmp()
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+printf '%s\n' "$*" >> "$(dirname "$0")/calls.log"
+case "$*" in
+  "api repos/x/y") if [ "$(cat "$(dirname "$0")/probe")" = down ]; then echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1; fi; echo '{"full_name":"x/y","private":false}' ;;
+  "api repos/x/y/pulls/404") echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    writeFileSync(join(dir, 'probe'), 'down')
+    const api = ghPulls({ bin })
+    await expect(api.pull('x/y', 404), 'the failed read is an error, never a closed pull request').rejects.toThrow(/502/)
+    writeFileSync(join(dir, 'probe'), 'up')
+    expect(await api.pull('x/y', 404), 'the repository is asked again, because the outage was not cached').toBeUndefined()
+    const calls = readFileSync(join(dir, 'calls.log'), 'utf8').trim().split('\n')
+    expect(calls.filter(c => c === 'api repos/x/y'), 'the probe ran on both reads').toHaveLength(2)
   })
 
   it("reads one pull request's comments from a time, and its submitted reviews, with each author's standing", async () => {
