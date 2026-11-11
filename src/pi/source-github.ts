@@ -91,6 +91,8 @@ export interface PositionStore {
 }
 
 const DAY_MS = 86_400_000
+/** Ten minutes of polls: past this, an issue missing from every listing is forgotten even without a close. */
+const MISSING_POLLS = 20
 
 /** A solo operator posts from the same login the agent replies from, so the author cannot identify the
  *  agent's own writing; the footer can. */
@@ -104,6 +106,8 @@ export class GithubSource {
    *  produced are in the engine — commit-at-emit + crash = cursor past a request never accepted. */
   private staged: Array<[string, unknown]> = []
   private lastOpen: ReadonlySet<string> | undefined
+  /** Polls in a row a seen issue has been missing from the open listing without GitHub saying it closed. */
+  private readonly missing = new Map<string, number>()
 
   constructor(private readonly api: GithubApi, private readonly options: GithubSourceOptions,
               private readonly store: PositionStore, private readonly now: () => number = () => Date.now()) {}
@@ -162,7 +166,15 @@ export class GithubSource {
     const openKeys = new Set(open.map(i => `#${i.issue}`))
     this.options.onOpen?.(open)
     // A closed issue leaves the seen set, so reopening it fires afresh: closing, then reopening, is a person saying go again.
-    for (const key of [...seen]) if (!openKeys.has(key)) seen.delete(key)
+    // Closed means GitHub says so: absence from one listing is a hint, and the listing has come back short (2026-11-11
+    // 01:18:52, six unanswered issues read as none), after which the next poll re-fired 12 live issues as new requests.
+    for (const key of [...seen]) {
+      if (openKeys.has(key)) { this.missing.delete(key); continue }
+      // Bounded: an issue deleted or moved away answers no close forever, and costs a read on every poll.
+      const misses = (this.missing.get(key) ?? 0) + 1
+      const state = misses > MISSING_POLLS ? 'closed' : this.api.issueState ? await this.api.issueState(Number(key.slice(1))) : 'closed'
+      if (state === 'closed') { seen.delete(key); this.missing.delete(key) } else this.missing.set(key, misses)
+    }
     for (const issue of open) {
       const key = `#${issue.issue}`
       if (!seen.has(key)) {
