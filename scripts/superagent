@@ -13,7 +13,7 @@
 # meaning, so a scheduled check can act on it without reading prose.
 set -uo pipefail
 
-usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] {init OWNER/REPO|start|stop|stop-ticket ID [REASON]|restart|status|remedy}"; }
+usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] [--allow-dirty] {init OWNER/REPO|start|stop|stop-ticket ID [REASON]|restart|status|remedy}"; }
 
 # Flags come first because every path below derives from the state directory: parsed after them, --state
 # moved the router's tab but left its stop marker, its place file and its settings in the default one.
@@ -22,6 +22,7 @@ while [ $# -gt 0 ]; do
     --session) SESSION_FLAG="$2"; shift 2 ;;
     --state) STATE_FLAG="$2"; shift 2 ;;
     --respect-stop) RESPECT_STOP=1; shift ;;
+    --allow-dirty) ALLOW_DIRTY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     init)
       [ "$#" -eq 2 ] && [[ "$2" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$ ]] && [[ "${2#*/}" != "." && "${2#*/}" != ".." ]] || { usage >&2; exit 2; }
@@ -182,6 +183,20 @@ watched_checkouts() {
   return 0
 }
 
+# The router and every worker load this checkout's files as they are, so an uncommitted edit here goes live on the
+# next start, unreviewed and untested: on 2026-11-10 an edit to this script ran live and posted on the board.
+code_guard() {
+  [ -n "${ALLOW_DIRTY:-}${PI_SUPERAGENT_ALLOW_DIRTY:-}" ] && return 0
+  git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  local dirty
+  dirty="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no -- src scripts 2>/dev/null | head -5)"
+  [ -z "$dirty" ] && return 0
+  echo "the router was not started: $REPO_ROOT has uncommitted changes to the code it runs:" >&2
+  printf '%s\n' "$dirty" >&2
+  echo "commit them, or start anyway with --allow-dirty" >&2
+  return 1
+}
+
 git_credential_guard() {
   local dir file hit bad=0 line seen=' '
   while IFS= read -r dir; do
@@ -227,6 +242,7 @@ start() {
   # A deployment that stores its credential in a world-readable URL is not a deployment to bring up: the
   # router's own workers are the readers. Refuse before herdr, the port and the tab, so the fix is the first
   # thing the operator reads and nothing is half-started.
+  code_guard || return 1
   git_credential_guard || { echo "the router was not started: a watched checkout keeps its git credential in the remote URL" >&2; return 1; }
   if ! herdr_up; then
     echo "herdr is not reachable: the router runs only in herdr, so it was not started" >&2

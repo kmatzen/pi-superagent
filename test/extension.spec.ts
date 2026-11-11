@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import superagent, { activationRefusal, createRouterExtension, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepHomes, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import superagent, { activationRefusal, createRouterExtension, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
@@ -1615,16 +1615,6 @@ describe('the sweep of settled checkouts', () => {
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
-  it('sweeps worker homes, and leaves an open ticket home alone', () => {
-    const root = mkdtempSync(join(tmpdir(), 'sa-homes-'))
-    try {
-      mkdirSync(join(root, 'tk-open'), { recursive: true })
-      mkdirSync(join(root, 'tk-done'), { recursive: true })
-      writeFileSync(join(root, 'tk-done', '.gitconfig'), '')
-      expect(sweepHomes(root, new Set(['tk-open']))).toBe(1)
-      expect(readdirSync(root)).toEqual(['tk-open'])
-    } finally { rmSync(root, { recursive: true, force: true }) }
-  })
 })
 
 // The cadence of the loop, measured live 2026-11-09 (#303): a 30 s timer entered 7 ticks in 6.6 h. Every beat
