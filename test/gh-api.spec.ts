@@ -95,13 +95,13 @@ describe('ghApi', () => {
     expect(await api.comments()).toEqual([{ issue: 12, author: 'octocat', association: 'COLLABORATOR', at: '2026-11-05T09:00:00Z', body: 'ship it' }])
   })
 
-  it('reads the author, creation time, labels an open issue carries', async () => {
+  it('reads the author and creation time of an open issue, and none of its labels', async () => {
     const gh = fakeGh('[]', JSON.stringify([{
       number: 3, title: 'DO: the thing', labels: [{ name: 'agent-ready' }], user: { login: 'octocat' }, author_association: 'OWNER',
       created_at: '2026-11-05T09:00:00Z', updated_at: '2026-11-05T10:00:00Z',
     }]))
     expect(await ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [] }).issues('open')).toEqual([
-      { issue: 3, title: 'DO: the thing', body: '', labels: ['agent-ready'], author: 'octocat', association: 'OWNER',
+      { issue: 3, title: 'DO: the thing', body: '', author: 'octocat', association: 'OWNER',
         createdAt: '2026-11-05T09:00:00Z', updatedAt: '2026-11-05T10:00:00Z' },
     ])
   })
@@ -112,7 +112,7 @@ describe('ghApi', () => {
       { number: 4, title: 'a PR', body: 'diff', labels: [], user: { login: 'octocat' }, created_at: '2026-11-05T09:00:00Z', updated_at: '2026-11-05T10:00:00Z', pull_request: { url: 'u' } },
     ]))
     expect(await ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [] }).issues('open')).toEqual([
-      { issue: 3, title: 'DO: x', body: 'the details', labels: [], author: 'octocat', association: 'NONE',
+      { issue: 3, title: 'DO: x', body: 'the details', author: 'octocat', association: 'NONE',
         createdAt: '2026-11-05T09:00:00Z', updatedAt: '2026-11-05T10:00:00Z' },
     ])
   })
@@ -371,54 +371,20 @@ describe('paged GitHub reads', () => {
     expect((await api.reviews!(0)).length).toBe(120)
   })
 
-  it('spends the intake label and closes the issue a ticket finished on', async () => {
-    // Issue #309: the label is the operator handing one issue over, so the router takes it off after hearing
-    // it, and a ticket that ends with nothing to wait on closes the issue intake was reading.
+  it('closes the issue a ticket finished on', async () => {
     const dir = tmp()
     writeFileSync(join(dir, 'gh'), `#!/bin/bash
 echo "$*" >> "$(dirname "$0")/calls.log"
-case "$*" in
-  *labels/gone*) echo 'gh: Label does not exist (HTTP 422)' >&2; exit 1 ;;
-  *labels/forbidden*) echo 'gh: HTTP 403 (Forbidden)' >&2; exit 1 ;;
-esac
 echo '{}'
 `)
     chmodSync(join(dir, 'gh'), 0o755)
     const api = ghApi({ repo: 'o/r', bin: join(dir, 'gh'), followed: () => [] })
-    await api.removeLabel!(7, 'agent-requested')
     await api.closeIssue!(7)
-    const calls = readFileSync(join(dir, 'calls.log'), 'utf8')
-    expect(calls).toContain('api -X DELETE repos/o/r/issues/7/labels/agent-requested')
-    expect(calls).toContain('api -X PATCH repos/o/r/issues/7 -f state=closed')
-    // A label that is already off is the state the caller wanted; a token without rights is a real failure,
-    // and the source's grant journal is what stops the re-ask when the write cannot be made.
-    await expect(api.removeLabel!(7, 'gone')).resolves.toBeUndefined()
-    await expect(api.removeLabel!(7, 'forbidden')).rejects.toThrow(/403/)
+    expect(readFileSync(join(dir, 'calls.log'), 'utf8')).toContain('api -X PATCH repos/o/r/issues/7 -f state=closed')
   })
 
-  it('reads who applied a label, and when, from the newest labeled event naming it', async () => {
-    // Issue #309's second lock: the events feed is GitHub's only answer to "who labelled this", and the label
-    // path needs it after a lost grant journal, where a receipt older than the label must not read as a new ask.
-    const dir = tmp()
-    const ev = (name: string, actor: string, at: string) => ({ event: 'labeled', label: { name }, actor: { login: actor }, created_at: at })
-    // Page 1 is full, so the read has to ask for page 2, and the newest match across pages is the answer.
-    const page1 = [...Array(99).keys()].map(i => ev('bug', `user${i}`, '2026-11-08T00:00:00Z'))
-      .concat([ev('agent-requested', 'matzen_adobe', '2026-11-09T05:51:21Z')])
-    writeFileSync(join(dir, 'events.7.1.json'), JSON.stringify(page1))
-    writeFileSync(join(dir, 'events.7.2.json'), JSON.stringify([
-      ev('needs-decision', 'matzenbot_adobe', '2026-11-09T06:00:00Z'),
-      ev('agent-requested', 'octocat', '2026-11-09T07:00:00Z'),
-    ]))
-    writeFileSync(join(dir, 'gh'), `#!/bin/bash
-n="$(printf '%s' "$2" | sed -e 's|.*issues/||' -e 's|/events.*||')"
-p="$(printf '%s' "$2" | sed -e 's|.*page=||')"
-f="$(dirname "$0")/events.$n.$p.json"
-if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
-`)
-    chmodSync(join(dir, 'gh'), 0o755)
-    const api = ghApi({ repo: 'o/r', bin: join(dir, 'gh'), followed: () => [] })
-    expect(await api.labelEvent!(7, 'agent-requested'), 'the newest labeled event for that label, across pages')
-      .toEqual({ actor: 'octocat', at: '2026-11-09T07:00:00Z' })
-    expect(await api.labelEvent!(7, 'agent-ready'), 'a label the issue never carried is no event').toBeUndefined()
+  it('has no label read or write: labels are gone', () => {
+    const api = ghApi({ repo: 'o/r', bin: '/nonexistent/gh', followed: () => [] }) as unknown as Record<string, unknown>
+    expect(['addLabel', 'removeLabel', 'labelEvent'].filter(name => name in api)).toEqual([])
   })
 })

@@ -19,7 +19,8 @@ when the operator connected a repository. The source now saves the initial set o
 seeds the review cursor. Closing and reopening an issue makes it eligible again. Its updated
 timestamp distinguishes the new trigger from the earlier one. See `Intake.tla` C1 and C2.
 
-**Spend the intake label, and close the issue a ticket finished on.** That timestamp is GitHub's
+**Spend the intake label, and close the issue a ticket finished on.** *(The label half is superseded: see
+"Delete the labels" below. Closing the finished issue stands.)* That timestamp is GitHub's
 `updated_at`, and GitHub moves it when a comment lands — including the router's own receipt. A
 labelled issue therefore re-asked on every poll, and the router's speech was what recruited the next
 worker: measured 2026-11-09, 26-31 label triggers in a burst at every completed tick, one ticket
@@ -30,7 +31,7 @@ label comes off. A finished ticket then closes its issue, because intake hears o
 `ready` report with no pull request leaves nothing to wait on. A person's comment, or a reopen,
 still starts the work: that is new inbound speech, and the only thing that is.
 
-**Check the label's author and its moment, not just the journal.** The journal above is per-repository
+**Check the label's author and its moment, not just the journal.** *(Superseded: see "Delete the labels".)* The journal above is per-repository
 state, so it does not survive a rebuilt database, and a label a token without rights cannot take off is a
 standing ask with nothing behind it. The second lock asks GitHub who applied the label — the issue events
 feed, the only read that answers — and compares that moment with the router's own last reply on the
@@ -43,6 +44,16 @@ more than the loop the journal already stops. The trigger now names the label's 
 credit the issue's author and hardcode `human: true`, which is what made every one of the 8 label triggers
 on one ticket read as the operator asking again.
 
+**Delete the labels.** The operator retired them on 2026-11-10 ("These labels are obsolete"; "unlabeled
+issues should absolutely be processed"), and on 2026-11-11 the router still wrote `agent-requested` on every
+re-grant, read a journal of label grants, and asked GitHub who applied each label. All of it is gone: the
+source reads no label and writes none, `superagent intake` (which only stamped the label) exits with a note
+saying so, and a re-grant is a trigger marked `via: grant` and nothing else. What a label used to decide, the
+router decides from its own tickets (`regrantable`): an issue that never had a ticket is starved work, an
+open ticket qualifies by the state of its work, and an issue whose tickets all ended is never re-granted,
+because that is finished work waiting on its pull requests, or a stop. A person un-stops a ticket from the
+panel.
+
 **Stop a ticket that repeats itself.** The Nth report that lands with nothing new on the thread recruits
 a worker that can only report it again, so at `PI_SUPERAGENT_REPORT_CAP` (3) the ticket says so on itself
 and stops recruiting. The signature is the quiet thread, not the sentence: #255 wrote “Nothing to merge:
@@ -50,7 +61,7 @@ this pull request landed…”, then “The mandate is already satisfied…”, 
 request merged…”, and #227 wrote “eighty-sixth identical dispatch”, “Still waiting on one click”,
 “Resumed run: state is unchanged” — a fingerprint over the wording matches none of it, and their states
 flipped between `ready` and `blocked`. So the streak is the same report state with no new inbound speech
-between the reports, where the router's own receipt and the intake label are not speech. A person's
+between the reports, where the router's own receipt and a re-grant are not speech. A person's
 comment, or a report that changed state, restarts the count. The journal is the router's, not the
 aggregate's: an Assignment keeps its last report, so the 93 receipts of one worker session are one
 report in the ticket.

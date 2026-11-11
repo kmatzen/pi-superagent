@@ -55,7 +55,7 @@ async function boot(withTicket: boolean) {
     pullApi: { pull: async () => ({ open: true, merged: false, createdAt: new Date().toISOString() }), comments: async () => [], reviews: async () => [] } })
   await new Promise(r => running.tick().then(() => setTimeout(r as () => void, 30)))
   const addComment = (n: number, body: string) => {
-    if (!issues.some(i => i.issue === n)) issues.push({ issue: n, title: 'DO: the thing', labels: [], author: 'pi', association: 'OWNER',
+    if (!issues.some(i => i.issue === n)) issues.push({ issue: n, title: 'DO: the thing', author: 'pi', association: 'OWNER',
       createdAt: '2026-11-04T09:00:00Z', updatedAt: new Date().toISOString() })
     comments.push({ issue: n, author: 'octocat', association: 'OWNER', at: new Date().toISOString(), body })
   }
@@ -101,7 +101,7 @@ it('the panel links tickets to their GitHub issue and names the source', async (
   })
   await running.tick()
   issues.push({ issue: 150, title: 'DO: tidy the panel', body: 'Link tickets to issues.', author: 'octocat', association: 'OWNER',
-    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), labels: [] })
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
   await running.tick()
   running.assessor.waiting().forEach(w => running.assessor.decide(w.evalId, { kind: 'accept', title: 'Tidy the panel', scope: 'links', reason: 'asked', acknowledgement: 'on it' }))
   await running.tick()
