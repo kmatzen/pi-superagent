@@ -9,7 +9,7 @@ const runGit = promisify(execFile)
 import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
-import {GithubSource, isOperatorAsk, REPLY_MARKER, type GithubApi, type IssueState, QUEUE_LABEL, REQUEST_LABEL} from './source-github.ts'
+import {GithubSource, isOperatorAsk, REPLY_MARKER, type GithubApi, type IssueState} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type ReconcileReport } from './pulls.ts'
@@ -66,6 +66,14 @@ export const standingAskEntitled = (
 }
 
 export const REGRANT_CAP = 2
+
+/** May a thread be re-granted? An open ticket: by its work's state. No ticket ever: yes, it is starved work. Only
+ *  ended tickets: no, the work is decided (finished, awaiting its pull requests, or stopped) and would be duplicated. */
+export const regrantable = (
+  open: Parameters<typeof standingAskEntitled>[0],
+  everTicketed: () => boolean,
+  liveWorkers: readonly { ticketId?: string }[],
+): boolean => open ? standingAskEntitled(open, liveWorkers) : !everTicketed()
 export const REGRANT_KEY = 'router:regrant'
 export interface RegrantCounters { day: string, perIssue: Record<string, number> }
 export const regrantPlan = (counters: RegrantCounters | undefined, key: string, day: string,
@@ -218,9 +226,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     onCredentialRedacted: (count, where) => log.line('warn', 'github.credential_redacted', { where, count }),
     followed: () => followedPulls(repos.tickets.open(), cfg.githubRepo ?? ''),
   }) : undefined)
-  // Labelled work with no live ticket: the queue `running=8 cap=8` hides. Measured 2026-11-10: four asks sat
-  // unstarted, the oldest 45 hours, while every published number read healthy. The source owns the labels, so it
-  // hands the board over on every poll rather than the metric making a second API call.
+  // Open work with no live ticket: the queue `running=8 cap=8` hides. Measured 2026-11-10: four asks sat
+  // unstarted, the oldest 45 hours, while every published number read healthy. The source owns the board, so it
+  // hands it over on every poll rather than the metric making a second API call.
   let openBoard: readonly IssueState[] = []
   const starvation = (): { starved: number; oldestStarvedH: number; unanswered: number } => {
     // Two questions, two numbers, because one number answered both silently and disagreed with an audit twice.
@@ -243,23 +251,14 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
   const github = githubApi
     ? new GithubSource(githubApi, {
-        repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, requestLabel: REQUEST_LABEL,
-        onWarn: (event, fields) => log.line('warn', event, fields),
+        repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots,
         onOpen: (open) => { openBoard = open },
-        // The standing queue, given its launch back. The source decides when the ask qualifies (queue
-        // label, spent grant, nothing live); the counter here decides how often, and says no after.
+        // The standing queue, given its launch back: the source offers every open issue that is not an ask to
+        // the operator, this decides whether the work qualifies, and the counter decides how often.
         regrant: (issue, key) => {
-          // Qualified by the state of the work, not by a label journal: standing ask, a ticket on the
-          // thread, its worker's assignment ended, nothing live on it. A ticket that finished (ready) is
-          // not entitled to a new worker, and neither is one a worker is running on right now.
-          const ask = repos.tickets.open().find(t => t.channels[0]?.thread === key)
-          // A thread with no ticket at all is the starved case, and after a router restart it is the common one:
-          // intake only fires on first sight (the seen set is persisted, so a restart does not re-sight an old
-          // issue), and the predicate below needs an ended assignment to reason about. Measured 2026-11-10 at
-          // 23:55Z, minutes after the operator shut the sessions down: nine open issues had never had a ticket,
-          // `starved=9`, and nothing in the engine would start one. No ticket means nothing is being churned,
-          // so the same two-a-day cap is the only bound it needs.
-          if (ask !== undefined && !standingAskEntitled(ask, executor.workers())) return false
+          const onThread = (t: Ticket): boolean => t.channels[0]?.thread === key
+          const ask = repos.tickets.open().find(onThread)
+          if (!regrantable(ask, () => repos.tickets.list().some(onThread), executor.workers())) return false
           const day = (deps.now ? deps.now() : new Date().toISOString()).slice(0, 10)
           const next = regrantPlan(repos.kv.get<RegrantCounters>(REGRANT_KEY), key, day)
           if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day }); return false }
@@ -537,7 +536,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const SPEECH_GRACE_MS = 120_000
   /**
    * Did a person say anything on this ticket's thread after `after`? The router's own writing is not speech
-   * (it is the receipt the worker is answering again), the intake label is not speech (it is a grant), and a
+   * (it is the receipt the worker is answering again), a re-grant is not speech (the router asked, not a person), and a
    * pull request's edge is not speech either: #205 sat 2h13m waiting on CI and reported 48 times because
    * every check that finished, every recompute of `mergeable`, fired a pull Trigger that woke the worker.
    * Words from a person on the thread are the only thing that restarts the count.
@@ -550,7 +549,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       if (!trigger || trigger.source === 'pull') return false
       const author = String(trigger.meta?.author ?? trigger.actor?.id ?? '')
       if (author && isListed(author, new Set([cfg.githubSelf ?? cfg.self, ...(cfg.bots ?? [])]))) return false
-      return (trigger.meta?.via ?? 'comment') !== 'label'
+      // 'label' is how a grant was spelled by triggers stored before the labels were deleted (2026-11-11).
+      return !['grant', 'label'].includes(String(trigger.meta?.via ?? 'comment'))
     })
   const capRepeats = (ticket: Ticket, run: ReportedRun): void => {
     const cap = cfg.reportCap ?? 3
@@ -573,9 +573,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     })
     if (!ticket.ended) {
       // A stop by the router on a repeating loop, and it is deliberately the strong kind: `wake` refuses to
-      // resume a stopped ticket, so neither the router's receipt, a label trigger, nor a pull request's CI
-      // churn can put a session back on it. Re-asking is then a deliberate act — `superagent intake #NNN`,
-      // which relabels — which is what "new inbound speech" is allowed to look like.
+      // resume a stopped ticket, so neither the router's receipt, a re-grant, nor a pull request's CI churn can
+      // put a session back on it. A person un-stops it from the panel, which is the deliberate act.
       try {
         engine.stopTicket(ticket.id, `the same result was reported ${times} times, so the ticket stops here`, 'loop')
         log.line('info', 'ticket.repeat_stopped', { ticket: ticket.id, times, state: run.state })

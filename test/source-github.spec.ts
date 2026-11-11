@@ -8,7 +8,7 @@ const comment = (over: Partial<IssueComment> = {}): IssueComment => ({
   issue: 12, author: 'octocat', association: 'OWNER', at: at, body: 'ship the panel tonight', ...over,
 })
 const issue = (over: Partial<IssueState> = {}): IssueState => ({
-  issue: 12, title: 'DO: ship the panel', labels: [], author: 'octocat', association: 'OWNER',
+  issue: 12, title: 'DO: ship the panel', author: 'octocat', association: 'OWNER',
   createdAt: at, updatedAt: at, ...over,
 })
 
@@ -20,17 +20,14 @@ function fixture(comments: IssueComment[], issues: IssueState[], reviews: PrRevi
   const kv = new Map<string, unknown>()
   const store = { get: <T,>(k: string) => kv.get(k) as T | undefined, set: (k: string, v: unknown) => { kv.set(k, v) } }
   const posted: Array<{ issue: number; body: string }> = []
-  const labelsOff: Array<{ issue: number; label: string }> = []
   const api: GithubApi = {
     comments: async since => comments.filter(c => !since || Date.parse(c.at) >= Date.parse(since)),
     issues: async () => issues,
     postComment: async (issue, body) => { posted.push({ issue, body }) },
     reviews: async sinceId => reviews.filter(r => r.id > sinceId),
-    // The label write the router makes to spend an intake grant; a test that wants the write to fail deletes it.
-    removeLabel: async (issue, label) => { labelsOff.push({ issue, label }) },
   }
   const source = new GithubSource(api, { repo: 'o/r', self: 'superagent[bot]', bots: new Set(['github-actions[bot]']) }, store)
-  return { source, api, kv, store, posted, labelsOff }
+  return { source, api, kv, store, posted }
 }
 
 describe('GithubSource', () => {
@@ -43,196 +40,6 @@ describe('GithubSource', () => {
       threads: [{ source: 'github', id: '#12' }],
       channel: { source: 'github', thread: '#12', address: { issue: '12' } },
     })
-  })
-
-  it('labels do not gate the intake: an issue opened after the first look is a request whatever it carries', async () => {
-    const f = fixture([], [issue({ issue: 300, title: 'DO: cut 0.1.3' })])
-    f.source.bootstrap()
-    expect(await f.source.poll(), 'the first look is history, not a backlog').toHaveLength(0)
-    const next = fixture([], [issue({ issue: 300, title: 'DO: cut 0.1.3' }),
-                             issue({ issue: 301, title: 'DO: ship the panel', labels: ['agent-ready'] })])
-    next.store.set('source:github:o/r:issues', ['#300'])
-    next.source.bootstrap()
-    expect((await next.source.poll()).map(t => t.text), 'no label stands between an open issue and the fleet')
-      .toEqual(['DO: ship the panel'])
-  })
-
-  it('a label on an issue the seed recorded as history is the request the operator meant', async () => {
-    // Measured 2026-11-08: issues 205-268 opened before the router's first look, so the seed wrote them down as
-    // history and no worker took them for three days. `superagent intake` labels them; the label fires once.
-    const seed = fixture([], [issue({ issue: 205, title: 'DO: rotate the deploy keys' })])
-    seed.source.bootstrap()
-    expect(await seed.source.poll(), 'the first look stays history').toHaveLength(0)
-
-    // Every imported issue in that backlog is authored by the engine's own account, which the author guard
-    // rejects: the label is what makes it a request.
-    const f = fixture([], [issue({ issue: 205, title: 'DO: rotate the deploy keys', author: 'superagent[bot]',
-                                   labels: ['agent-requested'] })])
-    f.store.set('source:github:o/r:issues', ['#205'])
-    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested' }, f.store)
-    const fired = await f.source.poll()
-    expect(fired.map(t => t.text), 'the labelled issue enters the queue')
-      .toEqual(['DO: rotate the deploy keys'])
-    expect(fired[0]!.meta).toMatchObject({ via: 'label', author: 'superagent[bot]' })
-
-    const again = await f.source.poll()
-    expect(again, 'the grant is spent: the label asks once, and the router takes it off the issue').toHaveLength(0)
-    expect(f.labelsOff, 'the label leaves the issue with the request').toEqual([{ issue: 205, label: 'agent-requested' }])
-  })
-
-  it('a spent grant is taken off the issue, and a router that died mid-write finishes the job', async () => {
-    // The grant journal commits with the positions, at the next poll; a router that died before making the
-    // label write left the label sitting on an issue it had already heard, and a label on an issue is how the
-    // board says "ask". The next router takes it off. The one that died before the journal committed re-fires
-    // the ask, which is the at-least-once rule the read cursors follow, and the engine's id dedup swallows it.
-    const rows = [issue({ issue: 207, title: 'DO: rotate the deploy keys', author: 'superagent[bot]', labels: ['agent-requested'] })]
-    const f = fixture([], rows)
-    f.store.set('source:github:o/r:issues', ['#207'])
-    // The stand-in GitHub: taking the label off moves it out of the issue, as the write does there.
-    const api: GithubApi = {
-      ...f.api,
-      removeLabel: async (issue, label) => {
-        f.labelsOff.push({ issue, label })
-        const row = rows.find(i => i.issue === issue)
-        if (row) row.labels = row.labels.filter(l => l !== label)
-      },
-    }
-    const opts = { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested' }
-    const first = new GithubSource(api, opts, f.store)
-    expect(await first.poll(), 'the label asks once').toHaveLength(1)
-    expect(await first.poll(), 'the journal commits at the next poll, and the label comes off with it').toHaveLength(0)
-    expect(rows[0]!.labels, 'the issue no longer carries the ask').toEqual([])
-
-    const restarted = new GithubSource(api, opts, f.store)
-    expect(await restarted.poll(), 'a restart hears nothing from an issue it already served').toHaveLength(0)
-    expect(f.labelsOff, 'one label write, not one per poll').toEqual([{ issue: 207, label: 'agent-requested' }])
-
-    rows[0]!.labels = ['agent-requested']
-    expect((await restarted.poll()).map(t => t.text), 'a re-label asks again').toEqual(['DO: rotate the deploy keys'])
-  })
-
-  it('the intake grant is spent: the router\'s own receipt does not re-ask, and a new label does', async () => {
-    // The loop issue #309 is about: GitHub moves an issue's updated_at when a comment lands, and the router's
-    // receipt is a comment. Measured 2026-11-09 on the live board, 26-31 label triggers fired in a burst every
-    // completed poll, hours apart, each one waking a ticket whose work had finished.
-    const rows = [issue({ issue: 205, title: 'DO: merge the pull request', author: 'superagent[bot]',
-                          labels: ['agent-requested'] })]
-    const f = fixture([], rows)
-    f.store.set('source:github:o/r:issues', ['#205'])
-    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested' }, f.store)
-    expect(await f.source.poll()).toHaveLength(1)
-
-    // The label came off with the request, and the receipt moved the issue's update time: intake hears nothing.
-    rows[0]!.labels = []
-    rows[0]!.updatedAt = new Date().toISOString()
-    expect(await f.source.poll(), 'the router\'s own speech is not a request').toHaveLength(0)
-
-    // The board labels it again: that is a person asking a second time, and it is heard.
-    rows[0]!.labels = ['agent-requested']
-    rows[0]!.updatedAt = new Date().toISOString()
-    const second = await f.source.poll()
-    expect(second.map(t => t.text), 'a re-label is a new grant, so it asks again').toEqual(['DO: merge the pull request'])
-    expect(second[0]!.id).not.toEqual('github:#205:label:spent')
-  })
-
-  it('a label that cannot be taken off still asks only once', async () => {
-    // A token without label rights, or a label write that fails: the journal, not the write, is the guard.
-    const rows = [issue({ issue: 206, title: 'DO: rotate the keys', author: 'superagent[bot]', labels: ['agent-requested'] })]
-    const f = fixture([], rows)
-    f.store.set('source:github:o/r:issues', ['#206'])
-    f.api.removeLabel = async () => { throw new Error('gh api -X DELETE exited 1: HTTP 403 (Forbidden)') }
-    const warned: Array<Record<string, unknown>> = []
-    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested',
-                                         onWarn: (event, fields) => warned.push({ event, ...fields }) }, f.store)
-    expect(await f.source.poll()).toHaveLength(1)
-    rows[0]!.updatedAt = new Date().toISOString()
-    expect(await f.source.poll(), 'the label is still on the issue, and the grant journal is what stops it').toHaveLength(0)
-    expect(warned[0], 'this fixture has no label-actor read, and says so once').toMatchObject({ event: 'intake.label_actor_unavailable', issue: '#206' })
-    expect(warned.find(w => w.event === 'intake.label_failed'), 'the label write is complained about too').toMatchObject({ issue: '#206' })
-  })
-
-  it('a label older than the router\'s own reply is an ask it answered, not a second one', async () => {
-    // Lock 2, for the case the grant journal cannot outlive: the journal is gone (a rebuilt database, the
-    // 4000-key cap, a router moved to a new machine) and the issue still carries the label its own receipts
-    // followed. GitHub kept the order: the label at 21:46, and every one of #255's dispatches woke on a label
-    // trigger its own receipt had just re-minted, all of them human:true.
-    const rows = [issue({ issue: 255, title: 'MERGE: the pull request', author: 'superagent[bot]', labels: ['agent-requested'] })]
-    const f = fixture([], rows)
-    f.store.set('source:github:o/r:issues', ['#255'])
-    f.api.labelEvent = async () => ({ actor: 'superagent[bot]', at: new Date(Date.now() - 3 * HOUR).toISOString() })
-    f.api.commentsFor = async () => [comment({
-      issue: 255, author: 'superagent[bot]', at: new Date(Date.now() - HOUR).toISOString(),
-      body: '#255 ready: the pull request merged <!-- superagent -->',
-    })]
-    const warned: Array<Record<string, unknown>> = []
-    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested',
-                                         onWarn: (event, fields) => warned.push({ event, ...fields }) }, f.store)
-    expect(await f.source.poll(), 'a receipt after the label proves the ask was answered').toHaveLength(0)
-    expect(await f.source.poll(), 'a refused ask is spent, so it says nothing twice').toHaveLength(0)
-    expect(f.labelsOff, 'and its label leaves the issue, so the board reads it as heard').toEqual([{ issue: 255, label: 'agent-requested' }])
-    expect(warned[0]).toMatchObject({ event: 'intake.label_stale', issue: '#255', by: 'superagent[bot]' })
-  })
-
-  it('a label that lands after the router\'s last reply is a person asking a second time, and it names them', async () => {
-    const rows = [issue({ issue: 255, title: 'MERGE: the pull request', author: 'superagent[bot]', labels: ['agent-requested'] })]
-    const f = fixture([], rows)
-    f.store.set('source:github:o/r:issues', ['#255'])
-    const labeledAt = new Date(Date.now() - 30 * 60_000).toISOString()
-    f.api.labelEvent = async () => ({ actor: 'octocat', at: labeledAt })
-    f.api.commentsFor = async () => [comment({
-      issue: 255, author: 'superagent[bot]', at: new Date(Date.now() - HOUR).toISOString(), body: 'ready: merged <!-- superagent -->',
-    })]
-    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', bots: new Set(['ci-*']), requestLabel: 'agent-requested' }, f.store)
-    const fired = await f.source.poll()
-    expect(fired.map(t => t.text), 'a new label is the door intake keeps open').toEqual(['MERGE: the pull request'])
-    // The asker is whoever applied the label, not the issue's author: crediting the author called the bot's
-    // own login a human, which is how a receipt read as the operator asking again.
-    expect(fired[0]).toMatchObject({ actor: { source: 'github', id: 'octocat' }, human: true,
-      meta: { via: 'label', author: 'superagent[bot]', labelActor: 'octocat', labeledAt } })
-  })
-
-  it('a label a bot applied is a grant, not a person\'s ask', async () => {
-    const rows = [issue({ issue: 256, title: 'DO: rescan the board', author: 'superagent[bot]', labels: ['agent-requested'] })]
-    const f = fixture([], rows)
-    f.store.set('source:github:o/r:issues', ['#256'])
-    f.api.labelEvent = async () => ({ actor: 'ci-bot', at: new Date(Date.now() - 30 * 60_000).toISOString() })
-    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', bots: new Set(['ci-*']), requestLabel: 'agent-requested' }, f.store)
-    const fired = await f.source.poll()
-    expect(fired.map(t => t.text), 'the ask is heard: intake labels with the deployment token, so the label is a grant').toEqual(['DO: rescan the board'])
-    expect(fired[0]!.human, 'a bot\'s label does not resume a ticket a person closed').toBe(false)
-  })
-
-  it('a label author GitHub cannot name costs the ask nothing, and one complaint', async () => {
-    // Losing intake is worse than the loop lock 1 already stops: every unreadable answer fires the ask.
-    const rows = [issue({ issue: 257, title: 'DO: rotate the keys', author: 'superagent[bot]', labels: ['agent-requested'] })]
-    const f = fixture([], rows)
-    f.store.set('source:github:o/r:issues', ['#257'])
-    f.api.labelEvent = async () => { throw new Error('gh api exited 1: HTTP 500') }
-    const warned: Array<Record<string, unknown>> = []
-    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested',
-                                         onWarn: (event, fields) => warned.push({ event, ...fields }) }, f.store)
-    expect(await f.source.poll()).toHaveLength(1)
-    expect(await f.source.poll(), 'the grant journal is spent, so the read is not made again').toHaveLength(0)
-    expect(warned.filter(w => w.event === 'intake.label_actor_unreadable'), 'one complaint per issue, not one per poll').toHaveLength(1)
-  })
-
-  it('a source without the label-actor read asks on the grant journal alone, and says so once', async () => {
-    const rows = [issue({ issue: 258, title: 'DO: rotate the keys', author: 'superagent[bot]', labels: ['agent-requested'] })]
-    const f = fixture([], rows)
-    f.store.set('source:github:o/r:issues', ['#258'])
-    const warned: Array<Record<string, unknown>> = []
-    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested',
-                                         onWarn: (event, fields) => warned.push({ event, ...fields }) }, f.store)
-    expect(await f.source.poll()).toHaveLength(1)
-    expect(await f.source.poll()).toHaveLength(0)
-    expect(warned.filter(w => w.event === 'intake.label_actor_unavailable')).toHaveLength(1)
-  })
-
-  it('an issue the seed recorded stays silent without the label', async () => {
-    const f = fixture([], [issue({ issue: 206, title: 'DO: rotate the deploy keys', labels: ['agent-ready'] })])
-    f.store.set('source:github:o/r:issues', ['#206'])
-    f.source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested' }, f.store)
-    expect(await f.source.poll(), 'a label the engine does not grant is not a request').toHaveLength(0)
   })
 
   it('a crash before the next poll rewinds the cursor: the request replays, same id — never lost', async () => {
@@ -466,93 +273,57 @@ describe('GithubSource', () => {
     expect(await f.source.poll()).toHaveLength(0)
   })
 
-  it('a standing ask with a spent grant gets its launch back, and the board sees the label return', async () => {
-    // The one-shot grant made a standing ask entitled to nothing after its first worker (measured
-    // 2026-11-10: 5 asks queued 57 hours with 8 free slots). The queue marker says it still wants an
-    // agent, so the router's counter hands the launch back once, and the label returns to the issue.
-    const f = fixture([], [issue({ issue: 214, title: 'DO: keep the panel green', labels: ['agent-ready'] })])
+  it('a standing ask gets its launch back when the router says yes, and nothing is written to the board', async () => {
+    // Labels are gone (operator, 2026-11-10): the re-grant is a trigger and nothing else. The api here has no
+    // label write at all, so a source that still tried to make one would fail this test by throwing.
+    const f = fixture([], [issue({ issue: 214, title: 'DO: keep the panel green' })])
     f.store.set('source:github:o/r:issues', ['#214'])
-    f.store.set('source:github:o/r:label-grants', ['#214'])
-    const labelsOn: Array<{ issue: number; label: string }> = []
-    f.api.addLabel = async (issue, label) => { labelsOn.push({ issue, label }) }
     const asked: string[] = []
     const source = new GithubSource(f.api, {
-      repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested', queueLabel: 'agent-ready',
+      repo: 'o/r', self: 'superagent[bot]',
       regrant: (_issue, key) => { const yes = asked.length === 0; asked.push(key); return yes },
     }, f.store)
     source.bootstrap()
-    expect((await source.poll()).map(tr => tr.text), 'the ask fires again').toEqual(['DO: keep the panel green'])
-    expect(labelsOn, 'the write rides the next poll, the same deferral that spends a grant').toEqual([])
+    const fired = await source.poll()
+    expect(fired.map(tr => tr.text), 'the ask fires again').toEqual(['DO: keep the panel green'])
+    expect(fired[0]).toMatchObject({ id: expect.stringMatching(/^github:#214:grant:/), meta: { via: 'grant', author: 'octocat' } })
     expect(await source.poll(), 'the counter says no the second time').toHaveLength(0)
-    expect(labelsOn, 'the grant returns to the board, so the launch is visible there').toEqual(
-      [{ issue: 214, label: 'agent-requested' }])
-    expect(f.kv.get('source:github:o/r:label-grants'), 'the journal prunes to labelled issues, so the counter is what caps the loop').toEqual([])
+    expect(f.kv.has('source:github:o/r:label-grants'), 'no grant journal is kept').toBe(false)
   })
 
-  it('an unlabelled issue is standing work, and an ask to the operator is not', async () => {
-    // Operator, 2026-11-10: "the labels were a requirement of the old fleet-board system which is now dead.
-    // unlabeled issues should absolutely be processed." Measured the same day: 17 of 20 open asks carried no
-    // label, and the queue-label fence meant the fleet was forbidden to touch every one of them.
+  it('an open issue is standing work, and an ask to the operator or a bot\'s issue is not', async () => {
+    // Operator, 2026-11-10: "unlabeled issues should absolutely be processed." The ask verb and the engine's own
+    // authorship keep an ask out of the queue; a bot's issue is not a person's request, as on first sight.
     const f = fixture([], [
-      issue({ issue: 220, title: 'rename the Export button to Ship', labels: [] }),
-      issue({ issue: 221, title: 'MERGE transmute 1290 once its gates are green', labels: [] }),
-      issue({ issue: 222, title: 'the panel is blank after a reload', labels: [], author: 'superagent[bot]' }),
+      issue({ issue: 220, title: 'rename the Export button to Ship' }),
+      issue({ issue: 221, title: 'MERGE transmute 1290 once its gates are green' }),
+      issue({ issue: 222, title: 'the panel is blank after a reload', author: 'superagent[bot]' }),
+      issue({ issue: 223, title: 'Bump the base image', author: 'github-actions[bot]' }),
     ])
-    f.store.set('source:github:o/r:issues', ['#220', '#221', '#222'])
-    f.store.set('source:github:o/r:label-grants', ['#220', '#221', '#222'])
+    f.store.set('source:github:o/r:issues', ['#220', '#221', '#222', '#223'])
     const asked: string[] = []
     const source = new GithubSource(f.api, {
-      repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested', queueLabel: 'agent-ready',
+      repo: 'o/r', self: 'superagent[bot]', bots: new Set(['github-actions[bot]']),
       regrant: (_issue, key) => { asked.push(key); return true },
     }, f.store)
     source.bootstrap()
     const fired = (await source.poll()).map(tr => tr.text)
-    expect(fired, 'a plain open issue is work with no label on it').toEqual(['rename the Export button to Ship'])
-    expect(asked, 'the ask verb and the engine authorship both keep an ask out of the queue').toEqual(['#220'])
+    expect(fired, 'a plain open issue is work').toEqual(['rename the Export button to Ship'])
+    expect(asked, 'only the person\'s plain issue is offered to the router').toEqual(['#220'])
   })
 
-  it('a grant on the issue is the label path, and the re-grant never fires on top of it', async () => {
-    const f = fixture([], [issue({ issue: 217, title: 'DO: land the panel', labels: ['agent-ready', 'agent-requested'] })])
-    f.store.set('source:github:o/r:issues', ['#217'])
-    let called = 0
-    const source = new GithubSource(f.api, {
-      repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested', queueLabel: 'agent-ready',
-      regrant: () => { called++; return true },
-    }, f.store)
-    source.bootstrap()
-    expect((await source.poll()).length, 'the ask fires once, through the label path').toBe(1)
-    expect(called, 'a live grant is not a re-grant').toBe(0)
-  })
-
-  it('a cap answer of no leaves a standing ask quiet, with no label write and no trigger', async () => {
-    const f = fixture([], [issue({ issue: 215, title: 'DO: watch the queue', labels: ['agent-ready'] })])
-    f.store.set('source:github:o/r:issues', ['#215'])
-    f.store.set('source:github:o/r:label-grants', ['#215'])
-    const labelsOn: Array<{ issue: number; label: string }> = []
-    f.api.addLabel = async (issue, label) => { labelsOn.push({ issue, label }) }
-    const source = new GithubSource(f.api, {
-      repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested', queueLabel: 'agent-ready',
-      regrant: () => false,
-    }, f.store)
-    source.bootstrap()
-    expect(await source.poll(), 'the cap is a real no').toHaveLength(0)
-    expect(labelsOn, 'a refused re-grant writes nothing to the board').toEqual([])
-  })
-
-  it('a label-less issue is standing work, and the router is the only thing that says no', async () => {
-    // The queue marker used to decide this, and the operator abolished the marker's authority on 2026-11-10.
+  it('the router is the only thing that says no to standing work, and a no fires nothing', async () => {
     // What keeps a finished issue from churning is the router's predicate (an ended assignment whose worker
-    // released, no live worker) and REGRANT_CAP of two launches a day, measured live on issues 357, 355, 209.
+    // released, no live worker, no ticket that already ended) and REGRANT_CAP of two launches a day.
     const f = fixture([], [issue({ issue: 216, title: 'DONE: shipped last week' })])
     f.store.set('source:github:o/r:issues', ['#216'])
-    f.store.set('source:github:o/r:label-grants', ['#216'])
     let called = 0
     const source = new GithubSource(f.api, {
-      repo: 'o/r', self: 'superagent[bot]', requestLabel: 'agent-requested',
+      repo: 'o/r', self: 'superagent[bot]',
       regrant: () => { called++; return false },
     }, f.store)
     source.bootstrap()
     expect(await source.poll(), 'the source asks, and the router answers no').toHaveLength(0)
-    expect(called, 'the absence of a label no longer keeps an issue out of the queue').toBe(1)
+    expect(called).toBe(1)
   })
 })
