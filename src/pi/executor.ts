@@ -107,7 +107,6 @@ export const finishedWork = (ticket: Ticket): boolean =>
 
 export class PiExecutor {
   private readonly live = new Map<string, Live>()
-  private readonly queue: Array<() => void> = []
   private tail: Promise<void> = Promise.resolve()
   /** ticket/assignment launches queued and not yet live: the loop calls start() every pass while one waits. */
   private readonly launching = new Set<string>()

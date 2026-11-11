@@ -85,7 +85,7 @@ up the conversation. [Architecture](docs/architecture.md) · [Design decisions](
 The ticket engine comes from DeepSeek’s dsh-superagent-prototype. Three TLA+ models check how
 tickets, incoming messages and worker tabs behave when events arrive in different orders. The models check
 the design: `scripts/check-formal` reads `formal/`, never `src/`, so a code change that leaves the design is
-caught by `npx vitest run` (492 tests) and not by TLC.
+caught by `npx vitest run` and not by TLC.
 [Upstream project](https://github.com/deepseek-ai/dsh-superagent-prototype) ·
 [Adaptation ledger](ADAPTATION.md) · [Formal verification](docs/formal-verification.md)
 
@@ -95,7 +95,7 @@ caught by `npx vitest run` (492 tests) and not by TLC.
 npm install
 npm run check            # Type-check and run the test suite
 npm run check:packed     # Install the tarball and exercise both the CLI and the pi extension
-scripts/check-formal     # Check all three models (about five minutes with a JDK)
+scripts/check-formal     # Check all three models (about 17 minutes with a JDK, measured 2026-11-11)
 .ci/ci.yml               # The GitHub Actions job: copy to .github/workflows/ (a token needs the `workflow`
                          # scope to push that path, which this repository's token does not have)
 ```
