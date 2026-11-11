@@ -142,22 +142,29 @@ describe('the panel and the API', () => {
     const f = await boot(true)
     const [open] = (await f.api('/api/tickets', '1')).json() as unknown as Array<{ id: string }>
     expect(f.running.workers().map(w => w.ticketId)).toEqual([open!.id])
-    const res = await fetch(`http://127.0.0.1:${f.port}/api/tickets/${open!.id}/stop`, { method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir) } })
-    expect(res.status).toBe(200)
-    expect((await f.api('/api/tickets', '1')).json()).toEqual([])
-    await new Promise(r => setTimeout(r, 30))
-    expect(f.running.workers(), 'the stop reached the worker').toEqual([])
-    const withReason = await fetch(`http://127.0.0.1:${f.port}/api/tickets/${open!.id}/stop`, {
+    const res = await fetch(`http://127.0.0.1:${f.port}/api/tickets/${open!.id}/stop`, {
       method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir), 'content-type': 'application/json' },
       body: JSON.stringify({ reason: 'it duplicates ticket 695488 on issue #145' }),
     })
-    expect(withReason.status).toBe(200)
-    expect(String((await withReason.json() as { reason?: string }).reason), "the caller's reason reaches the engine").toContain('duplicates ticket')
+    expect(res.status).toBe(200)
+    expect(String((await res.json() as { reason?: string }).reason), "the caller's reason reaches the engine").toContain('duplicates ticket')
+    expect((await f.api('/api/tickets', '1')).json()).toEqual([])
+    await new Promise(r => setTimeout(r, 30))
+    expect(f.running.workers(), 'the stop reached the worker').toEqual([])
+    const ticket = (await f.api(`/api/ticket?id=${open!.id}`, '1')).json() as { ended?: { reason?: string } }
+    expect(ticket.ended?.reason, 'the reason lands on the ticket record').toContain('duplicates ticket')
+    // A stop of a ticket that has already ended refuses instead of answering 200 over a lever that moved
+    // nothing: the ticket keeps its own end, and the caller is told (audit 2026-11-11).
+    const again = await fetch(`http://127.0.0.1:${f.port}/api/tickets/${open!.id}/stop`, {
+      method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir), 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'late' }),
+    })
+    expect(again.status).toBe(409)
+    expect(String((await again.json() as { error?: string }).error)).toContain('Ticket has ended')
     const badBody = await fetch(`http://127.0.0.1:${f.port}/api/tickets/${open!.id}/stop`, {
       method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir), 'content-type': 'application/json' }, body: '{oops',
     })
-    expect(badBody.status, 'a malformed body never blocks the stop the caller asked for').toBe(200)
-    expect(String((await badBody.json() as { reason?: string }).reason), 'and the default reason stands').toBe('stopped by the operator')
+    expect(badBody.status, 'a malformed body never blocks the refusal the caller gets').toBe(409)
     const missing = await fetch(`http://127.0.0.1:${f.port}/api/tickets/nope/stop`, { method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir) } })
     expect(missing.status).toBe(404)
     f.running.stop()
@@ -243,6 +250,20 @@ describe('the panel POST secret', () => {
     const before = (await f.api('/api/state', '1')).json() as { paused: boolean }
     const res = await fetch(`http://127.0.0.1:${f.port}/api/executor/pause`, {
       method: 'POST', body: '{"paused":true}', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1' },
+    })
+    expect(res.status).toBe(403)
+    const after = (await f.api('/api/state', '1')).json() as { paused: boolean }
+    expect(after.paused, 'a refused pause leaves the router running the same work').toBe(before.paused)
+  })
+
+  it('refuses a POST whose token is wrong, not only one that is missing', async () => {
+    // Only the missing-token path was pinned; a present-but-wrong token is the shape a confused caller
+    // (or a guesser) actually sends (audit 2026-11-11).
+    const f = await boot(true)
+    const before = (await f.api('/api/state', '1')).json() as { paused: boolean }
+    const res = await fetch(`http://127.0.0.1:${f.port}/api/executor/pause`, {
+      method: 'POST', body: '{"paused":true}',
+      headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': 'not-the-secret' },
     })
     expect(res.status).toBe(403)
     const after = (await f.api('/api/state', '1')).json() as { paused: boolean }

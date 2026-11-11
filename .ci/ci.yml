@@ -12,6 +12,9 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm ci
+      # The sdk-contract tests prove the surface this package is loaded by; without pi installed they skip
+      # silently, which is how the integration was only ever proven by hand at publish time (audit 2026-11-11).
+      - run: npm install -g @earendil-works/pi-coding-agent
       - run: npx tsc --noEmit
       - run: npx vitest run
   # About 17 minutes: nightly and on demand, so the private repo's Actions minutes last the month.

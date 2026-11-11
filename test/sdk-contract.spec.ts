@@ -16,17 +16,20 @@ function installedSdkPath(): string | null {
 }
 
 const sdkPath = installedSdkPath()
+const piPath = piOnPath()
 
-const skipWithoutPi = !sdkPath
+// Skipped, not silently passed: without these two lines the suite was green with pi absent and the SDK
+// contract — the thing standing between this package and a pi upgrade breaking it — was only ever proven
+// by hand at publish time (audit 2026-11-11). CI installs pi so these run there.
+const withoutPi = it.skipIf(!sdkPath)
+const withoutPiBinary = it.skipIf(!piPath)
 
-it('the installed pi exports exactly the surface the worker launcher uses', async () => {
-  if (skipWithoutPi) return
+withoutPi('the installed pi exports exactly the surface the worker launcher uses', async () => {
   const sdk = await import(sdkPath!)
   expect(probeSdk(sdk, installedPiVersion(sdkPath!))).toEqual({ ok: true, version: expect.any(String), problems: [] })
 }, 60_000)
 
-it('a session from the installed pi carries the members the launcher drives', async () => {
-  if (skipWithoutPi) return
+withoutPi('a session from the installed pi carries the members the launcher drives', async () => {
   const sdk = await import(sdkPath!)
   const created = await sdk.createAgentSession({
     cwd: process.cwd(),
@@ -47,9 +50,8 @@ function piOnPath(): string | null {
   }
 }
 
-it("inside pi, the router's loadSdk gets the running pi's own SDK, wherever pi is installed", () => {
-  const pi = piOnPath()
-  if (!pi) return
+withoutPiBinary("inside pi, the router's loadSdk gets the running pi's own SDK, wherever pi is installed", () => {
+  const pi = piPath!
   const dir = mkdtempSync(join(tmpdir(), 'sa-sdk-'))
   try {
     const result = join(dir, 'result.json')

@@ -6,7 +6,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-JAR="${TLA2TOOLS_JAR:-$HOME/.cache/tla2tools/tla2tools.jar}"
+# A version, not "latest": the jar is executed, so an unverified upstream release must not run here — and not
+# in the nightly CI job either (audit 2026-11-11). Bump TLA2TOOLS_VERSION deliberately; the cache path carries
+# the version, so a bump fetches fresh and leaves the old jar alone.
+TLA2TOOLS_VERSION="${TLA2TOOLS_VERSION:-v1.7.4}"
+JAR="${TLA2TOOLS_JAR:-$HOME/.cache/tla2tools/tla2tools-$TLA2TOOLS_VERSION.jar}"
 JAVA="${JAVA:-}"
 if [ -z "$JAVA" ]; then
   for c in /opt/homebrew/opt/openjdk/bin/java /usr/local/opt/openjdk/bin/java; do
@@ -19,8 +23,8 @@ fi
 
 if [ ! -f "$JAR" ]; then
   mkdir -p "$(dirname "$JAR")"
-  echo "fetching tla2tools.jar ..."
-  curl -sSL -o "$JAR" https://github.com/tlaplus/tlaplus/releases/latest/download/tla2tools.jar \
+  echo "fetching tla2tools.jar $TLA2TOOLS_VERSION ..."
+  curl -sSL -o "$JAR" "https://github.com/tlaplus/tlaplus/releases/download/$TLA2TOOLS_VERSION/tla2tools.jar" \
     || { rm -f "$JAR"; echo "check-formal: could not fetch $JAR"; exit 1; }
 fi
 
