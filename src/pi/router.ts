@@ -14,6 +14,8 @@ export interface RouterConfig {
   workerQuietMinutes?: number
   /** Settled checkouts to keep at startup, newest first. Measured: each one is about 570 MB. */
   keepWorktrees?: number
+  /** GB cap for the work root; settled checkouts over it are swept oldest-first. Default 200. */
+  workBudgetGb?: number
   /**
    * A file holding a scoped GitHub token to hand a worker, so it can push a branch and open a pull request as
    * that token instead of as the operator. Unset, the brief tells the worker it cannot push.

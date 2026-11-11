@@ -310,6 +310,40 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(existsSync(join(state, 'watchdog-restart'))).toBe(true)
   })
 
+  it('a healthy beat clears the restart cooldown: a loop that dies in the boot after a watchdog restart dies within reach of the watchdog again', () => {
+    // The 2026-11-11 outage lasted 25 min: the watchdog restarted the router, the loop died in that boot, and
+    // the cooldown refused to touch it for its full window.
+    started()
+    const stalled = '{"runtime":{"state":"ready"},"tick":{"state":"error","stage":"poll"}}'
+    writeFileSync(join(state, 'health.json'), stalled)
+    expect(run(['--respect-stop', 'remedy']).stdout).toMatch(/restarting the router/)
+    expect(existsSync(join(state, 'watchdog-restart'))).toBe(true)
+    writeFileSync(join(state, 'health.json'), '{"runtime":{"state":"ready"},"tick":{"state":"ok","n":1}}')
+    expect(run(['--respect-stop', 'remedy']).stdout).toMatch(/nothing to do/)
+    expect(existsSync(join(state, 'watchdog-restart')), 'the beat proved the restart worked').toBe(false)
+    writeFileSync(join(state, 'health.json'), stalled)
+    expect(run(['--respect-stop', 'remedy']).stdout, 'a second death is not swallowed by the cooldown of the recovery that preceded it').toMatch(/restarting the router/)
+  })
+
+  it('backup keeps one sqlite-safe copy of the database per day, and the last 14 days', () => {
+    execFileSync('sqlite3', [join(state, 'tickets.db'), 'create table t(x); insert into t values (42);'])
+    expect(run(['backup']).status).toBe(0)
+    const day = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    const dest = join(state, 'archive', `tickets-${day}.db`)
+    expect(existsSync(dest), "today's copy").toBe(true)
+    expect(execFileSync('sqlite3', [dest, 'select x from t']).toString().trim(), 'the copy is readable').toBe('42')
+    expect(run(['backup']).stdout).toMatch(/today's copy exists/)
+    rmSync(dest)
+    for (let i = 1; i <= 15; i++) {
+      const old = join(state, 'archive', `tickets-202610${String(i).padStart(2, '0')}.db`)
+      writeFileSync(old, 'x')
+      const when = new Date(Date.parse('2026-10-01T00:00:00Z') + i * 86_400_000)
+      utimesSync(old, when, when)
+    }
+    run(['backup'])
+    expect(readdirSync(join(state, 'archive')).length, 'today plus the 13 newest').toBe(14)
+  })
+
   it('the stall restart is rate limited, so a fault a restart cannot fix cannot restart the router forever', () => {
     started()
     const stalled = '{"runtime":{"state":"ready"},"tick":{"state":"error","stage":"poll"}}'

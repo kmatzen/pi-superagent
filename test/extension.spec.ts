@@ -490,6 +490,8 @@ describe('the router extension', () => {
     expect(stalledTickets([asked], live([]), now, grace), 'a worker that asked a human is parked, not stale').toEqual([])
     const done = t('a3', '2026-11-10T06:28:00.000Z', 'ended')
     expect(stalledTickets([done], live([]), now, grace), 'an ended assignment is not running').toEqual([])
+    const never = { id: 'a4', createdAt: '2026-11-10T06:28:00.000Z', channels: [{ source: 'github', thread: '#a4' }], assignments: [{ id: 'a4-a', state: 'running' }] } as never
+    expect(stalledTickets([never], live([]), now, grace), 'no startedAt is the boot race boot recovery owns: judged by creation age it fired every tick forever, 480 warnings a day on one ticket (2026-11-11)').toEqual([])
     const both = t('b1', '2026-11-10T04:33:00.000Z')
     expect(stalledTickets([old, both], live([]), now, grace), 'both real corpses get swept').toEqual(['464b69a8', 'b1'])
     // A queued launch is the launch queue's: releasing one does nothing, and its age read as the ticket's, so every
@@ -1506,6 +1508,21 @@ describe('a pull request per ticket', () => {
 })
 
 describe('the state a router start leaves behind', () => {
+  it('the byte budget sweeps settled checkouts oldest-first, and open tickets never pay for it', async () => {
+    // The count is not the cost: the kept set measured 58 GB on 2026-11-11 because one build tree is 15 GB.
+    const root = mkdtempSync(join(tmpdir(), 'sa-budget-'))
+    try {
+      for (const [name, age] of [['old', 9], ['mid', 5], ['tk-open', 7]] as const) {
+        mkdirSync(join(root, name))
+        writeFileSync(join(root, name, 'blob'), Buffer.alloc(1024 * 1024))
+        utimesSync(join(root, name), new Date(Date.now() - age * 86_400_000), new Date(Date.now() - age * 86_400_000))
+      }
+      const report = await sweepWorktrees(root, new Set(['tk-open']), 20, 1024 * 1024)
+      expect(report.removed, 'oldest goes first, and the count limit never rescued them').toBe(2)
+      expect(readdirSync(root), 'the open ticket keeps its workspace').toEqual(['tk-open'])
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
   it('keeps the newest settled checkouts and deletes the rest', async () => {
     // Measured live: 570 MB a checkout, 75 of them, nothing deleted any: 43 GB of audit trail.
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-'))
