@@ -271,8 +271,9 @@ export interface PolicyEffect {
 export type TicketEndBy = 'executor' | 'human'
 /**
  * Whose act stopped a ticket, which is the door a later message may walk through. `operator` is a person's stop
- * from the panel and `loop` is the router's repeat guard: both are un-stopped by a person, not by a comment, and
- * the loop stop's receipt says so on the issue. `conversation` is the router's stop because GitHub closed the
+ * from the panel and `loop` is the router's repeat guard: neither ticket resumes, and a person's comment on the
+ * thread goes to Eval, which may open a new ticket; the loop stop's receipt says so on the issue. `conversation`
+ * is the router's stop because GitHub closed the
  * issue, and the person who closed it is the one who reopens it: their speech on the thread is the re-ask
  * (`Tickets.wake`). Measured 2026-11-10: with only `human` to record, the closure stop shut every door the
  * notices promised, and a reopened issue with a fresh reply in it answered nothing.
@@ -327,8 +328,9 @@ export interface Execution { name: string; directory: string; assignment: string
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended
 /**
  * Whether a stopped ticket has a door for a person's message: only the conversation stop, whose ending was GitHub
- * closing the thread rather than a withdrawal of the Mandate. An operator's stop and the loop stop are un-stopped
- * by a person through the panel. A ticket that ended by its own report is not a stop and is outside this predicate.
+ * closing the thread rather than a withdrawal of the Mandate. An operator's stop and the loop stop stay stopped: a
+ * person's message on the thread goes to Eval, which may open a new ticket. A ticket that ended by its own report is
+ * not a stop and is outside this predicate.
  */
 export const resumableBySpeech = (ticket: Pick<Ticket, 'ended'>): boolean =>
   ticket.ended?.kind === 'conversation'

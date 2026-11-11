@@ -128,6 +128,14 @@ describe('the worker role', () => {
     expect(lines(join(dir, 'events.jsonl')).map(e => e.type)).toEqual(['turnStarted', 'activity', 'selfNudge', 'settled'])
   })
 
+  it('a command streaming output is activity, so a long build does not read as silence', () => {
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir })
+    f.emit('tool_execution_update', { toolName: 'bash', partialResult: 'compiling 412 of 980' })
+    expect(lines(join(dir, 'events.jsonl')).map(e => e.type)).toEqual(['activity'])
+  })
+
   it('nudges a silent worker once, then files the failure, ahead of the settle that ends the run', () => {
     // The rule changed 2026-11-10 on the operator's word. Measured before it: 14 of 22 open tickets sat
     // parked on this one summary, so the fleet lost throughput to a forgotten tool call, and only a human
