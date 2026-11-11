@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { createRouterExtension, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import { createPanelServer, type PanelSource } from '../src/pi/server.ts'
 import type { IssueComment, IssueState } from '../src/pi/source-github.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 
@@ -268,5 +269,29 @@ describe('the panel POST secret', () => {
     expect(res.status).toBe(403)
     const after = (await f.api('/api/state', '1')).json() as { paused: boolean }
     expect(after.paused, 'a refused pause leaves the router running the same work').toBe(before.paused)
+  })
+})
+
+describe('the panel under a failing store', () => {
+  it('answers 500 when its read fails, and the router it shares a process with keeps serving', async () => {
+    // Measured 2026-11-11: /tmp filled, the panel's read threw SQLITE_FULL inside the request handler, and pi
+    // exited on the uncaught exception, taking every worker the router supervised with it.
+    const logged: string[] = []
+    const full = Object.assign(new Error('database or disk is full'), { code: 'ERR_SQLITE_ERROR', errcode: 13 })
+    const src = {
+      now: () => new Date().toISOString(),
+      repos: { tickets: { list: () => { throw full } } },
+      log: (_level: string, event: string) => { logged.push(event) },
+    } as unknown as PanelSource
+    const { server } = createPanelServer(src)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as net.AddressInfo).port
+    const get = () => fetch(`http://127.0.0.1:${port}/`, { headers: { host: `127.0.0.1:${port}` } })
+    const first = await get()
+    expect(first.status).toBe(500)
+    expect(await first.text()).toContain('the router is still running')
+    expect((await get()).status, 'still answering: the failure did not take the process down').toBe(500)
+    expect(logged).toEqual(['panel.failed', 'panel.failed'])
+    await new Promise(resolve => server.close(resolve))
   })
 })
