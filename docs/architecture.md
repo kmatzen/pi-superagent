@@ -160,7 +160,7 @@ To start over, stop the router and delete the directory. On the next start, the 
 | --- | --- | --- |
 | One ticket per thread | intake routing in the engine; the router overrules a second accept | `Ticket.tla` I4 |
 | A ticket completes only on a *ready* report | `core/assignments.ts` | `Ticket.tla` I2 |
-| A person's stop is final | guards in `core/tickets.ts` and `core/intake.ts` | `Ticket.tla` I1 |
+| A person's stop is final (the conversation stop — GitHub closing the thread — is the door its stop notice promises) | `mandateWithdrawn` in `core/model.ts`, read by intake, `wake` and `attachable` | `Ticket.tla` I1 |
 | One running assignment per ticket | the executor's launch guard | `Ticket.tla` I3 |
 | Each acknowledgement queued and sent once | outbox keys in `core/replies.ts` | `Ticket.tla` I5, I6 |
 | The initial poll treats existing open issues as history | the seed rule | `Intake.tla` C1 |

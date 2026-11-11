@@ -26,7 +26,7 @@
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>superagent --respect-stop remedy 2&gt;&amp;1 | while IFS= read -r line; do printf '%s %s\n' "$(date -u +%FT%TZ)" "$line"; done; superagent backup 2&gt;&amp;1 | while IFS= read -r line; do printf '%s %s\n' "$(date -u +%FT%TZ)" "$line"; done</string>
+    <string>set -o pipefail; superagent --respect-stop remedy 2&gt;&amp;1 | while IFS= read -r line; do printf '%s %s\n' "$(date -u +%FT%TZ)" "$line"; done; rc=$?; superagent backup 2&gt;&amp;1 | while IFS= read -r line; do printf '%s %s\n' "$(date -u +%FT%TZ)" "$line"; done; exit "$rc"</string>
   </array>
   <!-- launchd starts a job with a bare PATH, and the job needs superagent, herdr, node and pi: Homebrew's
        directories and npm's usual global bin directories. Add yours if it is elsewhere (nvm's is). -->

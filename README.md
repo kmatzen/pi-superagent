@@ -94,7 +94,8 @@ caught by `npx vitest run` and not by TLC.
 ```sh
 npm install
 npm run check            # Type-check and run the test suite
-npm run check:packed     # Install the tarball and exercise both the CLI and the pi extension
+npm run check:packed     # Install the tarball and exercise both the CLI and the pi extension (from a checkout;
+                         # the installed package does not ship the script)
 scripts/check-formal     # Check all three models (about 17 minutes with a JDK, measured 2026-11-11)
 .ci/ci.yml               # GitHub Actions, ready to copy to .github/workflows/: typecheck and tests on every
                          # pull request and push, the formal check nightly (pushing that path needs a token

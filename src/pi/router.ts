@@ -177,6 +177,11 @@ export function scopeOf(config: RouterConfig): SourceScope {
   return {
     scope: ({ source, meta }) => {
       if (source !== 'github') return { listened: true, observed: false }
+      // Host-authored, not speech: the pull follower's merge-conflict notice is the router telling its own
+      // ticket a fact about its own pull request. Its actor is the router and its association is None, so
+      // the write-access rule below would filter the notice before the ticket that waits on the pull
+      // request ever hears it (it did, on every deployment, from the day the notice shipped).
+      if (meta.via === 'conflict') return { listened: true, observed: false }
       const heard = config.allowed
         ? isListed(typeof meta.author === 'string' ? meta.author : '', config.allowed)
         : WRITERS.has(String(meta.association))

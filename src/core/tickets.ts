@@ -1,8 +1,8 @@
 /** Tickets: their lifecycle from an accept to their end, their Subscriptions and their Inputs. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { latestAssignment, latestReport, liveTicket, readUntil, resumableBySpeech, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
-import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome, TicketStopKind,
+import { latestAssignment, latestReport, liveTicket, mandateWithdrawn, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
+import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, MandateBasis, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome, TicketStopKind,
   Trigger, TriggerDisposition } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
@@ -109,7 +109,9 @@ export class Tickets extends EnginePart {
     // A follow-up that reached a ticket goes elsewhere only once the workers that decide it hand it back.
     this.leftToWorkers(trigger)
     const current = this.require(ticketId)
-    if (current.ended?.by === 'human') throw new UserError('ticketStopped')
+    // The same door intake and wake use: a stop that withdrew the Mandate refuses an attach; a conversation
+    // stop and an ended-by-report ticket take one.
+    if (mandateWithdrawn(current)) throw new UserError('ticketStopped')
     if (!liveTicket(current) && !this.policy().revalidate(current.mandate)) throw new UserError('mandateRevoked')
     return trigger
   }
@@ -154,11 +156,17 @@ export class Tickets extends EnginePart {
     return true
   }
   /**
-   * Stops a ticket on behalf of a human, ending any active assignments.
-   * @throws UserError when the ticket is unknown.
+   * Stops a ticket, ending any active assignments. `kind` says whose act it was: `operator` is a person's
+   * (panel, CLI) and `loop`/`conversation` are the router's, recorded `by: 'router'` — one field for whose
+   * act, one for what the act meant. `conversation` does not withdraw the Mandate (see `mandateWithdrawn`).
+   * @throws UserError when the ticket is unknown, or has already ended: a stop of an ended ticket would
+   *   record nothing and withdraw no mandate, so the caller is told instead of left with a lever that moved
+   *   nowhere (the panel answers 409 with this message).
    */
   stop(ticketId: string, reason?: string, kind: TicketStopKind = 'operator'): Ticket {
-    this.end(ticketId, 'human', 'stopped', this.now(), reason, kind)
+    if (!liveTicket(this.require(ticketId))) throw new UserError('ticketEnded')
+    const by: TicketEndBy = kind === 'operator' ? 'human' : 'router'
+    this.end(ticketId, by, 'stopped', this.now(), reason, kind)
     return this.require(ticketId)
   }
   /**
@@ -255,6 +263,9 @@ export class Tickets extends EnginePart {
     const running = runningAssignment(ticket)
     if (running && running.id === assignmentId) {
       this.endAssignment(ticket, running, 'released')
+      // What the freed worker was delivered but never took has no owner once the assignment ends: hand it
+      // back ahead of what waits, as a retry does, or the answer that starts the next worker never sees it.
+      this.requeueUntaken(ticket, running)
       this.repo.tickets.save(ticket)
       return
     }
@@ -282,7 +293,7 @@ export class Tickets extends EnginePart {
     // withdrew the Mandate (a person's, the loop guard's) has no door; the conversation stop does.
     const last = latestAssignment(ticket)
     if (liveTicket(ticket) && !(last?.state === 'ended' && last.endedReason === 'released')) return
-    if (ticket.ended?.by === 'human' && !resumableBySpeech(ticket)) return
+    if (mandateWithdrawn(ticket)) return
     const policy = this.policy()
     if (policy.paused) return
     if (!policy.revalidate(ticket.mandate)) { this.refuse(ticket); return }

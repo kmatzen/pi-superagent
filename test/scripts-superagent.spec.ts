@@ -560,7 +560,6 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     writeFileSync(join(state, 'work', 'TK-14', 'repo', '.git', 'config'), '[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
     expect(run(['restart']).status, 'a clean URL restarts').toBe(0)
   })
-})
 
   it('start refuses a checkout whose code has uncommitted changes, unless told otherwise', () => {
     // 2026-11-10: an edit to this script, never committed, ran live and posted on the board.
@@ -595,3 +594,43 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(run.stderr).toContain('superagent intake is gone with the labels')
     expect(existsSync(calls), 'no GitHub write at all').toBe(false)
   })
+
+  it('stop-ticket posts the reason to the panel and answers on its exit code', () => {
+    // The operator's shell lever for the duplicate-worker case: untested since it shipped (audit 2026-11-11).
+    const bin = join(state, 'bin'); mkdirSync(bin, { recursive: true })
+    const calls = join(state, 'curl.calls')
+    writeFileSync(join(bin, 'curl'), `#!/bin/bash
+printf '%s\\n' "$*" >> "$CURL_LOG"
+if [ -f "$(dirname "$0")/refuse" ]; then echo 'stop-ticket: the panel refused' >&2; exit 1; fi
+echo '{"stopped":"TK-1"}'
+`)
+    chmodSync(join(bin, 'curl'), 0o755)
+    writeFileSync(join(state, 'panel.port'), String(PANEL_PORT))
+    writeFileSync(join(state, 'panel-token'), 'sekrit')
+    const env = { PATH: `${bin}:${process.env.PATH ?? ''}`, CURL_LOG: calls }
+    const ok = spawnSync(SCRIPT, ['stop-ticket', 'TK-1', 'duplicate worker'], { encoding: 'utf8', env: { ...process.env, PI_SUPERAGENT_STATE: state, ...env } })
+    expect(ok.status, ok.stderr).toBe(0)
+    const logged = readFileSync(calls, 'utf8')
+    expect(logged).toContain('-X POST')
+    expect(logged).toContain(`api/tickets/TK-1/stop`)
+    expect(logged).toContain('x-superagent-token: sekrit')
+    expect(logged).toContain('duplicate worker')
+    // The panel's refusal is the caller's answer: a stop that did not happen exits non-zero.
+    writeFileSync(join(bin, 'refuse'), '1')
+    const refused = spawnSync(SCRIPT, ['stop-ticket', 'TK-1'], { encoding: 'utf8', env: { ...process.env, PI_SUPERAGENT_STATE: state, ...env } })
+    expect(refused.status).toBe(1)
+  })
+
+  it('reads only PI_SUPERAGENT_* from config.env, and survives CRLF and stray spaces', () => {
+    // config.env is a 0600 file the operator edits by hand: a foreign key must not reach the router's
+    // environment, a file edited on Windows must not put \r in every value, and `KEY = value` must not
+    // kill the start with a bad substitution (audit 2026-11-11).
+    writeFileSync(join(state, 'config.env'), 'PI_SUPERAGENT_TICK_MS=44444\r\nNODE_OPTIONS=--require=/tmp/pwn\r\nPI_SUPERAGENT_MAX_WORKERS = 3\n')
+    started()
+    const routerEnv = routerTab()
+    expect(routerEnv).toContain('PI_SUPERAGENT_TICK_MS=44444')
+    expect(routerEnv).toContain('PI_SUPERAGENT_MAX_WORKERS=3')
+    expect(routerEnv, 'a key that is not the router\'s is not exported').not.toContain('NODE_OPTIONS')
+    expect(routerEnv).not.toMatch(/\r/)
+  })
+})

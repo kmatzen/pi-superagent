@@ -82,8 +82,11 @@ export function followupOwners(trigger: Pick<Trigger, 'id' | 'human' | 'threads'
   if (!reached.length || records.threads.get(threadKey(trigger.threads[0]!))?.evaluating?.triggerIds.includes(trigger.id)) return []
   return reached.filter(id => {
     const ticket = records.tickets.get(id)
-    return !!ticket && (liveTicket(ticket) || (ticket.ended?.by !== 'human'
-      && ticket.inputs.some(input => input.kind === 'trigger' && input.triggerId === trigger.id && ticket.undelivered.includes(input.id))))
+    // A live ticket owns the message outright; an ended one keeps it only while it still waits undelivered and
+    // its Mandate stands. A stop that withdrew the Mandate hands the message to Eval, which may open new work;
+    // a conversation stop and an ended-by-report ticket keep theirs.
+    return !!ticket && (liveTicket(ticket)
+      || (!mandateWithdrawn(ticket) && ticket.inputs.some(input => input.kind === 'trigger' && input.triggerId === trigger.id && ticket.undelivered.includes(input.id))))
   })
 }
 /**
@@ -268,7 +271,8 @@ export interface PolicyEffect {
   requester?: ActorRef
 }
 
-export type TicketEndBy = 'executor' | 'human'
+/** Whose act ended a ticket: the host (a report, a pull request's close), a person (their stop, or the judge's on their word), or the router on its own authority (the loop guard, a closed conversation). */
+export type TicketEndBy = 'executor' | 'human' | 'router'
 /**
  * Whose act stopped a ticket, which is the door a later message may walk through. `operator` is a person's stop
  * from the panel and `loop` is the router's repeat guard: neither ticket resumes, and a person's comment on the
@@ -327,13 +331,15 @@ export interface Execution { name: string; directory: string; assignment: string
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended
 /**
- * Whether a stopped ticket has a door for a person's message: only the conversation stop, whose ending was GitHub
- * closing the thread rather than a withdrawal of the Mandate. An operator's stop and the loop stop stay stopped: a
- * person's message on the thread goes to Eval, which may open a new ticket. A ticket that ended by its own report is
- * not a stop and is outside this predicate.
+ * Whether this ended ticket was stopped by an act that withdrew the Mandate: any stop but the conversation one,
+ * which ended the thread, not the work (a person's message there resumes the ticket). One predicate is every
+ * door — intake's resume rule, `wake`, `attachable`, and the owner rule that keeps a reached message out of
+ * Eval — and it reads the same facts the formal model's I1 does (`state = "stopped" /\
+ * stopKind # "conversation"`): the `by` field records whose act it was, never whether the door is open. Stops
+ * recorded before `kind` existed carry no kind and read as withdrawn, which is what they were.
  */
-export const resumableBySpeech = (ticket: Pick<Ticket, 'ended'>): boolean =>
-  ticket.ended?.kind === 'conversation'
+export const mandateWithdrawn = (ticket: Pick<Ticket, 'ended'>): boolean =>
+  ticket.ended?.outcome === 'stopped' && ticket.ended.kind !== 'conversation'
 /** How a ticket ended. */
 export const ticketOutcome = (ticket: Pick<Ticket, 'ended'>): TicketOutcome | undefined => ticket.ended?.outcome
 export const runningAssignment = (ticket: Ticket): Assignment | undefined => ticket.assignments.find(assignment => assignment.state === 'running')

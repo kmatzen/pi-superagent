@@ -334,6 +334,9 @@ the bot's token file in the tab (`PI_SUPERAGENT_WORKER_TOKEN_FILE`, from `PI_SUP
 config.env), and the worker role reads it, so the token never appears on a command line.
 
 What bounds a worker is the guard in its own pi: the commands in `PI_SUPERAGENT_BLOCKED` are refused, and writes
-stay inside its workspace. A per-worker `HOME` existed in the code until 2026-11-11 and never reached a herdr
-worker; it is gone, and the router deletes `<state>/worker-homes` at startup. Plan on that trust: a ticket's text
-is prompt content, so only people you would hand your terminal to should be able to file work.
+stay inside its workspace. Treat both as guardrails for an honest agent, not confinement: a name block is a
+pattern on the command text, so a worker that copies or renames a binary walks past it, and a symlink inside
+its workspace defeats the write check (audit 2026-11-11). A per-worker `HOME` existed in the code until
+2026-11-11 and never reached a herdr worker; it is gone, and the router deletes `<state>/worker-homes` at
+startup. Plan on that trust: a ticket's text is prompt content, so only people you would hand your terminal to
+should be able to file work — that is what the intake scope decides, and the next section says who it is.

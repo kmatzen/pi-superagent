@@ -50,7 +50,16 @@ STATE="${STATE_FLAG:-${PI_SUPERAGENT_STATE:-$HOME/.pi/superagent}}"
 if [ -f "$STATE/config.env" ]; then
   while IFS='=' read -r key value; do
     case "$key" in ''|\#*) continue ;; esac
-    [ -n "${!key+x}" ] || export "$key=$value"
+    # A file edited by hand: a CRLF line ending put a \r in every value, and spaces around the = killed the
+    # start with a bad substitution (audit 2026-11-11). Values are literal, so trimming changes no meaning.
+    key="$(printf '%s' "$key" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    value="$(printf '%s' "$value" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    case "$key" in
+      # Only the router's settings are read: a foreign key (NODE_OPTIONS=..., PATH=...) in the operator's
+      # 0600 file must not reach the environment every child of this script inherits (audit 2026-11-11).
+      PI_SUPERAGENT_*) [ -n "${!key+x}" ] || export "$key=$value" ;;
+      *) echo "superagent: ignoring '$key' in $STATE/config.env: only PI_SUPERAGENT_* settings are read" >&2 ;;
+    esac
   done < "$STATE/config.env"
 fi
 # Every pi session lives in herdr, the router included: it is the agent named $SESSION in this workspace,
@@ -125,6 +134,9 @@ mkdir -p "$STATE" "$WORKTREES"
 
 # herdr answers in JSON; node is already a dependency of pi, so it reads the fields.
 field() { node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{let v=JSON.parse(d);for(const k of process.argv.slice(1))v=v?.[k];process.stdout.write(v==null?"":String(v))}catch{}})' "$@"; }
+# A single-quoted word for a pane's shell: the pane runs its own shell, and a state path containing a single
+# quote used to end the word — and inject into that shell (audit 2026-11-11).
+sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 workspace_id() {
   "$HERDR_BIN" workspace list 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const w=(JSON.parse(d).result?.workspaces??[]).find(w=>w.label===process.argv[1]);process.stdout.write(w?w.workspace_id:"")})' "$WORKSPACE_LABEL"
 }
@@ -296,7 +308,7 @@ start() {
     local made; made="$("$HERDR_BIN" workspace create --label "$WORKSPACE_LABEL" --cwd "$STATE" --no-focus)" || return 1
     ws="$(printf '%s' "$made" | field result workspace workspace_id)"
     "$HERDR_BIN" tab rename "$(printf '%s' "$made" | field result tab tab_id)" "engine log" >/dev/null 2>&1 || true
-    "$HERDR_BIN" pane run "$(printf '%s' "$made" | field result root_pane pane_id)" "tail -n 40 -F '$STATE/engine.log'" >/dev/null 2>&1 || true
+    "$HERDR_BIN" pane run "$(printf '%s' "$made" | field result root_pane pane_id)" "tail -n 40 -F $(sh_quote "$STATE/engine.log")" >/dev/null 2>&1 || true
   fi
   local env=(
     --env PI_SUPERAGENT_ROLE=router --env "PI_SUPERAGENT_STATE=$STATE"

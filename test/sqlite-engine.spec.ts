@@ -1,6 +1,8 @@
 import { afterAll, describe, expect, it, vi } from 'vitest'
-// Upstream's engine spec, run against the SQLite repositories: 113 cases, same expectations, one line
-// changed. Durability is only testable against a store that survives the process.
+// Upstream's engine spec, run against the SQLite repositories: the same cases and expectations, so a
+// transition proven on the memory store is proven on the store production serves. Durability is only
+// testable against a store that survives the process; the release/stop/attach cases at the end are
+// local (see ADAPTATION.md's deviations) and are pinned here as well as upstream's suite.
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1630,6 +1632,52 @@ describe('ignores from the card', () => {
     // Accepting an inferred candidate still takes an assessment's matched rules.
     h.engine.receive(trigger('5', { actor: guest })); h.engine.reevaluate('5'); h.pump()
     expect(() => h.engine.decide('5', { kind: 'accept', title: 'Fix', scope: 'small', reason: 'chat' })).toThrow(new UserError('notExplicit'))
+  })
+})
+describe('release, stop and attach doors (audit 2026-11-11)', () => {
+  it('releases a worker and hands back the message it was delivered but never read', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.receive(trigger('2')); h.settle()
+    const input = h.repo.tickets.get(ticketId)!.inputs.find(item => item.kind === 'trigger' && item.triggerId === '2')!
+    const assignmentId = h.repo.tickets.get(ticketId)!.assignments.at(-1)!.id
+    h.engine.release(ticketId, assignmentId)
+    expect(h.repo.tickets.get(ticketId)!.undelivered, 'the delivered-but-unread input is handed back').toContain(input.id)
+    h.engine.receive(trigger('3')); h.settle()
+    const fresh = h.repo.tickets.get(ticketId)!
+    expect(fresh.assignments).toHaveLength(2)
+    expect(h.delivered).toContainEqual([ticketId, input.id])
+  })
+  it('refuses to stop a ticket that has already ended, instead of silently doing nothing', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.report(ticketId, { state: 'ready', summary: 'done' })
+    expect(h.repo.tickets.get(ticketId)!.ended?.outcome).toBe('completed')
+    expect(() => h.engine.stopTicket(ticketId, 'late')).toThrow(new UserError('ticketEnded'))
+    expect(h.repo.tickets.get(ticketId)!.ended?.outcome).toBe('completed')
+  })
+  it('lets a message attach to a ticket whose conversation closed, and never to one a person stopped', () => {
+    for (const [kind, opens] of [['conversation', true], ['operator', false], ['loop', false]] as const) {
+      const h = harness()
+      const ticketId = accepted(h).ticketId!
+      h.engine.stopTicket(ticketId, 'the conversation closed on GitHub', kind)
+      if (opens) expect(() => h.engine.attach(ticketId, '1'), `${kind} stop takes an attach`).not.toThrow()
+      else expect(() => h.engine.attach(ticketId, '1'), `${kind} stop refuses an attach`).toThrow(new UserError('ticketStopped'))
+    }
+  })
+  it('records whose act stopped the ticket: the router owns its own stops, a person owns theirs', () => {
+    for (const [kind, by] of [['operator', 'human'], ['loop', 'router'], ['conversation', 'router']] as const) {
+      const h = harness()
+      const ticketId = accepted(h).ticketId!
+      h.engine.stopTicket(ticketId, 'why', kind)
+      expect(h.repo.tickets.get(ticketId)!.ended).toMatchObject({ by, kind })
+    }
+    const h = harness()
+    const judged = accepted(h).ticketId!
+    h.engine.receive(trigger('4')); h.pump()
+    h.engine.decide('4', { kind: 'stop', ticketId: judged, reason: 'the person said stop' })
+    h.settle()
+    expect(h.repo.tickets.get(judged)!.ended).toMatchObject({ by: 'human', outcome: 'stopped' })
   })
 })
 

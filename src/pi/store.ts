@@ -35,6 +35,9 @@ export class SqliteRepositories implements Repositories {
     this.db = new DatabaseSync(file)
     // synchronous=FULL and 0600 at open: this file holds mandates and the operator's messages.
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;')
+    // WAL writes wait on the file's write lock; with no timeout, one other connection (the daily backup, a
+    // second router during a watchdog restart) turns every BEGIN IMMEDIATE into an instant throw.
+    this.db.exec('PRAGMA busy_timeout=5000;')
     this.db.exec(SCHEMA)
     try { chmodSync(file, 0o600) } catch { /* read-only fs: the first write fails loudly, which is right */ }
   }
@@ -43,10 +46,15 @@ export class SqliteRepositories implements Repositories {
 
   /** Nested calls join the outer transaction: a command's writes all roll back, or none. */
   atomic<T>(work: () => T): T {
-    if (this.depth++ > 0) {
+    if (this.depth > 0) {
+      this.depth++
       try { return work() } finally { this.depth-- }
     }
+    // BEGIN runs before the depth increment: a BEGIN that throws (busy past the timeout) must leave the
+    // wrapper clean. Depth stuck above zero is permanent — every later command would take the nested branch
+    // and run with no transaction, and nothing would roll back again for the life of the process.
     this.db.exec('BEGIN IMMEDIATE')
+    this.depth++
     try {
       const result = work()
       // An async body returns before its writes land, and the COMMIT below commits nothing it covers.
@@ -110,8 +118,10 @@ export class SqliteRepositories implements Repositories {
          VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM ticket), ?)
          ON CONFLICT(id) DO UPDATE SET value = excluded.value`).run(ticket.id, JSON.stringify(ticket))
     },
-    // Insertion order, matching MemoryRepositories: a test on the memory store proves the same order production
-    // serves. Callers that want the newest first say so.
+    // Insertion order. MemoryRepositories (upstream) returns newest-first, and the two disagree on purpose
+    // here: this is the order the panel reads and reverses, and changing it flips the panel. Callers that
+    // want the newest first say so; nothing may read this order as "oldest ticket wins" (no src/pi caller
+    // uses engine.reply, whose resolution order would differ between the adapters).
     list: (): Ticket[] => this.rows<Ticket>('SELECT value FROM ticket ORDER BY seq'),
     // The engine's hottest read, kept in the database: filtering list() in JavaScript read and parsed every
     // ticket ever written, once per tick, per caller. `= 0` covers both shapes of an open ticket — no `ended`
@@ -128,12 +138,14 @@ export class SqliteRepositories implements Repositories {
   /**
    * Forget tickets that ended before a date. The audit trail is the issue on GitHub, and the ticket row is a
    * working set: measured live, 81 of 89 tickets were closed, and every one of them was parsed on every
-   * `open()` call. Returns the rows it deleted.
+   * `open()` call. Returns the rows it deleted. A ticket still holding undelivered input keeps its row: the
+   * ticket was that message's owner, so deleting the row deletes the message out of every queue.
    */
   pruneClosedTickets(olderThanIso: string): number {
     return this.db.prepare(
       "DELETE FROM ticket WHERE COALESCE(json_extract(value, '$.ended'), 0) != 0"
-      + " AND COALESCE(json_extract(value, '$.ended.at'), json_extract(value, '$.updatedAt')) < ?").run(olderThanIso).changes as number
+      + " AND COALESCE(json_extract(value, '$.ended.at'), json_extract(value, '$.updatedAt')) < ?"
+      + " AND json_array_length(json_extract(value, '$.undelivered')) = 0").run(olderThanIso).changes as number
   }
 
   readonly decisions = {

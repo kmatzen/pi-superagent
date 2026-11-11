@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { followedPulls, parsePull, parseThread, PullFollower, threadOfPull, threadUrl, type PullApi, type PullState } from '../src/pi/pulls.ts'
 import { REPLY_MARKER, type IssueComment, type PrReview } from '../src/pi/source-github.ts'
-import type { Ticket, Trigger } from '../src/core/index.ts'
+import { Engine, MemoryRepositories } from '../src/core/index.ts'
+import type { Candidate, Ticket, Trigger } from '../src/core/index.ts'
+import { policyOf, scopeOf, type RouterConfig } from '../src/pi/router.ts'
 
   it('a thread this account cannot read goes into backoff, and the burn stops', async () => {
     // Measured 2026-11-10: 330 read failures in 4000 log lines on eight threads, five of them followed by no
@@ -43,6 +45,45 @@ import type { Ticket, Trigger } from '../src/core/index.ts'
     const g = follower({ pull: async () => ({ ...openPull, mergeable: null }) })
     await g.reconcile(g.following('#5'))
     expect(g.received, 'GitHub computing mergeable says nothing').toEqual([])
+  })
+
+  it('the conflict notice survives the production source scope and reaches its ticket', async () => {
+    // The notice's actor is the router and its association None — exactly what the write-access rule refuses.
+    // It shipped filtered on every deployment: the follower test above saw only what the follower emitted,
+    // never what intake did with it (audit 2026-11-11). This is the seam, wired the way the router wires it.
+    const repo = new MemoryRepositories()
+    const cfg: RouterConfig = { dataDir: '.', worktreeRoot: '.', self: 'agent-bot', githubRepo: 'o/r', bots: new Set(['ci-bot']) }
+    let asked: Candidate | undefined
+    const engine = new Engine({
+      repo, scope: scopeOf(cfg), policy: () => policyOf(cfg),
+      assessor: { request: candidate => { asked = candidate }, release: () => {} },
+      executor: { start: () => {}, deliver: () => {}, stop: () => {} },
+      outbox: { send: () => {}, status: () => undefined, withdraw: () => {} },
+      now: () => new Date().toISOString(),
+    })
+    engine.receive({ id: 'github:#5:ask', source: 'github', threads: [{ source: 'github', id: '#5' }],
+      actor: { source: 'github', id: 'octocat' }, human: true, at: created, text: 'fix the flag',
+      channel: { source: 'github', thread: '#5', address: { issue: '5' } }, meta: { association: 'OWNER', author: 'octocat' } })
+    engine.evaluateDue()
+    engine.decide('github:#5:ask', { kind: 'accept', title: 'Fix', scope: 'small', reason: 'asked', acknowledgement: 'on it', evalId: asked!.evalId })
+    const ticketId = repo.tickets.open()[0]!.id
+    engine.bindThread(ticketId, threadOfPull({ repo: 'o/r', number: 9 }, 'o/r'), true)
+    // The follower speaks through the engine the way extension.ts wires it: straight into receive, production scope included.
+    const kv = new Map<string, unknown>()
+    const f = new PullFollower({
+      home: 'o/r', api: { pull: async () => ({ ...openPull, mergeable: false }), comments: async () => [], reviews: async () => [] },
+      openThreads: () => new Set(['#5']), positions: { get: <T,>(k: string) => kv.get(k) as T | undefined, set: (k, v) => { kv.set(k, v) } },
+      self: 'agent-bot', bots: new Set(['ci-bot']), now: () => Date.now(),
+      closed: () => {}, reopened: () => 0, warn: () => {},
+      receive: trigger => { engine.receive(trigger) },
+    })
+    await f.reconcile([{ id: ticketId, follows: [{ thread: 'github:#9', own: true }] }] as unknown as Ticket[])
+    const ticket = repo.tickets.open().find(t => t.id === ticketId)!
+    const conflict = ticket.inputs.flatMap(i => i.kind === 'trigger' ? repo.triggers.get(i.triggerId) ?? [] : [])
+      .find(t => t.meta?.via === 'conflict')
+    expect(conflict, 'the ticket holds the conflict notice as an input').toBeDefined()
+    expect(repo.triggers.disposition(conflict!.id)?.filtered, 'the scope did not filter it').toBeUndefined()
+    expect(ticket.undelivered, 'the notice waits for its worker to deliver').toHaveLength(1)
   })
 
 describe('the pull requests tickets follow', () => {
@@ -256,7 +297,8 @@ describe('following a ticket\'s pull requests', () => {
     t.tick(120_000)
     t.received.length = 0
     await t.f.reconcile(t.following('other/lib#5'))
-    expect(t.calls.at(-2), 'reads on from past the newest comment it saw').toBe(`comments other/lib#5 since ${new Date(Date.parse(later) + 1).toISOString()}`)
+    expect(t.calls.at(-2), 'reads on from past the newest comment it saw — the wall-clock lag only holds the cursor while the comment is fresh')
+      .toBe(`comments other/lib#5 since ${new Date(Date.parse(later) + 1).toISOString()}`)
     expect(t.received.filter(r => r.text.includes('not yet')), 'a review is delivered once').toHaveLength(0)
   })
 
