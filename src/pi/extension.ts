@@ -328,7 +328,19 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
   let engine!: Engine
   let executorRef: PiExecutor | undefined
-  const assessor: SessionAssessor = new SessionAssessor(() => engine, pilot, { render: renderCandidateFor(cfg.githubRepo) })
+  // Answers to trigger sets judged before, so an engine that re-asks costs no model turn (assessor.ts).
+  const ignoredKey = 'assessor-ignored'
+  const ignoredMemo = {
+    get: (key: string) => (repos.kv.get<Record<string, string>>(ignoredKey) ?? {})[key],
+    set: (key: string, reason: string) => {
+      const rows = repos.kv.get<Record<string, string>>(ignoredKey) ?? {}
+      rows[key] = reason.slice(0, 400)
+      const keys = Object.keys(rows)
+      for (const stale of keys.slice(0, Math.max(0, keys.length - 2000))) delete rows[stale]
+      repos.kv.set(ignoredKey, rows)
+    },
+  }
+  const assessor: SessionAssessor = new SessionAssessor(() => engine, pilot, { render: renderCandidateFor(cfg.githubRepo), memo: ignoredMemo })
   // The engine calls its executor from inside its commands. Each call runs once the command has committed,
   // so a worker never acts on a write that could still roll back.
   const afterCommit = (what: string, run: () => void): void => {
