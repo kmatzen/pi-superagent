@@ -146,7 +146,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
 
     async issues(state) {
       // GitHub pages at 100; an unpaginated read hides every issue past the newest page, forever.
-      const rows: Array<{ number: number; title: string; body?: string | null; labels?: Array<{ name: string }>; user?: { login: string }; author_association?: string; created_at: string; updated_at: string; pull_request?: unknown }> = []
+      const rows: Array<{ number: number; title: string; body?: string | null; user?: { login: string }; author_association?: string; created_at: string; updated_at: string; pull_request?: unknown }> = []
       for (let page = 1; ; page += 1) {
         const got = JSON.parse((await call(['api', `repos/${options.repo}/issues?state=${state}&per_page=100&page=${page}`])) || '[]')
         rows.push(...got)
@@ -154,7 +154,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       }
       // The issues endpoint lists pull requests too; opening a pull request is a delivery, not a request.
       return rows.filter(r => !r.pull_request).map(r => ({
-        issue: r.number, title: r.title, body: r.body ?? '', labels: (r.labels ?? []).map(l => l.name),
+        issue: r.number, title: r.title, body: r.body ?? '',
         author: r.user?.login ?? 'anonymous', association: associationOf(r), createdAt: r.created_at, updatedAt: r.updated_at,
       }))
     },
@@ -209,43 +209,6 @@ export function ghApi(options: GithubApiOptions): GithubApi {
     async commentsFor(issue, repo) {
       const rows = JSON.parse((await call(['api', `repos/${repo ?? options.repo}/issues/${issue}/comments?per_page=100&sort=created&direction=desc`])) || '[]') as CommentRow[]
       return rows.map(r => ({ issue, author: r.user?.login ?? 'anonymous', association: associationOf(r), at: r.created_at, body: r.body }))
-    },
-
-    // GitHub answers 404/422 for a label that is not on the issue, which is the state the caller wanted: not a
-    // failure. A permission answer is, and the source logs it and keeps the grant journal as the guard.
-    // POST adds to the label set; PUT would replace it, and the board's other labels are not the
-    // router's to decide. A label already present is the state the caller wanted, so 422 is quiet.
-    async addLabel(issue, label) {
-      try {
-        await call(['api', '-X', 'POST', `repos/${options.repo}/issues/${issue}/labels`, '-f', `labels[]=${label}`])
-      } catch (error) {
-        if (/HTTP 404|HTTP 422|already|not found/i.test(String(error))) return
-        throw error
-      }
-    },
-
-    async removeLabel(issue, label) {
-      try { await call(['api', '-X', 'DELETE', `repos/${options.repo}/issues/${issue}/labels/${encodeURIComponent(label)}`]) }
-      catch (error) {
-        if (/HTTP 404|HTTP 422|not found|does not exist/i.test(String(error))) return
-        throw error
-      }
-    },
-
-    // The newest `labeled` event naming this label: GitHub records the actor of every label write, and the
-    // events feed is the only read that answers "who asked, and when". Rows come oldest first, so the scan
-    // keeps the last match; five pages (500 events) covers a board issue by a wide margin, and an ask older
-    // than that is history the reader has no duty to replay.
-    async labelEvent(issue, label) {
-      let found: { actor: string, at: string } | undefined
-      for (let page = 1; page <= 5; page += 1) {
-        const rows = JSON.parse((await call(['api', `repos/${options.repo}/issues/${issue}/events?per_page=100&page=${page}`])) || '[]') as
-          Array<{ event: string; label?: { name?: string }; actor?: { login?: string }; created_at?: string }>
-        for (const r of rows) if (r.event === 'labeled' && r.label?.name === label && r.created_at)
-          found = { actor: r.actor?.login ?? 'anonymous', at: r.created_at }
-        if (rows.length < 100) break
-      }
-      return found
     },
 
     // Idempotent at GitHub: closing a closed issue answers with the closed issue.

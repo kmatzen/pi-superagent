@@ -73,10 +73,11 @@ spending a minute on them. A recorded close awaiting repair goes to the head of 
 close is unrepaired is followed by nothing and ends by nothing, so it outranks a routine read of a busy pull request.
 
 `source-github.ts` tracks issues, comments and submitted reviews. It recognizes the router’s own
-comments by the bot login or a hidden marker. The `agent-requested` label is the board’s way of
-handing one issue over, so the router spends that grant: it journals the ask, takes the label off,
-and hears the issue again only when the label comes back on — and, after a journal it cannot read,
-only when the label is newer than its own last reply on that issue. `scopeOf` in `router.ts` checks each
+comments by the bot login or a hidden marker. Labels play no part: an issue opened after the first
+look is a request, and every open issue that is not an ask to the operator is standing work the router
+may re-grant — an open ticket by the state of its work, an issue that never had a ticket because it is
+starved, never an issue whose tickets all ended (`regrantable` in `extension.ts`), two launches per issue
+per day at most. The source writes no label and reads none. `scopeOf` in `router.ts` checks each
 author’s GitHub association or the configured login list before the trigger can reach a judge or
 worker. `gh-api.ts` runs the CLI asynchronously, paginates issue and PR lists, and reads comments
 forward from the saved position.

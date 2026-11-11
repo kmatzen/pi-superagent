@@ -145,11 +145,11 @@ Two numbers, because one number answered two questions silently and disagreed wi
   (one ticket, two assignments, both `ended`). So a free slot unblocks a queued-launch ask, and unblocks nothing
   for a grant-spent one; the panel cannot tell you which is which yet, which is the open ask in board issue 358.
 
-- **`unanswered`** — labelled asks with no worker on them now. A live session, a queued launch, `ready` awaiting
+- **`unanswered`** — open asks with no worker on them now. A live session, a queued launch, `ready` awaiting
   review, and `blocked` awaiting a person all clear it. Answers *what does the board still owe an answer to?*
 - The gap `unanswered - starved` is work that ran and ended on a ticket nobody reviewed. Capacity does not close
   it; only review does. Measured at deploy: `starved=2`, `unanswered=4`, oldest 46.9h.
-- The label counted is the standing `agent-ready`, never the one-shot `agent-requested` grant the router spends.
+- No label is counted: labels were deleted on 2026-11-11 (see `docs/design-decisions.md`, "Delete the labels").
 
 ## Invariants
 
@@ -219,7 +219,8 @@ report; the second consecutive silence files the failure, which is the case a hu
 
 ### 2. A worker that ends its turn re-earns the launch, with a cap
 
-`agent-requested` is spent by the first worker, so a standing `agent-ready` ask entitles nothing after it.
+*(Written when labels carried the grant; they are deleted, and the re-grant needs none.)* `agent-requested` was
+spent by the first worker, so a standing `agent-ready` ask entitled nothing after it.
 New rule: when a worker for an ask ends, the ask gets one fresh grant, and the cap is small (two per issue
 per day). The queue sweep in `extension.ts` then starts it.
 
