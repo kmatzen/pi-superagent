@@ -20,8 +20,9 @@ const ticket = (id: string, over: Record<string, unknown> = {}) => ({
 
 describe('the ticket store', () => {
   it('lists tickets in the order they were written, newest first where the caller asks for it', () => {
-    // The memory store serves insertion order, and a test written against it must pass unchanged on SQLite:
-    // the panel's ended list reverses this to show the newest first, so a silent flip shows up as a flipped panel.
+    // Insertion order is this store's own contract, read by the panel, which reverses it to show the newest
+    // first — a silent flip shows up as a flipped panel. Upstream's MemoryRepositories returns newest-first;
+    // the two disagree on purpose and nothing may read this order as "oldest ticket wins" (see store.ts).
     const r = repos()
     for (const id of ['t1', 't2', 't3']) r.tickets.save(ticket(id))
     expect(r.tickets.list().map(t => t.id)).toEqual(['t1', 't2', 't3'])
@@ -56,6 +57,37 @@ describe('the transaction wrapper', () => {
     expect(() => store.atomic(async () => 1)).toThrow(/synchronous/)
     store.close()
   })
+
+  it('survives a failed BEGIN with its transaction wrapper intact', () => {
+    // BEGIN used to run after the depth increment and outside the try that decrements it, so one failed BEGIN
+    // left depth above zero forever and every later atomic() ran with no transaction (audit 2026-11-11).
+    const store = repos()
+    const db = (store as unknown as { db: { exec(sql: string): void } }).db
+    const exec = db.exec.bind(db)
+    let failed = false
+    db.exec = (sql: string) => {
+      if (sql === 'BEGIN IMMEDIATE' && !failed) { failed = true; throw new Error('database is locked') }
+      return exec(sql)
+    }
+    expect(() => store.atomic(() => { throw new Error('unreachable: BEGIN failed first') })).toThrow('database is locked')
+    db.exec = exec
+    // The next command opens a real transaction again: a body that throws rolls its write back.
+    expect(() => store.atomic(() => { store.tickets.save(ticket('tk-rolled-back')); throw new Error('boom') })).toThrow('boom')
+    expect(store.tickets.get('tk-rolled-back')).toBeUndefined()
+    // And a body that succeeds commits.
+    store.atomic(() => store.tickets.save(ticket('tk-committed')))
+    expect(store.tickets.get('tk-committed')).toBeDefined()
+    store.close()
+  })
+
+  it('waits on a busy database instead of failing at once', () => {
+    // Without busy_timeout, the daily backup or an overlapping router holding the write lock turned every
+    // command into an instant SQLITE_BUSY throw (audit 2026-11-11).
+    const store = repos()
+    const row = (store as unknown as { db: { prepare(sql: string): { get(): unknown } } }).db.prepare('PRAGMA busy_timeout').get() as { timeout: number }
+    expect(row.timeout).toBeGreaterThan(0)
+    store.close()
+  })
 })
 
 describe('the ticket working set', () => {
@@ -72,6 +104,21 @@ describe('the ticket working set', () => {
     expect(store.pruneClosedTickets(new Date(Date.now() - 90 * 86_400_000).toISOString())).toBe(1)
     expect(store.tickets.list().map(t => t.id)).toEqual(['tk-fresh', 'tk-open'])
     expect(store.tickets.open().map(t => t.id)).toEqual(['tk-open'])
+    store.close()
+  })
+
+  it('never prunes a ticket that still holds undelivered input', () => {
+    // The ticket row is the message's only owner: pruned with it, a person's waiting words sit in no queue at
+    // all (audit 2026-11-11). The row is the working set; the message is not.
+    const store = repos()
+    const old = new Date(Date.now() - 120 * 86_400_000).toISOString()
+    store.atomic(() => {
+      store.tickets.save(ticket('tk-empty', { ended: { at: old, by: 'host', outcome: 'completed' } }))
+      store.tickets.save(ticket('tk-mail', { ended: { at: old, by: 'host', outcome: 'completed' }, undelivered: ['i1'],
+        inputs: [{ id: 'i1', kind: 'trigger', triggerId: 't9', at: old }] }))
+    })
+    expect(store.pruneClosedTickets(new Date(Date.now() - 90 * 86_400_000).toISOString())).toBe(1)
+    expect(store.tickets.list().map(t => t.id)).toEqual(['tk-mail'])
     store.close()
   })
 })
