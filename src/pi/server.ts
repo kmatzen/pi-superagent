@@ -1,6 +1,6 @@
 /** Panel and management API over the engine's own store: the panel can show no count the API denies. */
 import { readFileSync } from 'node:fs'
-import { createServer, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Engine, Ticket } from '../core/index.ts'
 import type { SqliteRepositories } from './store.ts'
 import type { SessionAssessor } from './assessor.ts'
@@ -130,7 +130,7 @@ const json = (res: import('node:http').ServerResponse, code: number, body: unkno
 }
 
 export function createPanelServer(src: PanelSource): { server: Server; url(port: number): string } {
-  const server = createServer((req, res) => {
+  const serve = (req: IncomingMessage, res: ServerResponse): void => {
     const began = Date.now()
     res.on('finish', () => {
       const ms = Date.now() - began
@@ -190,6 +190,17 @@ export function createPanelServer(src: PanelSource): { server: Server; url(port:
     }
     if (url.pathname === '/') return void res.writeHead(200, { 'content-type': 'text/html' }).end(renderPanel(m))
     json(res, 404, { error: 'not found' })
+  }
+  const server = createServer((req, res) => {
+    try {
+      serve(req, res)
+    } catch (error) {
+      // A read that fails is a failed page, not a dead router: the panel runs in the router's process, and on
+      // 2026-11-11 a full /tmp made one page view throw SQLITE_FULL and stopped the whole fleet.
+      src.log('error', 'panel.failed', { path: req.url ?? '/', error: String(error).slice(0, 200) })
+      if (res.headersSent) res.end()
+      else json(res, 500, { error: 'the panel could not read the router state; the router is still running' })
+    }
   })
   return { server, url: port => `http://127.0.0.1:${port}` }
 }

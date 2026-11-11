@@ -33,8 +33,9 @@ export class SqliteRepositories implements Repositories {
   constructor(readonly file: string) {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(file)
-    // synchronous=FULL and 0600 at open: this file holds mandates and the operator's messages.
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;')
+    // synchronous=FULL and 0600 at open: this file holds mandates and the operator's messages. temp_store in
+    // memory: SQLite's temp files default to /tmp, and a full /tmp failed reads with SQLITE_FULL (2026-11-11).
+    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY;')
     // WAL writes wait on the file's write lock; with no timeout, one other connection (the daily backup, a
     // second router during a watchdog restart) turns every BEGIN IMMEDIATE into an instant throw.
     this.db.exec('PRAGMA busy_timeout=5000;')

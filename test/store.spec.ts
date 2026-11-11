@@ -19,6 +19,13 @@ const ticket = (id: string, over: Record<string, unknown> = {}) => ({
 }) as never
 
 describe('the ticket store', () => {
+  it('keeps SQLite temp data in memory, so a full /tmp cannot fail a read', () => {
+    // SQLite spills sorts and temp tables to /tmp by default; on 2026-11-11 a full /tmp made a panel read throw
+    // SQLITE_FULL and killed the router. 2 is MEMORY.
+    const db = (repos() as unknown as { db: { prepare(sql: string): { get(): unknown } } }).db
+    expect(db.prepare('PRAGMA temp_store').get()).toEqual({ temp_store: 2 })
+  })
+
   it('lists tickets in the order they were written, newest first where the caller asks for it', () => {
     // Insertion order is this store's own contract, read by the panel, which reverses it to show the newest
     // first — a silent flip shows up as a flipped panel. Upstream's MemoryRepositories returns newest-first;
