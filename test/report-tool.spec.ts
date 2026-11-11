@@ -13,7 +13,7 @@ describe('ticket_report', () => {
   })
 
   it('a report that reached no worker is answered as that, because "reported" is a lie the next run believes', () => {
-    // Measured 2026-11-09 on matzen_adobe/superagent-board-spike#255: a report the router had already ended
+    // Measured 2026-11-09 on the operator's board spike #255: a report the router had already ended
     // answered `reported`, posted nothing, and the ticket's next three runs started from that receipt.
     const said = answer('dropped')
     expect(said).toMatch(/not recorded/)
@@ -39,7 +39,7 @@ describe('ticket_report', () => {
   it('refuses a report whose pull request URL the router cannot read, and names the entry', () => {
     const seen: Array<readonly string[] | undefined> = []
     const tool = reportTool((_s, _su, _q, _o, pulls) => { seen.push(pulls); return 'recorded' })
-    const bad = 'https://github.comResearch-Adobe/caramel/pull/1994'
+    const bad = 'https://github.comExample-Corp/widget/pull/1994'
     const verdict = tool.execute('r1', { state: 'ready', summary: 's', pullRequests: [bad] })
     expect(verdict.isError, 'the worker sees a failure, not "reported"').toBe(true)
     expect(verdict.content[0]!.text).toContain(bad)
@@ -52,10 +52,10 @@ describe('ticket_report', () => {
     const tool = reportTool((_s, _su, _q, _o, pulls) => { seen.push(pulls); return 'recorded' })
     const verdict = tool.execute('r1', {
       state: 'ready', summary: 's',
-      pullRequests: ['https://github.com/o/r/pull/9', 'https://git.corp.adobe.com/transmute/transmute/pull/1574'],
+      pullRequests: ['https://github.com/o/r/pull/9', 'https://git.example-corp.com/widget/widget/pull/1574'],
     })
     expect(verdict.isError, 'an enterprise URL tracks nothing, so the report says so instead of dropping it').toBe(true)
-    expect(verdict.content[0]!.text).toContain('git.corp.adobe.com/transmute/transmute/pull/1574')
+    expect(verdict.content[0]!.text).toContain('git.example-corp.com/widget/widget/pull/1574')
     expect(verdict.content[0]!.text).not.toContain('o/r/pull/9')
     expect(seen, 'a mixed report is refused whole, so the worker re-reports both').toEqual([])
   })
@@ -64,7 +64,7 @@ describe('ticket_report', () => {
     const seen: Array<readonly string[] | undefined> = []
     const tool = reportTool((_s, _su, _q, _o, pulls) => { seen.push(pulls); return 'recorded' })
     // The guard is the router's parser and nothing more: no new strictness, no widened host.
-    for (const bad of ['https://github.com.matzen_adobe/pi-superagent/pull/1', '#77', 'o/r#77', 'https://github.com/o/r/issues/9']) {
+    for (const bad of ['https://github.com.example-corp/widget/pull/1', '#77', 'o/r#77', 'https://github.com/o/r/issues/9']) {
       expect(tool.execute('r1', { state: 'ready', summary: 's', pullRequests: [bad] }).isError, bad).toBe(true)
     }
     const valid = ['https://github.com/o/r/pull/9', 'https://github.com/o/r/pull/10/', 'https://github.com/o/r/pull/11?files=1', 'http://github.com/o/r/pull/12#issuecomment-1']

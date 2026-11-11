@@ -89,7 +89,7 @@ describe('the worker role', () => {
     const f = fakePi()
     workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir })
     const report = f.tools.find(t => t.name === 'ticket_report')!
-    const bad = 'https://github.comResearch-Adobe/caramel/pull/1994'
+    const bad = 'https://github.comExample-Corp/widget/pull/1994'
     const verdict = report.execute('c1', { state: 'ready', summary: 'opened it', pullRequests: [bad] }) as
       { isError?: boolean; content: { text: string }[] }
     expect(verdict.isError, 'the worker sees a failure, not "reported"').toBe(true)
