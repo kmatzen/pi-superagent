@@ -1,6 +1,6 @@
 {
   "name": "pi-superagent",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "Open a GitHub issue; a pi worker does the work and replies there. The dsh-superagent ticket engine bound to pi, herdr, GitHub and SQLite.",
   "type": "module",
   "license": "MIT",

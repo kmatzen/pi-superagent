@@ -327,7 +327,7 @@ describe('GithubSource', () => {
     // and with it the title verbs that kept its issues out. A bot's issue is not a person's request, as on first sight.
     const f = fixture([], [
       issue({ issue: 220, title: 'rename the Export button to Ship' }),
-      issue({ issue: 221, title: 'MERGE transmute 1290 once its gates are green' }),
+      issue({ issue: 221, title: 'MERGE widget 1290 once its gates are green' }),
       issue({ issue: 222, title: 'Fix the panel going blank after a reload', author: 'superagent[bot]' }),
       issue({ issue: 223, title: 'Bump the base image', author: 'github-actions[bot]' }),
       issue({ issue: 224, title: 'DO pick the compute route for the run', author: 'superagent[bot]' }),
@@ -342,7 +342,7 @@ describe('GithubSource', () => {
     source.bootstrap()
     const fired = (await source.poll()).map(tr => tr.text)
     expect(fired, 'every open issue is work, whatever its title').toEqual(['rename the Export button to Ship',
-      'MERGE transmute 1290 once its gates are green', 'Fix the panel going blank after a reload',
+      'MERGE widget 1290 once its gates are green', 'Fix the panel going blank after a reload',
       'DO pick the compute route for the run', 'RUN /reload in the three sessions'])
     expect(asked, 'only a bot\'s issue is never offered to the router').toEqual(['#220', '#221', '#222', '#224', '#225'])
   })

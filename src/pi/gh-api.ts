@@ -112,7 +112,7 @@ type CommentRow = { user?: { login: string }; author_association?: string; creat
 export function ghApi(options: GithubApiOptions): GithubApi {
   const call = ghCall(options)
   // One account, the configured token file: the operator's rule 2026-11-08. A second account's 404 on a
-  // repository it cannot see ended a live ticket (caramel#1983 at 09:36, merged 16:45), so no call asks one.
+  // repository it cannot see ended a live ticket (a private-app pull request at 09:36, merged 16:45), so no call asks one.
   const deadPulls = new Set<string>()
   const openPulls = async (): Promise<Array<{ number: number }>> => {
     const open: Array<{ number: number }> = []
