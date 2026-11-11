@@ -37,6 +37,38 @@ describe('the outbox', () => {
     expect(writes.length - before, 'three counted attempts, one write for the flush').toBe(4)
   })
 
+  it('a sent or dropped reply keeps its id and status, not its words', async () => {
+    // The ledger is one blob rewritten on every send: measured 2026-11-11, 2,223 rows held 5.0 MB of message text
+    // that nothing reads once a reply is settled (only status(id) is ever asked again).
+    const kv = store()
+    const posts: string[] = []
+    const outbox = new CommentOutbox(githubSink(posts), kv)
+    outbox.send(github('m1'))
+    outbox.flush()
+    await settle()
+    const rows = kv.get<Record<string, { status: string; message: { text: string } }>>('outbox')!
+    expect(rows.m1).toMatchObject({ status: 'sent', message: { text: '' } })
+    expect(outbox.status('m1')).toBe('sent')
+    outbox.send(github('m1'))
+    outbox.flush()
+    await settle()
+    expect(posts, 'the id still stops a second post').toEqual(['m1'])
+  })
+
+  it('a ledger written before the trim is trimmed on load, and a row with no date gets one so it can expire', () => {
+    const kv = store()
+    kv.set('outbox', {
+      old: { message: { ...github('old'), text: 'a long receipt nobody will read again' }, status: 'sent', at: '2026-11-10T00:00:00.000Z' },
+      undated: { message: github('undated'), status: 'sent' },
+      waiting: { message: github('waiting'), status: 'pending', at: '2026-11-10T00:00:00.000Z' },
+    })
+    new CommentOutbox(githubSink([]), kv, () => Date.parse('2026-11-11T02:00:00.000Z'))
+    const rows = kv.get<Record<string, { status: string; at?: string; message: { text: string } }>>('outbox')!
+    expect(rows.old!.message.text).toBe('')
+    expect(rows.undated!.at, 'dated now, so it ages out in 30 days').toBe('2026-11-11T02:00:00.000Z')
+    expect(rows.waiting!.message.text, 'a reply still to post keeps its words').toBe('ack waiting')
+  })
+
   it('an idle flush writes nothing at all', () => {
     // The tick flushes the outbox twice, and the ledger is one blob: persisting an untouched one measured
     // 5,700 identical SQLite writes a day on a router with nothing to send.

@@ -18,6 +18,13 @@ const KEEP_SENT_MS = 30 * 86_400_000
 
 type Row = { message: OutboundMessage; status: ReplyStatus; at: string; tries?: number }
 
+/** A row that will never be posted again keeps its id and status, not its words: only `status(id)` reads it
+ *  later, and the ledger is one blob rewritten on every send (2026-11-11: 2,223 rows, 5.0 MB, ~3 rewrites a message). */
+const settle = (row: Row, status: ReplyStatus): void => {
+  row.status = status
+  row.message = { ...row.message, text: '' }
+}
+
 export class CommentOutbox implements OutboxPort {
   private rows: Record<string, Row>
   private readonly posting = new Set<string>()
@@ -27,6 +34,13 @@ export class CommentOutbox implements OutboxPort {
               private readonly maxTries = 12,
               private readonly gaveUp: (message: OutboundMessage, tries: number, error: string) => void = () => {}) {
     this.rows = this.store.get<Record<string, Row>>(KEY) ?? {}
+    // Rows written before settling dropped the words, and rows with no date (which never expired), are put right once.
+    let fixed = false
+    for (const row of Object.values(this.rows)) {
+      if (!row.at) { row.at = new Date(this.now()).toISOString(); fixed = true }
+      if ((row.status === 'sent' || row.status === 'dropped') && row.message.text) { row.message = { ...row.message, text: '' }; fixed = true }
+    }
+    if (fixed) this.persist()
   }
 
   private persist(): void { this.store.set(KEY, this.rows) }
@@ -46,8 +60,8 @@ export class CommentOutbox implements OutboxPort {
   // The caller persists: a flush writes the ledger once, not once per row it touched.
   private failed(row: Row, error: unknown): void {
     if (row.tries && row.tries >= this.maxTries) {
-      row.status = 'dropped'
       this.gaveUp(row.message, row.tries, String(error).slice(0, 200))
+      settle(row, 'dropped')
     }
   }
 
@@ -75,7 +89,7 @@ export class CommentOutbox implements OutboxPort {
     for (const [id, row] of Object.entries(this.rows)) {
       if (row.status !== 'pending' || this.posting.has(id)) continue
       if (!this.sink.accepts(row.message)) {
-        row.status = 'dropped'
+        settle(row, 'dropped')
         touched = true
         continue
       }
@@ -87,11 +101,11 @@ export class CommentOutbox implements OutboxPort {
         if (posted instanceof Promise) {
           // Sent only once the channel says so; a failed post stays pending for the next flush.
           this.posting.add(id)
-          posted.then(() => { row.status = 'sent'; this.persist() }, error => { this.failed(row, error); this.persist() }).finally(() => this.posting.delete(id))
+          posted.then(() => { settle(row, 'sent'); this.persist() }, error => { this.failed(row, error); this.persist() }).finally(() => this.posting.delete(id))
           sent++
           continue
         }
-        row.status = 'sent'
+        settle(row, 'sent')
         touched = true
         sent++
       } catch (error) {

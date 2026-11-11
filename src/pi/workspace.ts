@@ -13,29 +13,16 @@ export interface WorkspaceRequest {
   /** Personal CLIs and publishers: names that must not run under the operator's identity. */
   blockedCommands?: readonly string[]
   stateDir: string
-  extra?: Record<string, string>
-  /**
-   * A scoped token for this worker's GitHub work. The worker's HOME is its own, so it has no login: without
-   * this it writes code it cannot hand over, which is what the brief tells every code ticket to do.
-   */
-  workerToken?: string
-  /** What git records on the worker's commits: a worker with no git config gets `user@host.local`. */
-  identity?: { name: string, email: string }
 }
 
-/** Names that hand a worker the operator's identity: token paths, agent config, cloud credentials. */
-const LEAKS = /^(PI_SUPERAGENT_(GITHUB_TOKEN_FILE|GITHUB_SELF|STATE|WORKTREES)|PI_OPS_|SSH_AUTH_SOCK|AWS_|GOOGLE_|GH_TOKEN|GITHUB_TOKEN)/
-
-/** The base of a worker's environment: the operator's secrets stay in the router's process. */
-export function workerBase(source: NodeJS.ProcessEnv): Record<string, string> {
-  return Object.fromEntries(Object.entries(source)
-    .filter((entry): entry is [string, string] => entry[1] !== undefined && !LEAKS.test(entry[0])))
-}
-
+/**
+ * A worker runs as the operator: in a herdr tab, with the operator's HOME, harness, keys and logins (operator,
+ * 2026-11-10: agents have all the power). What bounds it is the guard in its own pi: blocked commands, writes
+ * kept in the workspace. A per-worker HOME was built here once and never reached a herdr worker, so it is gone.
+ */
 export interface PreparedWorkspace {
   dir: string
   path: string
-  env: Record<string, string>
 }
 
 export class WorkspaceError extends Error {
@@ -57,23 +44,6 @@ export function prepareWorkspace(request: WorkspaceRequest): PreparedWorkspace {
   }
   const bin = shims(request.stateDir, request.blockedCommands ?? [])
   const path = `${bin}:${process.env.PATH ?? ''}`
-  // A ticket's text is prompt content, so a worker's HOME is its own: the real HOME holds the gh keychain,
-  // ~/.ssh and the token files the blocked-command shims only paper over. Outside the checkout, because a
-  // checkout directory that is not empty means "already cloned" to checkoutRepository.
-  const home = join(request.stateDir, 'worker-homes', request.ticketId)
-  mkdirSync(home, { recursive: true, mode: 0o700 })
-  seedHome(home, request.workerToken, request.identity)
-  const env: Record<string, string> = {
-    ...workerBase(process.env),
-    PATH: path,
-    ...(request.workerToken ? { GH_TOKEN: request.workerToken } : {}),
-    HOME: home,
-    XDG_CONFIG_HOME: join(home, '.config'),
-    GH_CONFIG_DIR: join(home, '.config', 'gh'),
-    PI_SUPERAGENT_TICKET: request.ticketId,
-    PI_SUPERAGENT_DIR: dir,
-    ...request.extra,
-  }
   // The prepare script is the operator's own file, so it runs with the operator's environment.
   const prepareEnv = { ...process.env as Record<string, string>, PATH: path, PI_SUPERAGENT_TICKET: request.ticketId, PI_SUPERAGENT_DIR: dir }
   if (request.prepare) {
@@ -84,7 +54,7 @@ export function prepareWorkspace(request: WorkspaceRequest): PreparedWorkspace {
       throw new WorkspaceError('prepare-failed', `prepare command failed for ${request.ticketId}`, e.stderr || e.message || e.signal || 'unknown')
     }
   }
-  return { dir, path, env }
+  return { dir, path }
 }
 
 const run = promisify(execFile)
@@ -117,17 +87,6 @@ export async function checkoutRepository(workspace: PreparedWorkspace, repo: str
   } finally {
     rmSync(stage, { recursive: true, force: true })
   }
-}
-
-/** The worker's own HOME, seeded so its commits carry an identity and its scoped token can reach GitHub. */
-function seedHome(home: string, token?: string, identity?: { name: string, email: string }): void {
-  const name = identity?.name ?? 'pi-superagent'
-  const gitconfig = ['[user]', `\tname = ${name}`, `\temail = ${identity?.email ?? `${name}@users.noreply.github.com`}`]
-  if (token) {
-    writeFileSync(join(home, '.git-credentials'), `https://x-access-token:${token}@github.com\n`, { mode: 0o600 })
-    gitconfig.push('[credential]', '\thelper = store')
-  }
-  writeFileSync(join(home, '.gitconfig'), `${gitconfig.join('\n')}\n`, { mode: 0o600 })
 }
 
 /** One directory, first on PATH, holding a refusal for every blocked name. A shim says what it refused. */
