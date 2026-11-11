@@ -81,7 +81,8 @@ superagent status    # 0 healthy · 1 down · 2 up and not beating · 3 waiting 
 superagent remedy    # what the health job runs: 1 starts, 2 restarts, 0 and 3 and 4 do nothing
 superagent restart   # safe at any time: workers keep running and the new router adopts them
 superagent stop      # leaves a marker, so the health check will not restart it
-superagent start     # clears the marker
+superagent start     # clears the marker; refuses a checkout with uncommitted code (--allow-dirty overrides)
+superagent backup    # one sqlite-safe copy of tickets.db per day into <state>/archive, last 14 kept
 ```
 
 In a checkout, the same script is `scripts/superagent`.
@@ -97,7 +98,9 @@ to a router that is healthy (0), waiting for setup (3), carrying a part a restar
 purpose: `remedy` honours the stop marker on its own, so a deliberate stop stays deliberate. A parked loop is
 recovered within five minutes, and a restart costs the router's tab and nothing else, because the workers are
 their own sessions and the new router adopts them. Restarts are capped at one per
-`PI_SUPERAGENT_RESTART_COOLDOWN_MIN` (30), so a fault a restart cannot fix cannot restart the router forever.
+`PI_SUPERAGENT_RESTART_COOLDOWN_MIN` (30), so a fault a restart cannot fix cannot restart the router forever —
+and a healthy beat clears that cap, because a loop that dies in the boot right after a watchdog restart used to
+be outside the remedy for the full cooldown (measured 2026-11-11: an outage lasted 25 minutes that way).
 Install it once:
 
 ```sh
@@ -125,6 +128,13 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.example.superagent
 
 `/tmp/superagent-health.log` carries every pass, each line dated, so a remedy that repeats reads as one:
 `2026-11-09T15:20:03Z health: running and not beating: health.json is 16 min old ...; restarting the router`.
+The job ends with `superagent backup`: once a day it writes an integrity-checked copy of `tickets.db` into
+`<state>/archive`, keeping the last 14. The database is the queue, the read positions and the receipts; a box
+that loses its disk loses all of it, and the code rebuilds from a clone in a minute.
+
+`superagent start` refuses a checkout whose `src/` or `scripts/` has uncommitted changes, because the router
+runs those files as they are: on 2026-11-10 an uncommitted edit to the script ran live and posted on the board.
+`--allow-dirty` (or `PI_SUPERAGENT_ALLOW_DIRTY=1`) launches mid-edit anyway.
 
 ### Keep the git credential out of .git/config
 
