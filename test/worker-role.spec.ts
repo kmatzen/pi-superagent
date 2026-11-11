@@ -193,9 +193,64 @@ describe('the worker role', () => {
     await new Promise(resolve => setTimeout(resolve, 50))
     expect(f.sent, 'nothing before the session starts').toEqual([])
     f.emit('session_start')
+    await until(() => f.sent.length === 1)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(f.sent, 'idle: one input until the run it starts begins').toEqual([{ text: 'the brief', deliverAs: 'followUp' }])
+    f.emit('agent_start')
     await until(() => f.sent.length === 2)
     expect(f.sent).toEqual([{ text: 'the brief', deliverAs: 'followUp' }, { text: 'also check CI', deliverAs: 'steer' }])
     expect(inboxFiles(dir), 'not read yet: the run has not taken them').toEqual(['1-0000.json', '2-0001.json'])
+    f.emit('agent_settled', { aborted: false })
+    expect(inboxFiles(dir)).toEqual([])
+    f.emit('session_shutdown')
+  })
+
+  it('never sends into a run an idle send is still starting, where pi kills the input unread', async () => {
+    // pi 1.5 marks a session busy only after its input handlers ran: a second send in one idle burst dies on
+    // the screen ("Agent is already processing a prompt"), never to the sender. The fake orders it as pi does.
+    const dir = tmp()
+    const f = fakePi()
+    let phase: 'idle' | 'starting' | 'running' = 'idle'
+    const killed: string[] = []
+    f.pi.sendUserMessage = (text, options) => {
+      if (phase === 'starting') { killed.push(text); return }
+      if (phase === 'idle') phase = 'starting'
+      f.sent.push({ text, deliverAs: options?.deliverAs })
+    }
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir }, 10)
+    mkdirSync(join(dir, 'inbox'), { recursive: true })
+    for (const [i, text] of ['continue', 'continue again', 'and CI'].entries()) {
+      writeFileSync(join(dir, 'inbox', `${i + 1}-000${i}.json`), JSON.stringify({ text, mode: 'followUp' }))
+    }
+    f.emit('session_start')
+    await until(() => f.sent.length === 1)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(killed, 'nothing sent while the first run is starting').toEqual([])
+    phase = 'running'
+    f.emit('agent_start')
+    await until(() => f.sent.length === 3)
+    expect(f.sent.map(s => s.text)).toEqual(['continue', 'continue again', 'and CI'])
+    f.emit('agent_settled', { aborted: false })
+    phase = 'idle'
+    expect(inboxFiles(dir), 'all three read, none lost').toEqual([])
+    expect(killed).toEqual([])
+    f.emit('session_shutdown')
+  })
+
+  it('sends an idle input again when pi silently started no run with it', async () => {
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir }, 10, 100)
+    mkdirSync(join(dir, 'inbox'), { recursive: true })
+    writeFileSync(join(dir, 'inbox', '1-0000.json'), JSON.stringify({ text: 'the brief', mode: 'followUp' }))
+    writeFileSync(join(dir, 'inbox', '2-0001.json'), JSON.stringify({ text: 'the review', mode: 'followUp' }))
+    f.emit('session_start')
+    await until(() => f.sent.length === 2)
+    expect(f.sent.map(s => s.text), 'the same input again, not the next one').toEqual(['the brief', 'the brief'])
+    expect(lines(join(dir, 'events.jsonl')).some(e => e.type === 'inbox_error' && e.name === '1-0000.json'), 'the router can see it').toBe(true)
+    f.emit('agent_start')
+    await until(() => f.sent.length === 3)
+    expect(f.sent[2]).toEqual({ text: 'the review', deliverAs: 'followUp' })
     f.emit('agent_settled', { aborted: false })
     expect(inboxFiles(dir)).toEqual([])
     f.emit('session_shutdown')

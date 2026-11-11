@@ -21,6 +21,8 @@ function askText(questions: unknown): string {
 
 export const ACTIVITY_EVERY_MS = 5000
 export const SILENT_FINISH = 'the worker finished its run without calling ticket_report'
+// An idle send that starts no run within this long counts as refused and is sent again.
+export const START_GRACE_MS = 60_000
 
 // A worker that ends its turn in silence is not a worker that needs a person. Measured 2026-11-10: 14 of 22
 // open tickets sat parked on this one summary, so the fleet's lost throughput was a forgotten tool call, not
@@ -41,7 +43,7 @@ const rolesHeld = (): Set<string> => {
   return (host[ROLES_HELD] ??= new Set<string>())
 }
 
-export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000): boolean {
+export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, startGraceMs = START_GRACE_MS): boolean {
   const dir = env.PI_SUPERAGENT_WORKER_DIR
   if (env.PI_SUPERAGENT_ROLE !== 'worker' || !dir) return false
   // true, not false: this pi is a worker, and the caller must not go on to start a router in it.
@@ -91,7 +93,16 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
   // silently be nudged forever, which is worse than parking it. Proved by test on the first attempt.
   let silentStreak = 0
   const inflight = new Map<string, string>()
-  pi.on('agent_start', () => append('events.jsonl', { type: 'turnStarted' }))
+  // pi 1.5 marks a session busy only after its input handlers ran: a second send in one idle burst starts a
+  // second run that pi kills on screen, never through this file, and the next settle deleted it unread (24
+  // multi-input deliveries on 2026-11-11). Idle, one input goes and the rest wait for agent_start.
+  let running = false
+  let starting: { name: string; at: number } | undefined
+  pi.on('agent_start', () => {
+    running = true
+    starting = undefined
+    append('events.jsonl', { type: 'turnStarted' })
+  })
   pi.on('agent_settled', (event) => {
     // Filed here, before the settle: only this process knows the order of a run's events for certain.
     if (!reported && silentStreak === 0) {
@@ -113,6 +124,8 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
       append('events.jsonl', { type: 'input_read', name })
     }
     inflight.clear()
+    running = false
+    starting = undefined
     append('events.jsonl', { type: 'settled' })
   })
   let lastActivity = 0
@@ -129,6 +142,12 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
 
   // Not awaited: sendUserMessage can resolve only when the run ends, and a steer must land mid-run.
   const drain = (): void => {
+    // pi can refuse an idle send without telling this file (mid-compaction): past the grace, send it again.
+    if (starting && !running && Date.now() - starting.at >= startGraceMs) {
+      inflight.delete(starting.name)
+      append('events.jsonl', { type: 'inbox_error', name: starting.name, error: 'no run started; sending it again' })
+      starting = undefined
+    }
     for (const name of readdirSync(inbox).filter(n => n.endsWith('.json')).sort()) {
       const file = join(inbox, name)
       let input: { text: string; mode?: 'steer' | 'followUp' }
@@ -141,10 +160,13 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
         continue
       }
       if (inflight.has(name)) continue // sent, waiting for the run that reads it
+      if (starting && !running) return // the run the last idle send starts takes the rest as queued input
       inflight.set(name, file)
+      if (!running) starting = { name, at: Date.now() }
       Promise.resolve(pi.sendUserMessage(input.text, { deliverAs: input.mode ?? 'followUp' }))
         .catch((error: unknown) => {
           inflight.delete(name)
+          if (starting?.name === name) starting = undefined
           append('events.jsonl', { type: 'inbox_error', error: String(error).slice(0, 200) })
         })
     }
