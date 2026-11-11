@@ -11,7 +11,17 @@ export interface SessionPilot {
 export interface AssessorOptions {
   /** Optional override; the default prompt states the facts and the four answers. */
   render?(candidate: Candidate): string
+  /**
+   * Answers recorded for trigger sets judged before. Measured 2026-11-11: the engine re-asked a thread's
+   * Eval every pass, the judge gave the same ignore each time, and the fleet burned ~39,000 judge calls a
+   * day re-asking "get green" against the ticket that already owned it. A seen set for answers, not a cache
+   * of truth: a new trigger id on the thread is a new question and goes to the judge.
+   */
+  memo?: { get(key: string): string | undefined; set(key: string, reason: string): void }
 }
+
+/** What a judge sees is the trigger set and the strength; that is what an answer belongs to. */
+export const memoKey = (c: Candidate): string => `${[...c.triggers].map(t => t.id).sort().join('|')}|${c.strength}`
 
 export const renderCandidate = (c: Candidate): string => [
   `Assess eval ${c.evalId} (policy ${c.policyVersion}, ${c.strength}).`,
@@ -55,6 +65,17 @@ export class SessionAssessor implements Assessor {
   // double acknowledgement the operator reads.
   request(candidate: Candidate): void {
     if (this.pending.has(candidate.evalId)) return
+    const memo = this.options.memo
+    const key = memo && memoKey(candidate)
+    const seen = key ? memo!.get(key) : undefined
+    if (memo && key && seen !== undefined) {
+      // Answer it as the judge answered last time, outside this engine command: the engine re-asks the same
+      // set in a loop, and a loop must cost no model turn.
+      this.engine().candidateDelivered(candidate.evalId)
+      const trigger = candidate.triggers[0]
+      if (trigger) queueMicrotask(() => { try { this.engine().decide(trigger.id, { kind: 'ignore', reason: seen, evalId: candidate.evalId }) } catch { /* the engine moved on; its next ask stands */ } })
+      return
+    }
     this.pending.set(candidate.evalId, candidate)
     if (this.inFlight === null) this.send(candidate)
     else this.queue.push(candidate.evalId)
@@ -91,6 +112,7 @@ export class SessionAssessor implements Assessor {
     if (!candidate) return
     const trigger = candidate.triggers[0]
     if (!trigger) return
+    if (this.options.memo && outcome.kind === 'ignore') this.options.memo.set(memoKey(candidate), typeof outcome.reason === 'string' ? outcome.reason : 'the same triggers were ignored before')
     this.engine().decide(trigger.id, { ...outcome, evalId })
     if (this.inFlight === evalId) { this.inFlight = null; this.drain() }
   }
