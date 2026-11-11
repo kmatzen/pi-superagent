@@ -146,13 +146,16 @@ describe('GithubSource', () => {
     expect(await f.source.poll()).toHaveLength(0)
   })
 
-  it("an issue opened from the agent's own account is not a request, so a worker cannot feed itself", async () => {
+  it("the agent's own account: its asks to the operator are not requests, and the work it files is", async () => {
+    // Agents file the bugs they find as the engine's account (2026-11-11, issue 369). An author rule kept all of
+    // it out of the fleet; the title verb says which of its issues are asks.
     const issues: IssueState[] = []
     const f = fixture([], issues)
     f.source.bootstrap()
     await f.source.poll()
-    issues.push(issue({ author: 'superagent[bot]' }))
-    expect(await f.source.poll()).toHaveLength(0)
+    issues.push(issue({ issue: 30, author: 'superagent[bot]', title: 'DECIDE: which proxy tier to keep' }))
+    issues.push(issue({ issue: 31, author: 'superagent[bot]', title: 'Fix the node graph outputs reading 0.0' }))
+    expect((await f.source.poll()).map(t => t.text)).toEqual(['Fix the node graph outputs reading 0.0'])
   })
 
   it('an issue carrying the agent\'s own footer is not a request', async () => {
@@ -276,7 +279,7 @@ describe('GithubSource', () => {
   it('a standing ask gets its launch back when the router says yes, and nothing is written to the board', async () => {
     // Labels are gone (operator, 2026-11-10): the re-grant is a trigger and nothing else. The api here has no
     // label write at all, so a source that still tried to make one would fail this test by throwing.
-    const f = fixture([], [issue({ issue: 214, title: 'DO: keep the panel green' })])
+    const f = fixture([], [issue({ issue: 214, title: 'Keep the panel green' })])
     f.store.set('source:github:o/r:issues', ['#214'])
     const asked: string[] = []
     const source = new GithubSource(f.api, {
@@ -285,22 +288,25 @@ describe('GithubSource', () => {
     }, f.store)
     source.bootstrap()
     const fired = await source.poll()
-    expect(fired.map(tr => tr.text), 'the ask fires again').toEqual(['DO: keep the panel green'])
+    expect(fired.map(tr => tr.text), 'the ask fires again').toEqual(['Keep the panel green'])
     expect(fired[0]).toMatchObject({ id: expect.stringMatching(/^github:#214:grant:/), meta: { via: 'grant', author: 'octocat' } })
     expect(await source.poll(), 'the counter says no the second time').toHaveLength(0)
     expect(f.kv.has('source:github:o/r:label-grants'), 'no grant journal is kept').toBe(false)
   })
 
-  it('an open issue is standing work, and an ask to the operator or a bot\'s issue is not', async () => {
-    // Operator, 2026-11-10: "unlabeled issues should absolutely be processed." The ask verb and the engine's own
-    // authorship keep an ask out of the queue; a bot's issue is not a person's request, as on first sight.
+  it('an open issue is standing work whoever filed it; an ask to the operator, or a bot\'s issue, is not', async () => {
+    // Operator, 2026-11-10: "unlabeled issues should absolutely be processed." The ask is its title verb, the ask
+    // protocol's (DECIDE, MERGE, APPROVE, DO, ANSWER) and the ones asks use in practice (RUN). A bot's issue is not a
+    // person's request, as on first sight.
     const f = fixture([], [
       issue({ issue: 220, title: 'rename the Export button to Ship' }),
       issue({ issue: 221, title: 'MERGE transmute 1290 once its gates are green' }),
-      issue({ issue: 222, title: 'the panel is blank after a reload', author: 'superagent[bot]' }),
+      issue({ issue: 222, title: 'Fix the panel going blank after a reload', author: 'superagent[bot]' }),
       issue({ issue: 223, title: 'Bump the base image', author: 'github-actions[bot]' }),
+      issue({ issue: 224, title: 'DO pick the compute route for the run', author: 'superagent[bot]' }),
+      issue({ issue: 225, title: 'RUN /reload in the three sessions', author: 'superagent[bot]' }),
     ])
-    f.store.set('source:github:o/r:issues', ['#220', '#221', '#222', '#223'])
+    f.store.set('source:github:o/r:issues', ['#220', '#221', '#222', '#223', '#224', '#225'])
     const asked: string[] = []
     const source = new GithubSource(f.api, {
       repo: 'o/r', self: 'superagent[bot]', bots: new Set(['github-actions[bot]']),
@@ -308,8 +314,9 @@ describe('GithubSource', () => {
     }, f.store)
     source.bootstrap()
     const fired = (await source.poll()).map(tr => tr.text)
-    expect(fired, 'a plain open issue is work').toEqual(['rename the Export button to Ship'])
-    expect(asked, 'only the person\'s plain issue is offered to the router').toEqual(['#220'])
+    expect(fired, 'a plain open issue is work, and so is the work an agent filed').toEqual(
+      ['rename the Export button to Ship', 'Fix the panel going blank after a reload'])
+    expect(asked, 'asks and a bot\'s issue are never offered to the router').toEqual(['#220', '#222'])
   })
 
   it('the router is the only thing that says no to standing work, and a no fires nothing', async () => {

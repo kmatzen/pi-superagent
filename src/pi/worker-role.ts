@@ -118,6 +118,8 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
     append('events.jsonl', { type: 'activity' })
   }
   pi.on('tool_execution_start', activity)
+  // A command streaming output is a worker at work: without this a long build read as 15 minutes of silence.
+  pi.on('tool_execution_update', activity)
   pi.on('message_update', activity)
 
   // Not awaited: sendUserMessage can resolve only when the run ends, and a steer must land mid-run.
