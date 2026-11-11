@@ -51,8 +51,8 @@ source reads no label and writes none, `superagent intake` (which only stamped t
 saying so, and a re-grant is a trigger marked `via: grant` and nothing else. What a label used to decide, the
 router decides from its own tickets (`regrantable`): an issue that never had a ticket is starved work, an
 open ticket qualifies by the state of its work, and an issue whose tickets all ended is never re-granted,
-because that is finished work waiting on its pull requests, or a stop. A person un-stops a ticket from the
-panel.
+because that is finished work waiting on its pull requests, or a stop. A person's comment on a stopped
+ticket's issue goes to the judge, which may open a new ticket.
 
 **Stop a ticket that repeats itself.** The Nth report that lands with nothing new on the thread recruits
 a worker that can only report it again, so at `PI_SUPERAGENT_REPORT_CAP` (3) the ticket says so on itself

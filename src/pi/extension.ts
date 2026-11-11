@@ -239,7 +239,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const open = repos.tickets.open()
     const claimed = new Set(open.filter(t => { const a = t.assignments.at(-1); return a && a.state !== 'pending' }).flatMap(threads))
     const onIt = new Set(open.filter(t => ['running', 'pending', 'ready', 'blocked'].includes(t.assignments.at(-1)?.state ?? '')).flatMap(threads))
-    const board = openBoard.filter(i => !isOperatorAsk(i, cfg.githubSelf ?? cfg.self))
+    const board = openBoard.filter(i => !isOperatorAsk(i))
     const waiting = board.filter(i => !claimed.has(`#${i.issue}`))
     const hours = (iso: string) => (Date.now() - Date.parse(iso)) / 3.6e6
     const oldest = waiting.reduce((m, i) => Math.max(m, hours(i.updatedAt)), 0)
@@ -569,12 +569,13 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       id: `repeat:${ticket.id}:${createHash('sha1').update(said).digest('hex').slice(0, 12)}`,
       channel, kind: 'notice', ticketId: ticket.id,
       text: `${channel.thread}: the same result has been reported ${times} times — ${run.summary}. Nothing new arrived on this thread `
-        + 'between the reports, so no further session runs this ticket. It is stopped, not waiting: a comment here will not wake it, and a person un-stops it.',
+        + 'between the reports, so no further session runs this ticket. It is stopped: to ask again, comment here, and the judge decides whether to start new work.',
     })
     if (!ticket.ended) {
       // A stop by the router on a repeating loop, and it is deliberately the strong kind: `wake` refuses to
       // resume a stopped ticket, so neither the router's receipt, a re-grant, nor a pull request's CI churn can
-      // put a session back on it. A person un-stops it from the panel, which is the deliberate act.
+      // put a session back on it. A person's comment goes to the judge, which may open a new ticket: that is the
+      // deliberate act, and the only door (the panel has pause and stop, no un-stop).
       try {
         engine.stopTicket(ticket.id, `the same result was reported ${times} times, so the ticket stops here`, 'loop')
         log.line('info', 'ticket.repeat_stopped', { ticket: ticket.id, times, state: run.state })
@@ -884,7 +885,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // A running assignment with no worker is the one state every worker-walking sweep cannot see, so it gets its
     // own sweep, on the same 15-minute window as the quiet rule: long enough that a launch in flight is never
     // swept, short enough that a corpse holds a slot for minutes, not hours.
-    for (const id of stalledTickets(repos.tickets.open(), executor.workers(), Date.now(), 15 * 60_000, Math.max(0, (cfg.maxConcurrent ?? 4) - executor.workers().length))) {
+    for (const id of stalledTickets(repos.tickets.open(), executor.workers(), Date.now(), 15 * 60_000)) {
       const a = repos.tickets.get(id)?.assignments.at(-1)
       if (!a) continue
       log.line('warn', 'assignment.stalled', { ticket: id, assignment: a.id, state: a.state, startedAt: a.startedAt })
@@ -963,21 +964,14 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       if (executor.workers().some(w => w.ticketId === stopped.id)) continue
       engine.wake(stopped.id)
     }
-    // A worker quiet for 15 minutes gets a question on the panel, not the issue: a long build is not news.
+    // Quiet for 15 minutes: a question on the panel, and the worker stays bound. Silence is a long command as often as a
+    // hang, and a released worker's late report is never read (2026-11-11: 6 of 10 traced releases lost one, 4 `ready`).
     for (const quiet of executor.quiet(cfg.workerQuietMinutes ?? 15)) {
       engine.report(quiet.ticketId, {
         state: 'blocked',
         summary: `the worker sent no event for ${Math.round(quiet.quietSeconds / 60)} minutes in ${quiet.workspace}`,
         question: 'steer it, stop it, or accept the work it has done',
       } as never)
-      // The silence became a question, and a question is what frees an agent (the operator's rule 2026-11-08): a
-      // worker that has said nothing for 15 minutes is a tab, an agent and a slot waiting on a person. Measured
-      // 2026-11-09, minutes after the release rule shipped: 6 tickets still held finished workers whose only
-      // report predated the deploy, because this sweep — the one report they were going to file — went straight
-      // to the ticket and left the Session in place. The report goes first: it belongs to the running Assignment
-      // that the release then ends.
-      const running = repos.tickets.get(quiet.ticketId)?.assignments.at(-1)
-      if (running?.state === 'running') releaseIfWaiting(quiet.ticketId, running.id, 'quiet')
     }
     // The operator's deadline, not the router's: report and let a person decide. A worker mid-legitimate
     // work must never be terminated by a clock the router owns, so this speaks and does not kill.
@@ -1426,19 +1420,17 @@ export function duplicateLiveTickets(
 }
 
 /**
- * Tickets whose work is queued or running in the store while nothing runs it.
- *
- * Two stalls, both measured 2026-11-10 on one laptop. (1) `running` with no worker: after a restart the router
- * adopted two sessions, the agents went idle, the live entries left, the store kept `running`. (2) `pending`
- * that never started: five accepted asks — board issues 163, 166, 274, 355, 357 — sat `pending` with 8 of 8
- * launch slots free, and only a router restart at 16:18Z moved them. Measured at 15:50Z the fleet had started
- * no worker in 7.8 hours with those five asks queued, so the queue is the defect, not the board.
+ * Tickets whose assignment is `running` in the store while no worker runs it.
  *
  * Measured 2026-11-10: after a restart the router adopted two sessions, both agents went idle, their live
  * entries went with the idle sessions, and the tickets stayed `running` in the store for 7 hours. Every sweep
  * in the router walks the live workers — the quiet rule included — so an assignment that outlived its worker
  * is invisible to all of them: 2 of 8 launch slots held by a corpse, the ticket un-dispatchable, the agents
  * idle in tabs nobody talks to.
+ *
+ * Not a queued launch: releasing one does nothing (the core ends only a running assignment), and its age read
+ * as the ticket's, so every relaunch of an old ticket was "stale" on its first pass. Measured 2026-11-11: all
+ * 482 warnings this sweep had logged were queued launches. A stuck launch queue is the health check's to say.
  *
  * The report is respected: a worker that told the fleet it awaits a human is parked, not stale, and the answer
  * path owns it. `graceMs` keeps a launch that has not registered yet out of the sweep.
@@ -1448,7 +1440,6 @@ export function stalledTickets(
   liveWorkers: readonly { ticketId?: string }[],
   nowMs: number,
   graceMs: number,
-  freeSlots: number,
 ): string[] {
   const live = new Set(liveWorkers.map(w => w.ticketId).filter(Boolean) as string[])
   const out: string[] = []
@@ -1456,13 +1447,8 @@ export function stalledTickets(
     const a = t.assignments[t.assignments.length - 1]
     if (!a || live.has(t.id)) continue
     if (awaitsAHumanState(String(a.report?.state ?? ''))) continue
-    // A queued launch needs free slots to be stalled: with the cap full, a pending assignment is waiting its
-    // turn, and sweeping it would churn the queue the operator built the cap to protect.
-    if (a.state === 'pending' && freeSlots <= 0) continue
-    // The model's launch-queue state is 'pending'; 'queued' is the panel's word for the same thing.
-    if (a.state !== 'running' && a.state !== 'pending') continue
+    if (a.state !== 'running') continue
     const started = Date.parse(a.startedAt ?? t.createdAt)
-    // A queued launch has no startedAt, so its age is the ticket's: the ask has been standing, not the run.
     if (!Number.isFinite(started) || nowMs - started < graceMs) continue
     out.push(t.id)
   }

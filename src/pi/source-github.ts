@@ -70,14 +70,13 @@ export interface GithubSourceOptions {
 }
 
 /**
- * Labels are obsolete (operator, 2026-11-10: "the labels were a requirement of the old fleet-board system which
- * is now dead. unlabeled issues should absolutely be processed", and "These labels are obsolete"). An ask to the
- * operator is now what its title says, plus anything the engine's own account opened — the engine files its asks
- * with the operator's name on them, and the fleet must not recruit itself to answer them.
+ * An ask to the operator is what its title says, whoever opened it: the ask protocol's verbs (DECIDE, MERGE, APPROVE,
+ * DO, ANSWER), plus the ones asks use in practice (RUN, CHOOSE, PICK, LABEL, UNBLOCK). Not who opened it: agents file
+ * work as the engine's own account too, and an author rule kept that work out of the fleet for good (2026-11-11:
+ * issue 369, and 43 of the bot's last 100 issues carried no ask verb).
  */
-export const ASK_VERB = /^(DECIDE|MERGE|APPROVE|CHOOSE|PICK|ANSWER|LABEL|UNBLOCK)\b/
-export const isOperatorAsk = (issue: { title: string; author?: string }, self?: string): boolean =>
-  ASK_VERB.test(issue.title.trim()) || (self !== undefined && issue.author === self)
+export const ASK_VERB = /^(DECIDE|MERGE|APPROVE|DO|ANSWER|RUN|CHOOSE|PICK|LABEL|UNBLOCK)\b/
+export const isOperatorAsk = (issue: { title: string }): boolean => ASK_VERB.test(issue.title.trim())
 
 const sinceKey = (repo: string) => `source:github:${repo}:since`
 /** Group rows by a key, keeping the order in which the keys first appear. */
@@ -168,10 +167,12 @@ export class GithubSource {
       const key = `#${issue.issue}`
       if (!seen.has(key)) {
         seen.add(key)
-        if (issue.author === this.options.self || !this.isHuman(issue.author)
+        // The engine's own account asks the operator with it, so its asks are not requests; its other issues are
+        // work an agent filed, and they are requests like anyone's.
+        if ((issue.author === this.options.self && isOperatorAsk(issue)) || !this.isHuman(issue.author)
           || (issue.body ?? '').includes(this.options.selfMarker ?? REPLY_MARKER)) continue
         out.push(this.requestTrigger(issue, 'issue', key))
-      } else if (this.options.regrant && this.isHuman(issue.author) && !isOperatorAsk(issue, this.options.self)) {
+      } else if (this.options.regrant && this.isHuman(issue.author) && !isOperatorAsk(issue)) {
         // A standing ask is an open issue that is not an ask to the operator. The ROUTER decides, because it is
         // the only party that knows whether a worker is or was on this thread; the counter there caps the loop.
         if (this.options.regrant(issue.issue, key)) out.push(this.requestTrigger(issue, 'grant', key))

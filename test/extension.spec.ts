@@ -477,26 +477,21 @@ describe('the router extension', () => {
         assignments: [{ id: `${id}-a`, state, startedAt, ...(report ? { report: { state: report } } : {}) }] }) as never
     const live = (ids: string[]) => ids.map(ticketId => ({ ticketId }))
     const old = t('464b69a8', '2026-11-10T06:28:00.000Z')
-    expect(stalledTickets([old], live([]), now, grace, 4), 'running with no worker and 9 hours of age goes').toEqual(['464b69a8'])
-    expect(stalledTickets([old], live(['464b69a8']), now, grace, 4), 'a live worker means it is not stale').toEqual([])
+    expect(stalledTickets([old], live([]), now, grace), 'running with no worker and 9 hours of age goes').toEqual(['464b69a8'])
+    expect(stalledTickets([old], live(['464b69a8']), now, grace), 'a live worker means it is not stale').toEqual([])
     const fresh = t('a1', '2026-11-10T15:49:00.000Z')
-    expect(stalledTickets([fresh], live([]), now, grace, 4), 'a launch a minute old is a launch in flight').toEqual([])
+    expect(stalledTickets([fresh], live([]), now, grace), 'a launch a minute old is a launch in flight').toEqual([])
     const asked = t('a2', '2026-11-10T06:28:00.000Z', 'running', 'blocked')
-    expect(stalledTickets([asked], live([]), now, grace, 4), 'a worker that asked a human is parked, not stale').toEqual([])
+    expect(stalledTickets([asked], live([]), now, grace), 'a worker that asked a human is parked, not stale').toEqual([])
     const done = t('a3', '2026-11-10T06:28:00.000Z', 'ended')
-    expect(stalledTickets([done], live([]), now, grace, 4), 'an ended assignment is not running').toEqual([])
+    expect(stalledTickets([done], live([]), now, grace), 'an ended assignment is not running').toEqual([])
     const both = t('b1', '2026-11-10T04:33:00.000Z')
-    expect(stalledTickets([old, both], live([]), now, grace, 4), 'both real corpses get swept').toEqual(['464b69a8', 'b1'])
-    const q = (id: string, createdAt: string, state = 'pending', report?: string) =>
-      ({ id, createdAt, channels: [{ source: 'github', thread: `#${id}` }],
-        assignments: [{ id: `${id}-a`, state, ...(report ? { report: { state: report } } : {}) }] }) as never
-    const standing = q('974dee0c', '2026-11-08T01:41:00.000Z')
-    expect(stalledTickets([standing], live([]), now, grace, 4), 'a queued launch with 4 free slots is stalled, not waiting').toEqual(['974dee0c'])
-    expect(stalledTickets([standing], live([]), now, grace, 0), 'with the cap full it is waiting its turn, so leave the queue alone').toEqual([])
-    const justQueued = q('q2', '2026-11-10T15:49:30.000Z')
-    expect(stalledTickets([justQueued], live([]), now, grace, 4), '30 seconds in the queue is a launch in flight').toEqual([])
-    const askedQueue = q('q3', '2026-11-08T01:41:00.000Z', 'pending', 'waiting')
-    expect(stalledTickets([askedQueue], live([]), now, grace, 4), 'a ticket waiting a person is parked, not stalled').toEqual([])
+    expect(stalledTickets([old, both], live([]), now, grace), 'both real corpses get swept').toEqual(['464b69a8', 'b1'])
+    // A queued launch is the launch queue's: releasing one does nothing, and its age read as the ticket's, so every
+    // relaunch of an old ticket was "stale" on its first pass (2026-11-11: all 482 warnings were queued launches).
+    const queued = { id: 'q1', createdAt: '2026-11-08T01:41:00.000Z', channels: [{ source: 'github', thread: '#q1' }],
+      assignments: [{ id: 'q1-a', state: 'pending' }] } as never
+    expect(stalledTickets([queued], live([]), now, grace), 'a queued launch two days into its ticket is not swept').toEqual([])
   })
 
   it('publishes the queue the cap hides: labelled work with no live ticket, and how long it has waited', async () => {
@@ -510,7 +505,7 @@ describe('the router extension', () => {
     }
     const f = fixture(true, undefined, undefined, undefined, { githubApi })
     await f.running.tick()
-    issues.push({ issue: 465, title: 'DO: age the launch order', body: 'Let the oldest open ask launch first.',
+    issues.push({ issue: 465, title: 'Age the launch order', body: 'Let the oldest open ask launch first.',
       author: 'octocat', association: 'OWNER', createdAt: new Date(Date.now() - 3.6e6).toISOString(),
       updatedAt: new Date(Date.now() - 3.6e6).toISOString() })
     await f.running.tick()
@@ -528,15 +523,12 @@ describe('the router extension', () => {
     expect(f.running.load().unanswered, 'a delivered run awaiting review is not board debt either').toBe(0)
   })
 
-  it('the silence question frees the agent as well, and the next comment starts a fresh worker', async () => {
-    // Measured 2026-11-09, minutes after the release rule shipped: 6 tickets still held workers that had finished
-    // before the deploy. Their next report was going to be this sweep — the question the router asks a worker that
-    // has said nothing for 15 minutes — and that report went to the ticket while the Session, its tab and its slot
-    // stayed in place. A question is what frees an agent, whoever asks it. The question goes to the panel, not the
-    // issue, so this asserts the agent and the slot rather than a thread message.
+  it('a quiet worker gets a question and keeps its session, so a report it files later still reaches the issue', async () => {
+    // Measured 2026-11-11: the sweep used to release a quiet worker, and a released worker's reports are never read.
+    // Of 10 traced releases, 6 later wrote a report nobody read, 4 of them `ready`: silence is a long build as often
+    // as a hang. The question still goes to a person; the worker stays bound and keeps its slot.
     const h = memoryHerdr()
     // 0.3 s, not 15 minutes: the executor measures silence on the wall clock, and the threshold is config.
-    // It stays above the fake's launch latency, so the worker really starts, goes quiet, and is then asked.
     const f = fixture(true, undefined, undefined, h.herdr,
       { workerTiming: { pollMs: 10, livenessMs: 600_000 }, workerQuietMinutes: 0.005 })
     f.addComment('512', 'octocat', 'bump the base image')
@@ -544,16 +536,14 @@ describe('the router extension', () => {
     await settle()
     f.decide('accept')
     await until(() => h.calls.filter(c => c === 'agentStart').length === 1)
-    h.agents.clear() // the worker stops speaking: no crash, no report, just silence
-    // `load().running` is the authoritative slot count, and a released Assignment is not parked work either:
-    // together they say the agent is gone, which is what the panel question is supposed to buy.
-    await until(() => f.running.load().running === 0)
-    expect(f.running.load().parked, 'a released worker is not parked work').toBe(0)
-    f.addComment('512', 'octocat', 'merge it and close')
-    await f.running.tick()
-    await settle()
-    await until(() => h.calls.filter(c => c === 'agentStart').length === 2)
-    expect(f.receipts('512'), 'the ticket is live: a person was never asked to re-open it').not.toMatch(/stopped/)
+    const asked = () => invoke(f, 'tickets_open', {}).content[0]!.text.includes('steer it, stop it')
+    for (let n = 0; n < 40 && !asked(); n++) { await new Promise(resolve => setTimeout(resolve, 50)); await f.running.tick() }
+    expect(asked(), 'the silence became a question for a person').toBe(true)
+    expect(f.running.load().running, 'the worker is still on its run, and still heard').toBe(1)
+    const bridge = join(f.dir, 'workers', readdirSync(join(f.dir, 'workers')).find(d => d.length === 36)!)
+    appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"ready","summary":"image bumped after a long build"}\n')
+    await until(() => f.receipts('512').includes('image bumped after a long build'))
+    expect(f.receipts('512')).toContain('ready: image bumped after a long build')
   })
 
   it('after a router restart the herdr worker is taken over, not started a second time', async () => {
@@ -1302,9 +1292,15 @@ describe('a pull request per ticket', () => {
       if (n < 2) expect(f.receipts('508'), `report ${n + 1} is not yet a loop`).not.toMatch(/reported \d+ times/)
     }
     expect(f.receipts('508')).toMatch(/the same result has been reported 3 times[\s\S]*no further session runs this ticket/)
-    expect(f.receipts('508'), 'the notice is honest: a comment will not wake a stopped ticket').toMatch(/a comment here will not wake it/)
+    expect(f.receipts('508'), 'the notice names the door that exists').toMatch(/to ask again, comment here, and the judge decides/)
     expect(ticket().ended).toMatchObject({ outcome: 'stopped' })
     expect(f.closes, 'a ticket waiting on CI keeps its issue open').toEqual([])
+    // And the door is real: the stopped ticket does not resume, and the comment reaches the judge as a new ask.
+    f.addComment('508', 'octocat', 'CI is fixed now, take it again', new Date().toISOString())
+    await f.running.tick()
+    await settle()
+    expect(f.judge.prompts.join('\n')).toContain('CI is fixed now, take it again')
+    expect(ticket().ended, 'the stopped ticket itself stays stopped').toMatchObject({ outcome: 'stopped' })
   })
 
   it("a person's words on the thread restart the count", async () => {
