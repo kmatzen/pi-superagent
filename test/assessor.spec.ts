@@ -3,12 +3,12 @@ import { Engine, MemoryRepositories, type Candidate, type OutboundMessage, type 
 import { SessionAssessor, renderCandidate, renderCandidateFor, type SessionPilot } from '../src/pi/assessor.ts'
 import type { Trigger } from '../src/core/index.ts'
 
-function fixture(evalTimeoutMs = 60_000) {
+function fixture(evalTimeoutMs = 60_000, memo?: { get(key: string): string | undefined; set(key: string, reason: string): void }) {
   const repo = new MemoryRepositories()
   const delivered: Array<{ text: string; evalId: string }> = []
   const pilot: SessionPilot = { deliver: (text, meta) => { delivered.push({ text, evalId: meta.evalId }) } }
   let engine!: Engine
-  const assessor = new SessionAssessor(() => engine, pilot)
+  const assessor = new SessionAssessor(() => engine, pilot, memo ? { memo } : {})
   const outbox: OutboundMessage[] = []
   let clock = 0
   const policy: Policy = {
@@ -139,5 +139,28 @@ describe('SessionAssessor', () => {
       .toMatch(/An artifact on its own[\s\S]*IS the request/)
     expect(text, 'an inferred accept needs named rules, or the policy refuses it')
       .toContain('artifact-implies-request')
+  })
+})
+
+describe('the assessor memo', () => {
+  it('a candidate whose trigger set was answered ignore is answered on the spot, with no judge turn', async () => {
+    const kv = new Map<string, string>()
+    const memo = { get: (k: string) => kv.get(k), set: (k: string, v: string) => { kv.set(k, v) } }
+    const delivered: string[] = []
+    const calls: Array<{ what: string; args: unknown[] }> = []
+    const fake = { candidateDelivered: (...a: unknown[]) => calls.push({ what: 'delivered', args: a }),
+                   decide: (...a: unknown[]) => calls.push({ what: 'decide', args: a }) }
+    const assessor = new SessionAssessor(() => fake as never, { deliver: (_t, meta) => { delivered.push(meta.evalId) } }, { memo })
+    const trigger: Trigger = { id: 'github:#1:abc', source: 'github', threads: [{ source: 'github', id: '#1' }],
+      actor: { source: 'github', id: 'octocat' }, human: true, at: '2026-11-05T09:00:00Z', text: 'get green', channel: { source: 'github', thread: '#1', address: { issue: '1' } }, meta: {} }
+    const candidate = { evalId: 'e1', policyVersion: 'v1', strength: 'explicit', basis: { via: 'listed' }, triggers: [trigger], tickets: [] } as never
+    memo.set('github:#1:abc|explicit', 'the open ticket owns this')
+    assessor.request(candidate)
+    expect(delivered, 'the judge is not asked a second time').toEqual([])
+    expect(calls.map(c => c.what), 'the engine is told, outside this command').toEqual(['delivered'])
+    await new Promise(resolve => setImmediate(resolve))
+    expect(calls.map(c => c.what), 'then answered with the recorded ignore').toEqual(['delivered', 'decide'])
+    expect(calls[1]!.args[1]).toMatchObject({ kind: 'ignore', reason: 'the open ticket owns this', evalId: 'e1' })
+    expect(assessor.waiting(), 'nothing is pending on the judge').toEqual([])
   })
 })
