@@ -40,6 +40,7 @@ function memoryHerdr(over: Partial<Herdr> = {}) {
       workspaceId: 'w1', agentStatus: a.agent_status,
     })),
     agentSendKeys: async (name, keys) => { calls.push(`sendKeys ${name} ${keys.join(' ')}`) },
+    paneRead: async () => '',
     ...over,
   }
   return { herdr, agents, calls }
@@ -126,6 +127,31 @@ describe('herdr workers', () => {
         .launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
     }
     expect(seen).toEqual([120_000, 45_000])
+  })
+
+  it('a pi that dies at startup fails its launch in seconds, saying what the tab said', async () => {
+    // 2026-11-10/11: every launch died in its first second on "Tool ticket_report conflicts", and the router waited
+    // out herdr's whole start timeout on each one before reporting only "timed out waiting for agent startup".
+    const m = memoryHerdr({
+      agentStart: () => new Promise(() => {}),
+      paneRead: async () => 'Error: Failed to load extension "/x/extension.ts": Tool "ticket_report" conflicts with /x/worker-extension.ts\n'
+        + 'Hint: Start without extensions using "pi -ne".\n% ',
+    })
+    const started = Date.now()
+    await expect(new HerdrWorkers({ ...options(tmp(), m.herdr), bootPollMs: 10 })
+      .launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} }))
+      .rejects.toThrow(/pi exited at startup: .*ticket_report" conflicts/)
+    expect(Date.now() - started, 'seconds, not the start timeout').toBeLessThan(2000)
+    expect(m.calls.some(c => c.startsWith('tabClose')), 'and its tab is closed').toBe(true)
+  })
+
+  it('a start that fails carries the tab\'s last words', async () => {
+    const m = memoryHerdr({
+      agentStart: async () => { throw new HerdrError('timeout', 'herdr agent start: timed out waiting for agent startup') },
+      paneRead: async () => 'loading 23 extensions\nmcp: scout ready\nzsh: killed     pi\n',
+    })
+    await expect(new HerdrWorkers(options(tmp(), m.herdr)).launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} }))
+      .rejects.toThrow(/timed out waiting for agent startup; the tab said: .*zsh: killed/)
   })
 
   it('an input becomes a file in the inbox the worker drains, written whole', async () => {
