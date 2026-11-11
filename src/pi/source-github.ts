@@ -85,6 +85,16 @@ export interface PositionStore {
 const DAY_MS = 86_400_000
 /** Ten minutes of polls: past this, an issue missing from every listing is forgotten even without a close. */
 const MISSING_POLLS = 20
+/**
+ * The comment cursor sits this far behind real time: it advances to `newest + 1ms` only once this much
+ * wall clock has passed since the newest comment seen. GitHub timestamps to the second and a listing can
+ * surface a comment a moment after a poll that moved the cursor past its second — a cursor at
+ * `newest + 1ms` locked such a comment out forever (measured shape: a listing that came back short,
+ * 2026-11-11 01:18:52). Keep the lag above the tick interval, so the next poll is still inside the window;
+ * the cost is re-reading a few seconds of comments per poll, and the engine returns 'duplicate' for ids it
+ * has stored. A clock skew between here and GitHub only slows the cursor; `newest + 1ms` is the ceiling.
+ */
+export const CURSOR_LAG_MS = 120_000
 
 /** A solo operator posts from the same login the agent replies from, so the author cannot identify the
  *  agent's own writing; the footer can. */
@@ -136,7 +146,12 @@ export class GithubSource {
       if (c.author === this.options.self || c.body.includes(this.options.selfMarker ?? REPLY_MARKER)) continue
       out.push(this.toTrigger(c))
     }
-    if (newest) this.staged.push([sinceKey(this.options.repo), new Date(Date.parse(newest) + 1).toISOString()])
+    if (newest) {
+      // See CURSOR_LAG_MS: the ceiling keeps a skewed clock from re-reading history, the max keeps the cursor
+      // from moving backwards, and the lag keeps the window in front of a comment that has not surfaced yet.
+      const settled = Math.min(Date.parse(newest) + 1, this.now() - CURSOR_LAG_MS)
+      this.staged.push([sinceKey(this.options.repo), new Date(since ? Math.max(Date.parse(since), settled) : settled).toISOString()])
+    }
     return out
   }
 
