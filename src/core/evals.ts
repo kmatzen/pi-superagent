@@ -17,6 +17,8 @@ const reasonOf = (reason: string | Reason): Reason[] => [typeof reason === 'stri
 const stronger = (a: Strength, b: Strength): Strength => a === 'explicit' || b === 'explicit' ? 'explicit' : 'inferred'
 /** How many times in a row an expired Eval queues its Triggers again before it is recorded unavailable. */
 const REQUEUES = 2
+/** The outcomes an Eval can end with. Anything else is a malformed answer, never an accept. */
+const OUTCOME_KINDS: ReadonlySet<string> = new Set(['accept', 'ignore', 'stop', 'unavailable'])
 
 /**
  * Evals runs the Evals of Threads: it batches a Thread's queued Triggers into one Eval, takes its strength, actor, and basis
@@ -131,6 +133,10 @@ export class Evals extends EnginePart {
   decide(triggerId: string, outcome: Outcome): Decision {
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
+    // The judge tool's schema names four kinds, but the schema is the adapter's promise and this is the
+    // engine's: a malformed kind must be refused, not fall through `decideEval` to accept — that fall-through
+    // is the method's last statement and is keyed on nothing.
+    if (!OUTCOME_KINDS.has(outcome.kind)) throw new UserError('unknownOutcome', { kind: String(outcome.kind) })
     const held = this.holding(triggerId)
     if (outcome.evalId && held?.evaluating?.id !== outcome.evalId) throw new UserError('evalFinished', { eval: outcome.evalId })
     // Prevent a replayed trigger that already created a ticket from spawning a second one.

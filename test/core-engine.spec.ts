@@ -592,6 +592,62 @@ describe('follow-up owners', () => {
       expect(ticket.ended === undefined, `${kind} stop resumes: ${opens}`).toBe(opens)
     }
   })
+  it('releases a worker and hands back the message it was delivered but never read', () => {
+    // The freed assignment took its delivered-to address with it: without the requeue, an input the worker's
+    // session never took into a step sat in no queue at all — not undelivered, not read — until the ticket
+    // ended (audit 2026-11-11). The requeue is what makes R2 (an answer is never stranded) true at this edge.
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.receive(trigger('2')); h.settle()
+    const input = h.repo.tickets.get(ticketId)!.inputs.find(item => item.kind === 'trigger' && item.triggerId === '2')!
+    const assignmentId = h.repo.tickets.get(ticketId)!.assignments.at(-1)!.id
+    h.engine.release(ticketId, assignmentId)
+    expect(h.repo.tickets.get(ticketId)!.undelivered, 'the delivered-but-unread input is handed back').toContain(input.id)
+    // The person's answer arrives; wake starts a fresh worker whose first delivery carries the handed-back message.
+    h.engine.receive(trigger('3')); h.settle()
+    const fresh = h.repo.tickets.get(ticketId)!
+    expect(fresh.assignments).toHaveLength(2)
+    expect(h.delivered).toContainEqual([ticketId, input.id])
+  })
+  it('refuses to stop a ticket that has already ended, instead of silently doing nothing', () => {
+    // A stop of an ended ticket recorded nothing and withdrew no mandate, so the panel answered "stopped"
+    // while the ticket went on resuming per its old kind (audit 2026-11-11).
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.report(ticketId, { state: 'ready', summary: 'done' })
+    expect(h.repo.tickets.get(ticketId)!.ended?.outcome).toBe('completed')
+    expect(() => h.engine.stopTicket(ticketId, 'late')).toThrow(new UserError('ticketEnded'))
+    expect(h.repo.tickets.get(ticketId)!.ended?.outcome).toBe('completed')
+  })
+  it('lets a message attach to a ticket whose conversation closed, and never to one a person stopped', () => {
+    // attachable kept the pre-kind rule — every human-ended ticket refused — after intake and wake had
+    // learned the conversation door (audit 2026-11-11). One predicate, in model.ts, is all three doors.
+    for (const [kind, opens] of [['conversation', true], ['operator', false], ['loop', false]] as const) {
+      const h = harness()
+      const ticketId = accepted(h).ticketId!
+      h.engine.stopTicket(ticketId, 'the conversation closed on GitHub', kind)
+      if (opens) expect(() => h.engine.attach(ticketId, '1'), `${kind} stop takes an attach`).not.toThrow()
+      else expect(() => h.engine.attach(ticketId, '1'), `${kind} stop refuses an attach`).toThrow(new UserError('ticketStopped'))
+    }
+  })
+  it('records whose act stopped the ticket: the router owns its own stops, a person owns theirs', () => {
+    // `by` used to say 'human' for the router's loop and conversation stops, so every reader of the field had
+    // to know it lied (audit 2026-11-11, #108). `by` is now whose act; `mandateWithdrawn` is whether the door
+    // is open — the two facts the record used to blur.
+    for (const [kind, by] of [['operator', 'human'], ['loop', 'router'], ['conversation', 'router']] as const) {
+      const h = harness()
+      const ticketId = accepted(h).ticketId!
+      h.engine.stopTicket(ticketId, 'why', kind)
+      expect(h.repo.tickets.get(ticketId)!.ended).toMatchObject({ by, kind })
+    }
+    // A stop decided by the judge on a person's word is a person's act.
+    const h = harness()
+    const judged = accepted(h).ticketId!
+    h.engine.receive(trigger('4')); h.pump()
+    h.engine.decide('4', { kind: 'stop', ticketId: judged, reason: 'the person said stop' })
+    h.settle()
+    expect(h.repo.tickets.get(judged)!.ended).toMatchObject({ by: 'human', outcome: 'stopped' })
+  })
   it('wakes an ended ticket for a message attached to it that its worker read only for context or before its last report', () => {
     for (const read of ['context', 'report'] as const) {
       const h = harness()
