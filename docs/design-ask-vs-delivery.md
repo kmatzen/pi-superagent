@@ -148,7 +148,7 @@ for (v,) in sqlite3.connect('tickets.db').execute('select value from ticket'):
     limbo += not t.get('ended') and r.get('state') == 'ready' and any(x.get('own') and not x.get('closed') for x in f)
 print(tot, 'tickets |', fol, 'with follows |', own, 'own an open pull |', limbo, 'ready, pull unmerged |', dict(oc))
 PY
-gh api "repos/matzen_adobe/superagent-board-spike/issues/350" --jq '{state, labels: (.labels|map(.name))}'
-gh api "repos/matzen_adobe/superagent-board-spike/issues/350/events" --jq '.[] | select(.event=="closed" or .event=="reopened") | "\(.created_at) \(.event) by \(.actor.login)"'
+gh api "repos/<owner>/<board>/issues/350" --jq '{state, labels: (.labels|map(.name))}'
+gh api "repos/<owner>/<board>/issues/350/events" --jq '.[] | select(.event=="closed" or .event=="reopened") | "\(.created_at) \(.event) by \(.actor.login)"'
 grep -a "ticket.conversation_closed" ~/.pi/superagent/engine.log | wc -l
 ```

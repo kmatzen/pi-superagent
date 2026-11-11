@@ -346,7 +346,7 @@ describe('PiExecutor', () => {
   })
 
   it('a report landing after its worker was freed is said out loud, not swallowed', async () => {
-    // Measured 2026-11-09 on matzen_adobe/superagent-board-spike#255: its worker reported at 08:59:23Z, the ticket
+    // Measured 2026-11-09 on the operator's board spike #255: its worker reported at 08:59:23Z, the ticket
     // released the worker, a queued copy of the same mandate surfaced in the still-open tab at ~09:01Z, and the
     // worker's second `ticket_report` answered `reported` while the issue gained no comment. Three later runs of
     // that ticket re-proved a two-day-old merge starting from that receipt. Silence is what cost the sessions.
