@@ -210,6 +210,26 @@ that reports an error, because restarting a router does not bring a GitHub sourc
 per `PI_SUPERAGENT_RESTART_COOLDOWN_MIN` (30) for the same reason: a fault a restart cannot fix would
 otherwise restart the router every five minutes forever. It is a survivable act, which is what makes it
 allowed at all: the workers are their own herdr sessions, and the new router adopts them on its first pass.
+A healthy beat deletes the cooldown stamp (2026-11-11): the cap protected the router from a restart loop, not
+the fleet from a second death, and an outage that began in the boot right after a watchdog restart stayed
+unhealable for 25 minutes.
+
+**Judge retained workspaces by bytes, not by count (2026-11-11).** Keeping the newest 20 settled checkouts was
+meant to bound the disk; the kept set measured 58 GB because one build tree is 15 GB. `PI_SUPERAGENT_WORK_BUDGET_GB`
+caps the work root, and settled checkouts over it go oldest-first — the same two safety rules as the count sweep:
+never unpushed work, never an open ticket.
+
+**Skip, never sweep, a non-directory in the work root (2026-11-11).** A stray log file there made the sweep
+`readdirSync` a file; the sweep runs after every intake, its rejection was unhandled, and every tick died for
+25 minutes. Files in the root are counted as strays, logged once, and left alone.
+
+**A running assignment with no start time belongs to boot recovery (2026-11-11).** Marked running, dead before
+the launch was recorded: judged by the ticket's age it passes the 15-minute stall window every tick forever —
+480 warnings a day of one ticket, and a release it cannot need. The sweep skips it; recovery owns the race.
+
+**Back up the memory, not the code (2026-11-11).** The code rebuilds from a clone in a minute; `tickets.db` —
+the queue, read positions, receipts — has no other copy. The health job runs `superagent backup` daily: a
+sqlite-safe copy, integrity-checked, 14 kept.
 
 **Limit panel access to local callers.** The panel binds to loopback, validates the Host header
 and requires `x-superagent-request: 1` for API calls. These checks prevent a page on another
