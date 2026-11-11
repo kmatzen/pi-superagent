@@ -180,6 +180,34 @@ describe('GithubSource', () => {
     expect(await f.source.poll()).toHaveLength(1)
   })
 
+  it('an issue missing from one short listing is not new when it comes back: only a confirmed close forgets it', async () => {
+    // 2026-11-11 01:18:52: one listing came back short, the seen set was pruned to it, and the next poll re-fired 12
+    // live issues as new requests, each one landing on its ticket as fresh input.
+    const issues: IssueState[] = []
+    const f = fixture([], issues)
+    const states = new Map<number, 'open' | 'closed'>([[40, 'open']])
+    let reads = 0
+    f.api.issueState = async n => { reads++; return states.get(n) ?? 'unknown' }
+    f.source.bootstrap()
+    await f.source.poll()
+    issues.push(issue({ issue: 40, title: 'Fix the flaky export test' }))
+    expect(await f.source.poll(), 'first sight').toHaveLength(1)
+    issues.length = 0
+    expect(await f.source.poll(), 'a short listing fires nothing').toHaveLength(0)
+    issues.push(issue({ issue: 40, title: 'Fix the flaky export test', updatedAt: new Date(Date.now() + HOUR).toISOString() }))
+    expect(await f.source.poll(), 'GitHub said it was open, so it is not new when the listing recovers').toHaveLength(0)
+    issues.length = 0
+    states.set(40, 'closed')
+    await f.source.poll()
+    issues.push(issue({ issue: 40, title: 'Fix the flaky export test', updatedAt: new Date(Date.now() + 2 * HOUR).toISOString() }))
+    expect(await f.source.poll(), 'a confirmed close, then a reopen, is a person saying go again').toHaveLength(1)
+    issues.length = 0
+    states.delete(40)
+    reads = 0
+    for (let n = 0; n < 25; n++) await f.source.poll()
+    expect(reads, 'an issue that never answers costs a bounded number of reads, then is forgotten').toBe(20)
+  })
+
   it('a new issue and a comment on it are two triggers on one thread, for the one-ticket rule', async () => {
     const issues: IssueState[] = []
     const f = fixture([comment()], issues)
