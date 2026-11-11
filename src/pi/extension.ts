@@ -9,7 +9,7 @@ const runGit = promisify(execFile)
 import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
-import {GithubSource, isOperatorAsk, REPLY_MARKER, type GithubApi, type IssueState} from './source-github.ts'
+import {GithubSource, REPLY_MARKER, type GithubApi, type IssueState} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type ReconcileReport } from './pulls.ts'
@@ -233,13 +233,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const starvation = (): { starved: number; oldestStarvedH: number; unanswered: number } => {
     // Two questions, two numbers, because one number answered both silently and disagreed with an audit twice.
     // `starved` = open work nobody has ever been put on (what a free slot unblocks). `unanswered` = open work
-    // with no worker on it now. Labels are obsolete (operator, 2026-11-10), so the filter is the ask test, not a
-    // label. Definitions: docs/design-capacity-liveness.md.
+    // with no worker on it now. Every open issue counts. Definitions: docs/design-capacity-liveness.md.
     const threads = (t: Ticket) => t.channels.map(c => c.thread)
     const open = repos.tickets.open()
     const claimed = new Set(open.filter(t => { const a = t.assignments.at(-1); return a && a.state !== 'pending' }).flatMap(threads))
     const onIt = new Set(open.filter(t => ['running', 'pending', 'ready', 'blocked'].includes(t.assignments.at(-1)?.state ?? '')).flatMap(threads))
-    const board = openBoard.filter(i => !isOperatorAsk(i))
+    const board = openBoard
     const waiting = board.filter(i => !claimed.has(`#${i.issue}`))
     const hours = (iso: string) => (Date.now() - Date.parse(iso)) / 3.6e6
     const oldest = waiting.reduce((m, i) => Math.max(m, hours(i.updatedAt)), 0)
