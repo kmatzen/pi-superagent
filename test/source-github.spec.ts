@@ -146,16 +146,16 @@ describe('GithubSource', () => {
     expect(await f.source.poll()).toHaveLength(0)
   })
 
-  it("the agent's own account: its asks to the operator are not requests, and the work it files is", async () => {
-    // Agents file the bugs they find as the engine's account (2026-11-11, issue 369). An author rule kept all of
-    // it out of the fleet; the title verb says which of its issues are asks.
+  it("every issue the agent's own account opens is a request, whatever its title", async () => {
+    // Agents file the bugs they find as the engine's account (2026-11-11, issue 369), and the ask system that once
+    // shared this board is gone, so no title verb keeps an issue out.
     const issues: IssueState[] = []
     const f = fixture([], issues)
     f.source.bootstrap()
     await f.source.poll()
     issues.push(issue({ issue: 30, author: 'superagent[bot]', title: 'DECIDE: which proxy tier to keep' }))
     issues.push(issue({ issue: 31, author: 'superagent[bot]', title: 'Fix the node graph outputs reading 0.0' }))
-    expect((await f.source.poll()).map(t => t.text)).toEqual(['Fix the node graph outputs reading 0.0'])
+    expect((await f.source.poll()).map(t => t.text)).toEqual(['DECIDE: which proxy tier to keep', 'Fix the node graph outputs reading 0.0'])
   })
 
   it('an issue carrying the agent\'s own footer is not a request', async () => {
@@ -322,10 +322,9 @@ describe('GithubSource', () => {
     expect(f.kv.has('source:github:o/r:label-grants'), 'no grant journal is kept').toBe(false)
   })
 
-  it('an open issue is standing work whoever filed it; an ask to the operator, or a bot\'s issue, is not', async () => {
-    // Operator, 2026-11-10: "unlabeled issues should absolutely be processed." The ask is its title verb, the ask
-    // protocol's (DECIDE, MERGE, APPROVE, DO, ANSWER) and the ones asks use in practice (RUN). A bot's issue is not a
-    // person's request, as on first sight.
+  it('every open issue is standing work, whatever its title or author; a bot\'s issue is not', async () => {
+    // Operator, 2026-11-10: "unlabeled issues should absolutely be processed"; 2026-11-11: the ask system is gone,
+    // and with it the title verbs that kept its issues out. A bot's issue is not a person's request, as on first sight.
     const f = fixture([], [
       issue({ issue: 220, title: 'rename the Export button to Ship' }),
       issue({ issue: 221, title: 'MERGE transmute 1290 once its gates are green' }),
@@ -342,9 +341,10 @@ describe('GithubSource', () => {
     }, f.store)
     source.bootstrap()
     const fired = (await source.poll()).map(tr => tr.text)
-    expect(fired, 'a plain open issue is work, and so is the work an agent filed').toEqual(
-      ['rename the Export button to Ship', 'Fix the panel going blank after a reload'])
-    expect(asked, 'asks and a bot\'s issue are never offered to the router').toEqual(['#220', '#222'])
+    expect(fired, 'every open issue is work, whatever its title').toEqual(['rename the Export button to Ship',
+      'MERGE transmute 1290 once its gates are green', 'Fix the panel going blank after a reload',
+      'DO pick the compute route for the run', 'RUN /reload in the three sessions'])
+    expect(asked, 'only a bot\'s issue is never offered to the router').toEqual(['#220', '#221', '#222', '#224', '#225'])
   })
 
   it('the router is the only thing that says no to standing work, and a no fires nothing', async () => {

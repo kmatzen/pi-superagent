@@ -59,7 +59,7 @@ export interface GithubSourceOptions {
   people?: ReadonlySet<string>
   selfMarker?: string
   /**
-   * The standing queue re-earns its launch: an open issue that is not an ask to the operator, with no worker
+   * The standing queue re-earns its launch: an open issue with no worker
    * on it, is work. The router answers yes within a cap and says no after it, and the counter lives in the
    * router's store. No label marks it: labels are gone (operator, 2026-11-10, "These labels are obsolete").
    */
@@ -69,14 +69,6 @@ export interface GithubSourceOptions {
   onOpen?: (open: readonly IssueState[]) => void
 }
 
-/**
- * An ask to the operator is what its title says, whoever opened it: the ask protocol's verbs (DECIDE, MERGE, APPROVE,
- * DO, ANSWER), plus the ones asks use in practice (RUN, CHOOSE, PICK, LABEL, UNBLOCK). Not who opened it: agents file
- * work as the engine's own account too, and an author rule kept that work out of the fleet for good (2026-11-11:
- * issue 369, and 43 of the bot's last 100 issues carried no ask verb).
- */
-export const ASK_VERB = /^(DECIDE|MERGE|APPROVE|DO|ANSWER|RUN|CHOOSE|PICK|LABEL|UNBLOCK)\b/
-export const isOperatorAsk = (issue: { title: string }): boolean => ASK_VERB.test(issue.title.trim())
 
 const sinceKey = (repo: string) => `source:github:${repo}:since`
 /** Group rows by a key, keeping the order in which the keys first appear. */
@@ -179,13 +171,13 @@ export class GithubSource {
       const key = `#${issue.issue}`
       if (!seen.has(key)) {
         seen.add(key)
-        // The engine's own account asks the operator with it, so its asks are not requests; its other issues are
-        // work an agent filed, and they are requests like anyone's.
-        if ((issue.author === this.options.self && isOperatorAsk(issue)) || !this.isHuman(issue.author)
+        // Every open issue is a request, whoever opened it: agents file their work as the engine's own account.
+        // The ask system that once shared this board is gone (operator, 2026-11-11), and with it the ask verbs.
+        if (!this.isHuman(issue.author)
           || (issue.body ?? '').includes(this.options.selfMarker ?? REPLY_MARKER)) continue
         out.push(this.requestTrigger(issue, 'issue', key))
-      } else if (this.options.regrant && this.isHuman(issue.author) && !isOperatorAsk(issue)) {
-        // A standing ask is an open issue that is not an ask to the operator. The ROUTER decides, because it is
+      } else if (this.options.regrant && this.isHuman(issue.author)) {
+        // A standing ask is any open issue a person or an agent filed. The ROUTER decides, because it is
         // the only party that knows whether a worker is or was on this thread; the counter there caps the loop.
         if (this.options.regrant(issue.issue, key)) out.push(this.requestTrigger(issue, 'grant', key))
       }

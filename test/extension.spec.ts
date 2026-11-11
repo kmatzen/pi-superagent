@@ -1296,6 +1296,9 @@ describe('a pull request per ticket', () => {
     expect(ticket().ended).toMatchObject({ outcome: 'stopped' })
     expect(f.closes, 'a ticket waiting on CI keeps its issue open').toEqual([])
     // And the door is real: the stopped ticket does not resume, and the comment reaches the judge as a new ask.
+    // The judge answers one eval at a time, and the issue's own first-sight eval is still waiting on it.
+    f.decide('ignore')
+    await f.running.tick()
     f.addComment('508', 'octocat', 'CI is fixed now, take it again', new Date().toISOString())
     await f.running.tick()
     await settle()

@@ -74,7 +74,7 @@ close is unrepaired is followed by nothing and ends by nothing, so it outranks a
 
 `source-github.ts` tracks issues, comments and submitted reviews. It recognizes the router’s own
 comments by the bot login or a hidden marker. Labels play no part: an issue opened after the first
-look is a request, and every open issue that is not an ask to the operator is standing work the router
+look is a request, and every open issue is standing work the router
 may re-grant — an open ticket by the state of its work, an issue that never had a ticket because it is
 starved, never an issue whose tickets all ended (`regrantable` in `extension.ts`), two launches per issue
 per day at most. The source writes no label and reads none. `scopeOf` in `router.ts` checks each
