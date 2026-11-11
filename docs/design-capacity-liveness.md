@@ -1,9 +1,8 @@
 # Keeping the fleet running: liveness that does not depend on the worker
 > **Amendment, 2026-11-10: labels are obsolete.** The operator retired the queue marker the day it was found
 > that 17 of 20 open asks carried no label and the fleet was forbidden to touch them: "unlabelled issues should
-> absolutely be processed." Where a line below says *labelled asks*, read **open issues that are not an ask to
-> the operator** — `isOperatorAsk` in `src/pi/source-github.ts`, which reads the title verb (`DECIDE`, `MERGE`,
-> `APPROVE`, `CHOOSE`, `PICK`, `ANSWER`, `LABEL`, `UNBLOCK`) and the engine's own authorship. What keeps a
+> absolutely be processed." Where a line below says *labelled asks*, read **open issues**: every one is work,
+> whoever opened it (the separate ask system, and the title verbs that kept its issues out, went on 2026-11-11). What keeps a
 > finished issue from churning is not a label: it is `standingAskEntitled` (an ended assignment whose worker
 > released, no live worker, no report awaiting a human, no open pull request on the ticket) and `REGRANT_CAP`
 > of two launches per issue per day. Lines below keep their original wording where they record a measurement.
