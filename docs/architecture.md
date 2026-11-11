@@ -45,7 +45,7 @@ The synchronous engine reaches storage, processes and models through the interfa
 
 ### Router and intake
 
-`src/pi/extension.ts` creates the store, GitHub source, judge, executor, outbox and panel. By default
+`src/pi/extension.ts` creates the store, GitHub source, judge, executor, outbox, issue closer and panel. By default
 the router polls every 30 seconds and also wakes when its pi session goes idle. A pass delivers new
 triggers, reconciles PRs and closed threads, evaluates requests, starts pending work, checks for quiet
 workers and flushes replies. Three consecutive GitHub poll failures set an error in `health.json`.
@@ -118,7 +118,9 @@ for the tickets still waiting (`pull.reopened`); tickets that already ended stay
 to reopen.
 
 `receipts.ts` formats reports, questions, crashes and launch failures for the GitHub thread.
-`outbox.ts` queues messages by ID. Failed posts remain pending, and a recurring launch failure
+`outbox.ts` queues messages by ID; a sent or dropped row keeps its id and status and gives up its text, because
+the ledger is one blob rewritten on every send (measured 2026-11-11: 2,223 rows, 5.0 MB of words nothing reads
+again). Failed posts remain pending, and a recurring launch failure
 produces one notice. The source recognizes the hidden `<!-- superagent -->` marker on outgoing
 comments. Sent entries expire after 30 days.
 
@@ -144,7 +146,8 @@ The router stores its local state under `~/.pi/superagent`. Set `PI_SUPERAGENT_S
 | `engine.log` | the router's log, rotated at 5 MB |
 | `health.json`, `setup.json`, `ready` | what `superagent status` reads |
 | `stopped` | the operator's stop marker: the health check leaves the router stopped |
-| `watchdog-restart` | when the health check last restarted the router, in epoch seconds (its cooldown) |
+| `watchdog-restart` | when the health check last restarted the router, in epoch seconds (its cooldown; the next healthy beat deletes it) |
+| `archive/tickets-<YYYYMMDD>.db` | daily `superagent backup` copy of `tickets.db`, integrity-checked, last 14 kept |
 | `workers/<session>/` | one directory per worker: its record, inbox, events and reports |
 | `work/<ticket>/` | one workspace per ticket |
 | `worker-bin/` | shims that refuse blocked commands, first on the PATH of each workspace's setup script |
