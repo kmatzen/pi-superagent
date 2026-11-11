@@ -989,7 +989,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // Ninety days: the ticket row is the engine's working set, and the issue on GitHub is the record.
     const pruned = repos.pruneClosedTickets(new Date(Date.now() - 90 * 86_400_000).toISOString())
     if (pruned) log.line('info', 'tickets.pruned', { removed: pruned, olderThanDays: 90 })
-    const swept = await sweepWorktrees(cfg.worktreeRoot, openIds, cfg.keepWorktrees ?? 20)
+    const swept = await sweepWorktrees(cfg.worktreeRoot, openIds, cfg.keepWorktrees ?? 20, (cfg.workBudgetGb ?? 200) * 1024 ** 3)
     // The per-worker HOMEs are gone from the code; their directory, with a copy of the bot token in each, goes too.
     rmSync(join(cfg.dataDir, 'worker-homes'), { recursive: true, force: true })
     if (swept.removed || swept.keptWork) {
@@ -1293,7 +1293,7 @@ function isDirectory(path: string): boolean {
   try { return statSync(path).isDirectory() } catch { return false }
 }
 
-export async function sweepWorktrees(root: string, open: ReadonlySet<string>, keep: number): Promise<SweepReport> {
+export async function sweepWorktrees(root: string, open: ReadonlySet<string>, keep: number, maxBytes = 200 * 1024 ** 3): Promise<SweepReport> {
   const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [] }
   let names: string[]
   try { names = readdirSync(root) } catch { return report }
@@ -1313,7 +1313,28 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string>, ke
     if (checkout && await unpushedCommits(checkout) > 0) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
     try { rmSync(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
   }
+  // The count is not the cost: measured 2026-11-11, the kept set was 58 GB because one build tree is 15 GB.
+  // Settled checkouts, oldest first, go over the count as well until the root fits the budget.
+  const kept = names.filter(name => isDirectory(join(root, name))).map(name => ({ name, at: safeMtime(join(root, name)) }))
+  let bytes = kept.reduce((sum, e) => sum + dirBytes(join(root, e.name)), 0)
+  for (const e of kept.filter(e => !open.has(e.name)).sort((a, b) => a.at - b.at)) {
+    if (bytes <= maxBytes) break
+    const dir = join(root, e.name)
+    const checkout = checkoutOf(dir)
+    if (checkout && await unpushedCommits(checkout) > 0) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
+    const size = dirBytes(dir)
+    try { rmSync(dir, { recursive: true, force: true }); report.removed++; bytes -= size } catch { /* next sweep's problem */ }
+  }
   return report
+}
+
+function safeMtime(path: string): number {
+  try { return statSync(path).mtimeMs } catch { return 0 }
+}
+
+/** `du -sk`: a 30 GB tree in milliseconds; a vanished or unreadable dir counts as free, so it is never the reason to delete a neighbour. */
+function dirBytes(dir: string): number {
+  try { return Number(execFileSync('du', ['-sk', dir], { encoding: 'utf8', timeout: 30_000 }).split('\t')[0]) * 1024 } catch { return 0 }
 }
 
 /** Read at every launch, so a rotated token lands on the next worker without a router restart. */
@@ -1398,7 +1419,11 @@ export function stalledTickets(
     if (!a || live.has(t.id)) continue
     if (awaitsAHumanState(String(a.report?.state ?? ''))) continue
     if (a.state !== 'running') continue
-    const started = Date.parse(a.startedAt ?? t.createdAt)
+    // No start time, no window: this is the boot race (the assignment was marked running and the router died
+    // before the launch was recorded), and boot recovery owns it. Measured as the ticket's age it fires every
+    // tick forever — 480 'stalled' warnings a day of one ticket, 2026-11-11 — and releasing on every tick is not a remedy.
+    if (!a.startedAt) continue
+    const started = Date.parse(a.startedAt)
     if (!Number.isFinite(started) || nowMs - started < graceMs) continue
     out.push(t.id)
   }
@@ -1458,6 +1483,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(pullReadBudgetMs === undefined ? {} : { pullReadBudgetMs }),
     ...(panelPort === undefined ? {} : { panelPort }),
     ...(keepWorktrees === undefined ? {} : { keepWorktrees: Math.floor(keepWorktrees) }),
+    ...(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB) === undefined ? {} : { workBudgetGb: Math.floor(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB)!) }),
     ...(workerTokenFile ? { workerTokenFile } : {}),
     ...(workerStartMs ? { workerStartMs } : {}),
     ...(workerQuietMinutes === undefined ? {} : { workerQuietMinutes }),

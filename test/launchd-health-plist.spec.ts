@@ -25,6 +25,7 @@ describe('launchd/com.example.superagent-health.plist', () => {
     expect(plist).toContain('--respect-stop')
     expect(plist).not.toMatch(/<key>KeepAlive<\/key>/)
     expect(plist).toMatch(/<key>StartInterval<\/key><integer>\d+<\/integer>/)
+    expect(plist).toMatch(/superagent backup/) // the daily database copy rides the five-minute job
   })
 
   it('names herdr, node and pi on the job PATH, because launchd hands a job an empty one', () => {
