@@ -993,6 +993,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // The per-worker HOMEs are gone from the code; their directory, with a copy of the bot token in each, goes too.
     rmSync(join(cfg.dataDir, 'worker-homes'), { recursive: true, force: true })
     if (swept.removed || swept.keptWork) {
+    if (swept.strays) log.line('warn', 'worktree.strays', { strays: swept.strays, root: cfg.worktreeRoot })
       log.line('info', 'worktree.swept', {
         ...swept, keptWorkIds: swept.keptWorkIds.slice(0, 8), seconds: Math.round((Date.now() - beganSweep) / 1000),
         kept: cfg.keepWorktrees ?? 20,
@@ -1254,6 +1255,8 @@ export interface SweepReport {
   removed: number
   /** Settled checkouts kept because they hold commits that exist on no remote: deleting these deletes work. */
   keptWork: number
+  /** Files (not directories) in the work root: a stray log there once wedged every sweep, so they are counted and skipped. */
+  strays: number
   checkouts: number
   /** Settled workspaces with files and no checkout, and empty ones: the 43 GB is not all code. */
   bare: number
@@ -1283,15 +1286,22 @@ async function unpushedCommits(dir: string): Promise<number> {
 /**
  * Measured live: a ticket checkout is about 570 MB, 75 of them, 43 GB, and nothing ever deleted one. Keep
  * the newest settled ones for the audit trail; delete older ones only when the work inside is on a remote.
+ * A non-directory in the root is a stray to skip, never a crash: a log file left there threw ENOTDIR from
+ * readdirSync on 2026-11-11, the sweep ran every intake, and the unhandled rejection killed every tick for 25 min.
  */
+function isDirectory(path: string): boolean {
+  try { return statSync(path).isDirectory() } catch { return false }
+}
+
 export async function sweepWorktrees(root: string, open: ReadonlySet<string>, keep: number): Promise<SweepReport> {
-  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, keptWorkIds: [] }
+  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [] }
   let names: string[]
   try { names = readdirSync(root) } catch { return report }
-  const settled = names
+  const dirs = names.filter(name => isDirectory(join(root, name)))
+  report.strays = names.length - dirs.length
+  const settled = dirs
     .filter(name => !open.has(name))
-    .map(name => { try { return { name, at: statSync(join(root, name)).mtimeMs } } catch { return null } })
-    .filter((e): e is { name: string; at: number } => e !== null)
+    .map(name => ({ name, at: statSync(join(root, name)).mtimeMs }))
     .sort((a, b) => b.at - a.at)
   for (const [index, entry] of settled.entries()) {
     const dir = join(root, entry.name)
