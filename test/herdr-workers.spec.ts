@@ -116,6 +116,18 @@ describe('herdr workers', () => {
     expect(session.watch).toContain('superagent')
   })
 
+  it('gives pi two minutes to reach its prompt, and the setting overrides it', async () => {
+    const seen: number[] = []
+    for (const startTimeoutMs of [undefined, 45_000]) {
+      const m = memoryHerdr()
+      const start = m.herdr.agentStart
+      m.herdr.agentStart = async o => { seen.push(o.timeoutMs); return start(o) }
+      await new HerdrWorkers({ ...options(tmp(), m.herdr), ...(startTimeoutMs ? { startTimeoutMs } : {}) })
+        .launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    }
+    expect(seen).toEqual([120_000, 45_000])
+  })
+
   it('an input becomes a file in the inbox the worker drains, written whole', async () => {
     const dir = tmp()
     const session = await new HerdrWorkers(options(dir, memoryHerdr().herdr)).launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
