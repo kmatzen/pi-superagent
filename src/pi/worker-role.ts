@@ -33,9 +33,20 @@ export const SILENT_NUDGE = 'You ended your turn without calling ticket_report, 
   + 'blocked (you need a person, with the question), or failed (what broke). One line is enough.'
 export const SILENT_NUDGE_FILE = 'zz-self-nudge.json'
 
+// One role per worker dir per process: the harness's copy of this package and the launch's --extension both offer
+// it, and a second ticket_report registration makes pi refuse to boot (2026-11-11: every launch died at startup).
+const ROLES_HELD = Symbol.for('pi-superagent.worker-roles-held')
+const rolesHeld = (): Set<string> => {
+  const host = globalThis as typeof globalThis & { [ROLES_HELD]?: Set<string> }
+  return (host[ROLES_HELD] ??= new Set<string>())
+}
+
 export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000): boolean {
   const dir = env.PI_SUPERAGENT_WORKER_DIR
   if (env.PI_SUPERAGENT_ROLE !== 'worker' || !dir) return false
+  // true, not false: this pi is a worker, and the caller must not go on to start a router in it.
+  if (rolesHeld().has(dir)) return true
+  rolesHeld().add(dir)
   const inbox = join(dir, 'inbox')
   mkdirSync(inbox, { recursive: true })
   const append = (file: string, record: object): void =>
@@ -140,6 +151,8 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
   pi.on('session_shutdown', () => {
     if (timer) clearInterval(timer)
     timer = undefined
+    // /reload emits this before loading the new copy, which must be free to take the role again.
+    rolesHeld().delete(dir)
   })
   return true
 }

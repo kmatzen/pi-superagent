@@ -35,6 +35,22 @@ describe('the worker role', () => {
     expect(f.tools).toHaveLength(0)
   })
 
+  it('takes the role once when the harness and the launch both offer it, and again after a reload', () => {
+    // Harness copy of the package plus the launch's --extension: two offers in one pi, which once failed its boot.
+    const env = { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp() }
+    const launch = fakePi()
+    const harness = fakePi()
+    expect(workerRole(launch.pi, env)).toBe(true)
+    expect(workerRole(harness.pi, env), 'still a worker, so the router must not start here').toBe(true)
+    expect(launch.tools.map(t => t.name)).toEqual(['ticket_report'])
+    expect(harness.tools, 'the second offer registers nothing').toHaveLength(0)
+    launch.emit('session_shutdown')
+    const reloaded = fakePi()
+    expect(workerRole(reloaded.pi, env)).toBe(true)
+    expect(reloaded.tools.map(t => t.name), 'a reload takes the role again').toEqual(['ticket_report'])
+    reloaded.emit('session_shutdown')
+  })
+
   it('ticket_report writes the report where the router reads it', () => {
     const dir = tmp()
     const f = fakePi()
