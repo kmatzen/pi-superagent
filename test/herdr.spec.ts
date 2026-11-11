@@ -31,6 +31,27 @@ esac
 }
 
 describe('the herdr client', () => {
+  it('a herdr that stops answering is a timeout, not a launch queue held for good', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-slow-'))
+    const bin = join(dir, 'herdr')
+    writeFileSync(bin, '#!/bin/bash\nsleep 30\n')
+    chmodSync(bin, 0o755)
+    const started = Date.now()
+    await expect(herdrCli(bin, 200).tabList()).rejects.toMatchObject({ code: 'timeout' })
+    expect(Date.now() - started).toBeLessThan(5000)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('reads a tab\'s last lines as plain text, and an unreadable tab as nothing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-read-'))
+    const bin = join(dir, 'herdr')
+    writeFileSync(bin, '#!/bin/bash\n[ "$1 $2" = "pane read" ] && [ "$3" = "w1:p2" ] && { printf "Error: boom\\n%% "; exit 0; }\nexit 1\n')
+    chmodSync(bin, 0o755)
+    expect(await herdrCli(bin).paneRead('w1:p2', 20)).toContain('Error: boom')
+    expect(await herdrCli(bin).paneRead('w1:p9', 20)).toBe('')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('creates a tab with the worker environment and reads the ids herdr returns', async () => {
     const h = fakeHerdr()
     const tab = await herdrCli(h.bin).tabCreate({ workspace: 'w1', cwd: '/w', label: '#1 · do it', env: { PI_SUPERAGENT_ROLE: 'worker' } })

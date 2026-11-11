@@ -113,6 +113,8 @@ export class PiExecutor {
   private readonly launching = new Set<string>()
   /** Launches enqueued and not yet run. Measured, because a pass that waits on this needs to know its size. */
   private queued = 0
+  /** When a launch last produced a live worker: a queue whose launches all fail moves, and starts nobody. */
+  private startedAt = 0
 
   constructor(private readonly engine: EngineForExecutor, private readonly launcher: WorkerLauncher,
               private readonly options: ExecutorOptions) {}
@@ -132,6 +134,7 @@ export class PiExecutor {
         const session = await this.launcher.launch({ ticket, assignment, brief, report: this.reporter(ticket, () => sessionRef) })
         sessionRef = session
         this.bind(ticket, assignment, session)
+        this.startedAt = Date.now()
         this.engine.assignmentStarted(ticket.id, assignment.id)
         session.prompt(brief, 'followUp')
       } catch (error) {
@@ -288,6 +291,9 @@ export class PiExecutor {
 
   /** Launches queued and not yet run: the ones waiting for a free worker slot, counted for the tick's drain. */
   get pendingLaunches(): number { return this.queued }
+
+  /** When a launch last produced a live worker (0: never in this process). */
+  get lastStartedAt(): number { return this.startedAt }
 
   /**
    * The worker cap the launch gate enforces, next to `running`: a stall is only readable when the reader can

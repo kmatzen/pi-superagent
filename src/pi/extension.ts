@@ -164,11 +164,13 @@ export interface TickHealth {
  *  part (exit 4, the check reports and does not restart). It prints the file's first 200 characters, so the
  *  tick block goes second, before the source block, and its `detail` field is short enough to survive the cut.
  *  A healthy tick writes `"state": "ok"`, which fails nothing. */
-function writeHealth(dir: string, source: { state: string; detail?: string } | null, tick?: TickHealth): void {
+function writeHealth(dir: string, source: { state: string; detail?: string } | null, tick?: TickHealth,
+                     launch?: { state: string; detail: string } | null): void {
   writeFileSync(`${dir}/health.json`, JSON.stringify({
     runtime: { state: 'ready', at: new Date().toISOString() },
     ...(tick ? { tick } : {}),
     ...(source ? { source } : {}),
+    ...(launch ? { launch } : {}),
   }, null, 1))
 }
 
@@ -669,10 +671,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         return herdrWorkers.launch({
           ticket, thread: channel?.thread ?? ticket.id, workspace: workspace.dir, report,
           env: {
-            // The bot's token is the worker's `gh` identity, named in the launch instead of inherited from a
-            // shell file. Operator, 2026-11-10: the bot user is preferred on gh whenever possible, and an
-            // inherited GH_TOKEN is whatever the launching shell happened to hold.
-            ...(token ? { GH_TOKEN: token } : {}),
+            // The bot's token is the worker's `gh` identity (operator, 2026-11-10), named by its file: the worker
+            // role reads it, because the arguments of `herdr tab create` are readable by every local user.
+            ...(token && cfg.workerTokenFile ? { PI_SUPERAGENT_WORKER_TOKEN_FILE: cfg.workerTokenFile } : {}),
             ...(cfg.blockedCommands?.length ? { PI_SUPERAGENT_BLOCKED: cfg.blockedCommands.join(',') } : {}),
             ...(cfg.allowDelegation ? { PI_SUPERAGENT_ALLOW_DELEGATION: '1' } : {}),
           },
@@ -1002,6 +1003,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // it landed at all is `tick.late_finish`, in `startTick`.
     if (mine !== generation) return
     lastTickEnd = finished
+    noteLaunches(finished)
     log.line('info', 'tick', {
       n: sweeps, inflight: repos.threads.active().filter(t => t.evaluating).length,
       running: executor.running, parked: executor.parked, cap: executor.capacity,
@@ -1131,7 +1133,24 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       ...(state === 'error' ? { stageMs: at - stageAt, launchPending: executor.pendingLaunches } : {}),
     }
   }
-  const publishHealth = (tick?: TickHealth): void => writeHealth(cfg.dataDir, sourceHealth, tick)
+  // A launch queue that waits with free slots and starts nobody is the outage the tick cannot see: every pass
+  // finishes, so the tick stays "ok". Measured 2026-11-11: 12 launches waited with 8 free slots for about 30
+  // minutes while every check said "running". Two start timeouts with no worker started is the alarm.
+  let launchWaitSince: number | undefined
+  let launchHealth: { state: string; detail: string } | null = null
+  const launchStuckMs = 2 * (cfg.workerStartMs ?? 120_000)
+  const noteLaunches = (now: number): void => {
+    const free = executor.capacity - executor.running
+    if (executor.pendingLaunches > 0 && free > 0) launchWaitSince ??= now
+    else launchWaitSince = undefined
+    const since = launchWaitSince === undefined ? undefined : Math.max(launchWaitSince, executor.lastStartedAt)
+    const stuck = since !== undefined && now - since > launchStuckMs
+    if (stuck && !launchHealth) log.line('error', 'launch.stuck', { pending: executor.pendingLaunches, free, waitedMs: now - since })
+    launchHealth = stuck
+      ? { state: 'error', detail: `${executor.pendingLaunches} launch(es) waiting with ${free} free slot(s) for ${Math.round((now - since) / 60_000)} min: no worker is starting` }
+      : null
+  }
+  const publishHealth = (tick?: TickHealth): void => writeHealth(cfg.dataDir, sourceHealth, tick, launchHealth)
 
   // Ticks cost 1-5 s and every settled agent asks for one: five workers settling at once used to start
   // five full GitHub polls. One runs, and the demand to run again after it is remembered.

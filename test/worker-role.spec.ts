@@ -51,6 +51,15 @@ describe('the worker role', () => {
     reloaded.emit('session_shutdown')
   })
 
+  it('takes the bot\'s token from the file the router names, so the token never rides in a command line', () => {
+    const dir = tmp()
+    const file = join(dir, 'bot-token')
+    writeFileSync(file, 'ghp_bot\n')
+    const env: NodeJS.ProcessEnv = { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir, PI_SUPERAGENT_WORKER_TOKEN_FILE: file }
+    workerRole(fakePi().pi, env)
+    expect(env.GH_TOKEN).toBe('ghp_bot')
+  })
+
   it('ticket_report writes the report where the router reads it', () => {
     const dir = tmp()
     const f = fakePi()
