@@ -13,7 +13,7 @@
 # meaning, so a scheduled check can act on it without reading prose.
 set -uo pipefail
 
-usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] [--allow-dirty] {init OWNER/REPO|start|stop|stop-ticket ID [REASON]|restart|status|remedy}"; }
+usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] [--allow-dirty] {init OWNER/REPO|start|stop|stop-ticket ID [REASON]|restart|status|remedy|backup}"; }
 
 # Flags come first because every path below derives from the state directory: parsed after them, --state
 # moved the router's tab but left its stop marker, its place file and its settings in the default one.
@@ -27,7 +27,7 @@ while [ $# -gt 0 ]; do
     init)
       [ "$#" -eq 2 ] && [[ "$2" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$ ]] && [[ "${2#*/}" != "." && "${2#*/}" != ".." ]] || { usage >&2; exit 2; }
       CMD=init; INIT_REPO="$2"; shift 2 ;;
-    start|stop|restart|status|remedy) CMD="$1"; shift ;;
+    start|stop|restart|status|remedy|backup) CMD="$1"; shift ;;
     stop-ticket)
       # Parsed with the verbs, not in the dispatch: the loop below shifts every known verb, so a verb it does
       # not know arrives here with its arguments already eaten.
@@ -442,7 +442,10 @@ remedy() {
   local out rc
   out="$(status 2>&1)"; rc=$?
   case "$rc" in
-    0) echo "health: $out; nothing to do" ;;
+    0) # A healthy beat ends the cooldown. A loop that dies in the boot right after a watchdog restart used to
+       # lock the remedy out for the full cooldown: the 2026-11-11 outage lasted 25 min for exactly that reason.
+       rm -f "$RESTART_MARKER"
+       echo "health: $out; nothing to do" ;;
     1) echo "health: $out; starting the router"; start; remedy_report ;;
     2) restart_on_stall "$out" ;;
     *) echo "health: $out; nothing to do, a restart will not fix it" ;;
@@ -472,6 +475,29 @@ stop_ticket() {
   case "$out" in *'"stopped"'*) return 0 ;; *) return 1 ;; esac
 }
 
+# One sqlite-safe copy of the engine's memory per day, kept in the state directory's archive. A box that dies
+# with the disk takes the queue, the seen set and the outbox with it; a fresh clone of the repo rebuilds the code
+# in a minute, and this file is the only copy of what the fleet was doing.
+backup() {
+  local db="$STATE/tickets.db" day dest
+  [ -f "$db" ] || { echo "backup: no $db, nothing to back up"; return 0; }
+  day="$(date -u +%Y%m%d)"; dest="$STATE/archive/tickets-$day.db"
+  mkdir -p "$STATE/archive"
+  if [ -f "$dest" ]; then echo "backup: today's copy exists: $dest"; return 0; fi
+  if ! python3 - "$db" "$dest" <<'PYEOF'
+import sqlite3, sys
+src, dest = sys.argv[1], sys.argv[2]
+dst = sqlite3.connect(dest)
+sqlite3.connect(src, uri=True).backup(dst)
+ok = dst.execute("pragma integrity_check").fetchone()[0]
+dst.close()
+sys.exit(0 if ok == "ok" else 1)
+PYEOF
+  then rm -f "$dest"; echo "backup: the copy failed its integrity check, keeping only the last good one" >&2; return 1; fi
+  ls -1t "$STATE"/archive/tickets-*.db 2>/dev/null | tail -n +15 | while read -r old; do rm -f "$old"; done
+  echo "backup: wrote $dest ($(du -h "$dest" | cut -f1))"
+}
+
 case "${CMD:-status}" in
   start)
     if [ -n "${RESPECT_STOP:-}" ] && [ -f "$STOP_MARKER" ]; then echo "left stopped: manual stop marker present"; exit 0; fi
@@ -483,5 +509,6 @@ case "${CMD:-status}" in
     restart_router ;;
   status) status ;;
   remedy) remedy ;;
+  backup) backup ;;
   *) usage >&2; exit 2 ;;
 esac
