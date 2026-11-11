@@ -59,11 +59,12 @@ const until = async (ok: () => boolean, ms = 5000) => {
 function memoryHerdr() {
   const agents = new Map<string, AgentInfo>()
   const calls: string[] = []
+  const envs: Array<Record<string, string>> = []
   let tabs = 0
   const herdr: Herdr = {
     workspaces: async () => [{ workspace_id: 'w1', label: 'superagent' }],
     workspaceCreate: async () => ({ workspaceId: 'w1', tabId: 'w1:t0', paneId: 'w1:p0' }),
-    tabCreate: async () => { tabs += 1; calls.push('tabCreate'); return { tabId: `w1:t${tabs}`, paneId: `w1:p${tabs}` } },
+    tabCreate: async o => { tabs += 1; calls.push('tabCreate'); envs.push(o.env); return { tabId: `w1:t${tabs}`, paneId: `w1:p${tabs}` } },
     tabRename: async () => {},
     tabClose: async () => { calls.push('tabClose') },
     paneRun: async () => {},
@@ -71,8 +72,9 @@ function memoryHerdr() {
     agentGet: async name => agents.get(name),
     tabList: async () => [],
     agentSendKeys: async () => {},
+    paneRead: async () => '',
   }
-  return { herdr, calls, agents }
+  return { herdr, calls, agents, envs }
 }
 const live: Array<{ stop(): void }> = []
 afterEach(() => { for (const r of live.splice(0)) r.stop() })
@@ -82,7 +84,8 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
                    workerTiming?: { pollMs?: number; livenessMs?: number }; panelPort?: number | string;
                    workerQuietMinutes?: number; pullApi?: PullApi; blocked?: string[];
                    judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
-                   maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number } = {}) {
+                   maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number;
+                   workerStartMs?: number } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [], closedIssues: [] }
   const closes: number[] = []
@@ -122,6 +125,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     ...(options.tickAbandonMs === undefined ? {} : { tickAbandonMs: options.tickAbandonMs }),
     ...(options.watchRepoIsAsks ? { watchRepoIsAsks: true } : {}),
     ...(options.workerTokenFile ? { workerTokenFile: options.workerTokenFile } : {}),
+    ...(options.workerStartMs ? { workerStartMs: options.workerStartMs } : {}),
   }
   const workers: Spy[] = []
   const judge: Spy = { prompts: [], report: undefined, disposed: false, events: [] }
@@ -544,6 +548,40 @@ describe('the router extension', () => {
     appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"ready","summary":"image bumped after a long build"}\n')
     await until(() => f.receipts('512').includes('image bumped after a long build'))
     expect(f.receipts('512')).toContain('ready: image bumped after a long build')
+  })
+
+  it('the bot\'s token reaches a worker by its file, never on herdr\'s command line', async () => {
+    // The arguments of `herdr tab create` are readable by every local user, and GH_TOKEN rode in them.
+    const h = memoryHerdr()
+    const tokenFile = join(tmp(), 'bot-token')
+    writeFileSync(tokenFile, 'ghp_bot\n')
+    const f = fixture(true, undefined, undefined, h.herdr, { workerTokenFile: tokenFile })
+    f.addComment('513', 'octocat', 'bump the base image')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await until(() => h.envs.length === 1)
+    expect(h.envs[0]).toMatchObject({ PI_SUPERAGENT_WORKER_TOKEN_FILE: tokenFile })
+    expect(JSON.stringify(h.envs[0]), 'the token itself is nowhere in the tab environment').not.toContain('ghp_bot')
+  })
+
+  it('a launch queue that waits with free slots and starts nobody fails the health check, and says why', async () => {
+    // Measured 2026-11-11: 12 launches waited with 8 free slots for about 30 minutes, every pass finished, and
+    // `superagent status` said "running" the whole time.
+    const h = memoryHerdr()
+    h.herdr.agentStart = () => new Promise(() => {})
+    const f = fixture(true, undefined, undefined, h.herdr, { workerStartMs: 40 })
+    f.addComment('514', 'octocat', 'bump the base image')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    await settle()
+    await f.running.tick()
+    const health = () => JSON.parse(readFileSync(join(f.dir, 'health.json'), 'utf8')) as { launch?: { state: string; detail: string } }
+    expect(health().launch, 'a launch in flight is not an alarm').toBeUndefined()
+    for (let n = 0; n < 40 && !health().launch; n++) { await new Promise(resolve => setTimeout(resolve, 25)); await f.running.tick() }
+    expect(health().launch).toMatchObject({ state: 'error', detail: expect.stringMatching(/1 launch\(es\) waiting with \d+ free slot\(s\)/) })
   })
 
   it('after a router restart the herdr worker is taken over, not started a second time', async () => {
@@ -1529,7 +1567,8 @@ describe('the sweep of settled checkouts', () => {
       expect(await sweepWorktrees(root, new Set(), 1)).toMatchObject({ removed: 1, keptWork: 0 })
       expect(readdirSync(root)).toContain('keepme')
     } finally { rmSync(root, { recursive: true, force: true }) }
-  })
+    // Real git, many processes: under a loaded machine (load average 158 on 2026-11-11) it outruns 5 s.
+  }, 30_000)
 
   it('keeps a settled checkout whose commits exist on no remote, and says so', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-dirty-'))

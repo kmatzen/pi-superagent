@@ -41,7 +41,15 @@ export interface HerdrWorkersOptions {
   retireGraceMs?: number
   startTimeoutMs?: number
   shellWaitMs?: number
+  /** How often a starting worker's tab is read for a pi that died at boot. */
+  bootPollMs?: number
 }
+
+/** What a pi prints when it dies at startup, before its shell prompt comes back. */
+const BOOT_FAILED = /Failed to load extension|Hint: Start without extensions|command not found: pi\b|Cannot find module/
+/** The tab's last few non-empty lines, short enough to ride in a failure message on the issue. */
+const lastWords = (text: string): string =>
+  text.split('\n').map(line => line.trim()).filter(Boolean).slice(-4).join(' | ').slice(-400)
 
 /** herdr agent names are `[a-z][a-z0-9_-]{0,31}` and unique among live agents, so each launch gets its own. */
 export const agentName = (thread: string, sessionId: string): string =>
@@ -87,10 +95,14 @@ export class HerdrWorkers {
     } catch (error) {
       // Started but waiting on a startup prompt: the worker exists, and the operator answers it in its tab.
       if (!(error instanceof HerdrError && error.code === 'agent_not_ready')) {
+        // The tab's last words are the cause: "timed out waiting for agent startup" alone sent a whole night's
+        // diagnosis the wrong way (2026-11-10/11), while the tab said "Tool ticket_report conflicts".
+        const said = error instanceof HerdrError && error.code === 'agent_boot_failed'
+          ? '' : lastWords(await herdr.paneRead(tab.paneId, 20).catch(() => ''))
         await herdr.tabClose(tab.tabId).catch(() => {})
         record.endedAt = record.tabSettledAt = new Date().toISOString()
         writeFileSync(join(dir, 'worker.json'), JSON.stringify(record, null, 2))
-        throw error
+        throw said ? new Error(`${error instanceof Error ? error.message : String(error)}; the tab said: ${said}`) : error
       }
       log.line('warn', 'worker.start_blocked', { ticket: input.ticket.id, agent: name, tab: tab.tabId })
     }
@@ -101,23 +113,46 @@ export class HerdrWorkers {
   // A new tab's shell takes a moment to reach its prompt, and herdr starts an agent only at a prompt.
   private async startWhenShellReady(name: string, pane: string, sessionId: string): Promise<AgentInfo> {
     for (let attempt = 0; ; attempt++) {
+      const watch = this.bootWatch(pane)
       try {
-        return await this.options.herdr.agentStart({
+        return await Promise.race([watch.failed, this.options.herdr.agentStart({
           // The worker loads the operator's harness on purpose (operator, 2026-11-10: "agents should have all
           // the power"). Measured the same day, the cost of the old `--no-extensions`: a worker had no context
           // meter and no compaction affordance, so it packed up at a fraction of its window and the fleet read
-          // that as early termination. The role module rides alongside, and the bot's GH_TOKEN is named in the
+          // that as early termination. The role module rides alongside, and the bot's token file is named in the
           // tab env at the launch site, not inherited.
           // 2 min vs a measured ~8 s full-harness boot; a launch that never starts holds the serial queue this long. A pi
           // that dies at boot (2026-11-11: a duplicate ticket_report) is a crash to fix, not a reason to raise this.
           name, kind: 'pi', pane, timeoutMs: this.options.startTimeoutMs ?? 120_000,
           args: ['--session-id', sessionId, '--extension', roleModule],
-        })
+        })])
       } catch (error) {
         if (!(error instanceof HerdrError && error.code === 'agent_pane_busy') || attempt >= 30) throw error
         await new Promise(resolve => setTimeout(resolve, this.options.shellWaitMs ?? 1000))
+      } finally {
+        watch.stop()
       }
     }
+  }
+
+  /** Rejects as soon as the tab shows a pi that died at startup, rather than after herdr's whole start timeout. */
+  private bootWatch(pane: string): { failed: Promise<never>; stop: () => void } {
+    let stopped = false
+    let timer: NodeJS.Timeout | undefined
+    const every = this.options.bootPollMs ?? 2000
+    const failed = new Promise<never>((_, reject) => {
+      const look = async (): Promise<void> => {
+        const text = await this.options.herdr.paneRead(pane, 20).catch(() => '')
+        if (stopped) return
+        if (BOOT_FAILED.test(text)) { reject(new HerdrError('agent_boot_failed', `pi exited at startup: ${lastWords(text)}`)); return }
+        timer = setTimeout(() => { void look() }, every)
+        timer.unref?.()
+      }
+      timer = setTimeout(() => { void look() }, every)
+      timer.unref?.()
+    })
+    failed.catch(() => {})
+    return { failed, stop: () => { stopped = true; if (timer) clearTimeout(timer) } }
   }
 
   async find(ticketId: string): Promise<WorkerRecord | undefined> {
