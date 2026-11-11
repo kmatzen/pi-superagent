@@ -1,6 +1,11 @@
 # Ask and Delivery: one object each, two lifecycles
 
-Status: proposed (2026-11-10). Owner: the router's operator. Affects `src/core` (vendored, edited under
+**Superseded (2026-11-11): the operator obliterated the asks system** — `refactor: no ask verbs: every open
+issue is work, whoever opened it` (PR #84) — and this design, proposed the day before, was not built. It
+stays as the record of the failure class it analysed: a board that cannot tell an ask from a delivery
+re-dispatches finished work. Read it for the problem table; do not build the machinery.
+
+Status: proposed (2026-11-10), superseded (2026-11-11). Owner: the router's operator. Affects `src/core` (vendored, edited under
 the operator's standing authorisation), `src/pi`, `formal/`, and the panel.
 
 ## The problem
