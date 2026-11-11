@@ -178,6 +178,3 @@ To start over, stop the router and delete the directory. On the next start, the 
 - [Ask and Delivery: one object each, two lifecycles](design-ask-vs-delivery.md) — superseded by the asks-system removal (PR #84); kept as the record of the failure class. Why the
   guarantee above, "a ticket with a pull request ends with it", costs seven rules, and the split that makes
   it one.
-- [Remote workers: the fleet on atscloud, the router on the laptop](design-remote-workers.md) — accepted.
-  The `WorkerLauncher` port is the seam: workers run where corpnet is native, the control plane stays put,
-  and receipts are the only new network path.
