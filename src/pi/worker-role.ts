@@ -47,6 +47,11 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000):
   // true, not false: this pi is a worker, and the caller must not go on to start a router in it.
   if (rolesHeld().has(dir)) return true
   rolesHeld().add(dir)
+  // The worker's gh identity: the router names the bot's token file in the tab, never the token itself.
+  const tokenFile = env.PI_SUPERAGENT_WORKER_TOKEN_FILE
+  if (tokenFile) {
+    try { const token = readFileSync(tokenFile, 'utf8').trim(); if (token) env.GH_TOKEN = token } catch { /* the shell's identity stands */ }
+  }
   const inbox = join(dir, 'inbox')
   mkdirSync(inbox, { recursive: true })
   const append = (file: string, record: object): void =>

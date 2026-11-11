@@ -23,30 +23,41 @@ export interface Herdr {
   agentStart(o: { name: string; kind: string; pane: string; timeoutMs: number; args: string[] }): Promise<AgentInfo>
   agentGet(name: string): Promise<AgentInfo | undefined>
   agentSendKeys(name: string, keys: string[]): Promise<void>
+  /** The tab's last lines of terminal text: what a pi that died at startup printed before its shell came back. */
+  paneRead(paneId: string, lines: number): Promise<string>
 }
 
 export class HerdrError extends Error {
   constructor(readonly code: string, message: string) { super(message) }
 }
 
-export function herdrCli(bin = 'herdr'): Herdr {
-  const call = (args: string[]): Promise<Record<string, unknown>> => new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    let out = ''
-    let err = ''
-    child.stdout.setEncoding('utf8').on('data', (chunk: string) => { out += chunk })
-    child.stderr.setEncoding('utf8').on('data', (chunk: string) => { err += chunk })
-    child.on('error', reject)
-    child.on('close', code => {
-      if (code === 0) {
-        try { resolve((JSON.parse(out || '{}') as { result?: Record<string, unknown> }).result ?? {}) } catch { resolve({}) }
-        return
-      }
-      let failure: { code?: string; message?: string } = {}
-      try { failure = (JSON.parse(err) as { error?: typeof failure }).error ?? {} } catch { /* not JSON: keep the raw text */ }
-      reject(new HerdrError(failure.code ?? `exit_${code}`, `herdr ${args.slice(0, 2).join(' ')}: ${failure.message ?? err.trim().slice(0, 300)}`))
+export function herdrCli(bin = 'herdr', timeoutMs = 60_000): Herdr {
+  // Every call is time-limited: launches run one at a time, so a herdr that stops answering held every launch
+  // behind it, for good.
+  const run = (args: string[], limitMs = timeoutMs): Promise<{ code: number | null; out: string; err: string }> =>
+    new Promise((resolve, reject) => {
+      const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      let out = ''
+      let err = ''
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL')
+        reject(new HerdrError('timeout', `herdr ${args.slice(0, 2).join(' ')}: no answer in ${limitMs} ms`))
+      }, limitMs)
+      timer.unref?.()
+      child.stdout.setEncoding('utf8').on('data', (chunk: string) => { out += chunk })
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => { err += chunk })
+      child.on('error', error => { clearTimeout(timer); reject(error) })
+      child.on('close', code => { clearTimeout(timer); resolve({ code, out, err }) })
     })
-  })
+  const call = async (args: string[], limitMs?: number): Promise<Record<string, unknown>> => {
+    const { code, out, err } = await run(args, limitMs)
+    if (code === 0) {
+      try { return (JSON.parse(out || '{}') as { result?: Record<string, unknown> }).result ?? {} } catch { return {} }
+    }
+    let failure: { code?: string; message?: string } = {}
+    try { failure = (JSON.parse(err) as { error?: typeof failure }).error ?? {} } catch { /* not JSON: keep the raw text */ }
+    throw new HerdrError(failure.code ?? `exit_${code}`, `herdr ${args.slice(0, 2).join(' ')}: ${failure.message ?? err.trim().slice(0, 300)}`)
+  }
   const envArgs = (env: Record<string, string>) => Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`])
 
   return {
@@ -75,7 +86,8 @@ export function herdrCli(bin = 'herdr'): Herdr {
     },
     async paneRun(paneId, command) { await call(['pane', 'run', paneId, command]) },
     async agentStart(o) {
-      const r = await call(['agent', 'start', o.name, '--kind', o.kind, '--pane', o.pane, '--timeout', String(o.timeoutMs), '--', ...o.args])
+      const r = await call(['agent', 'start', o.name, '--kind', o.kind, '--pane', o.pane, '--timeout', String(o.timeoutMs), '--', ...o.args],
+        o.timeoutMs + 30_000)
       return (r as { agent: AgentInfo }).agent
     },
     async agentGet(name) {
@@ -87,5 +99,9 @@ export function herdrCli(bin = 'herdr'): Herdr {
       }
     },
     async agentSendKeys(name, keys) { await call(['agent', 'send-keys', name, ...keys]) },
+    async paneRead(paneId, lines) {
+      const { code, out } = await run(['pane', 'read', paneId, '--lines', String(lines)])
+      return code === 0 ? out : ''
+    },
   }
 }
