@@ -573,7 +573,8 @@ describe('the router extension', () => {
     // `superagent status` said "running" the whole time.
     const h = memoryHerdr()
     h.herdr.agentStart = () => new Promise(() => {})
-    const f = fixture(true, undefined, undefined, h.herdr, { workerStartMs: 40 })
+    // 400 ms, not 40: three ticks on a loaded machine outran 40 ms and raised the alarm before the first check.
+    const f = fixture(true, undefined, undefined, h.herdr, { workerStartMs: 400 })
     f.addComment('514', 'octocat', 'bump the base image')
     await f.running.tick()
     await settle()
@@ -583,7 +584,7 @@ describe('the router extension', () => {
     await f.running.tick()
     const health = () => JSON.parse(readFileSync(join(f.dir, 'health.json'), 'utf8')) as { launch?: { state: string; detail: string } }
     expect(health().launch, 'a launch in flight is not an alarm').toBeUndefined()
-    for (let n = 0; n < 40 && !health().launch; n++) { await new Promise(resolve => setTimeout(resolve, 25)); await f.running.tick() }
+    for (let n = 0; n < 80 && !health().launch; n++) { await new Promise(resolve => setTimeout(resolve, 25)); await f.running.tick() }
     expect(health().launch).toMatchObject({ state: 'error', detail: expect.stringMatching(/1 launch\(es\) waiting with \d+ free slot\(s\)/) })
   })
 
