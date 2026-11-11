@@ -175,6 +175,6 @@ To start over, stop the router and delete the directory. On the next start, the 
 
 ## Related designs
 
-- [Ask and Delivery: one object each, two lifecycles](design-ask-vs-delivery.md) — proposed. Why the
+- [Ask and Delivery: one object each, two lifecycles](design-ask-vs-delivery.md) — superseded by the asks-system removal (PR #84); kept as the record of the failure class. Why the
   guarantee above, "a ticket with a pull request ends with it", costs seven rules, and the split that makes
   it one.
