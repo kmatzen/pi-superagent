@@ -133,6 +133,8 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   'change first, then report, then end your turn. Tools stop working after it until a new message arrives, and nothing',
   'you do on your own afterwards is read.',
   'Do not edit the ticket and do not post reply comments: the router writes receipts, you report.',
+  'Write in English: every pull request title and body, issue comment, commit message, code comment and ticket_report,',
+  'whatever language you think in. Text in another language is refused before it is sent.',
   'This machine is shared: budget CPU and memory. Run builds and tests sequentially, cap parallel jobs',
   '(make -j4, pytest -n4, not an unbounded fan-out), avoid pulling huge caches, and stop every process',
   'you started before you report.',

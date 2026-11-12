@@ -17,6 +17,8 @@ describe('the worker brief', () => {
       .toMatch(/A ready or blocked report is your last act[\s\S]*finish every\s+change first, then report, then end your turn/)
     expect(briefFor({ id: 'T2', title: 'ci', channels: [] } as unknown as Ticket, '/wt/T2'), 'how to wait on CI without going deaf')
       .toContain('poll it one step per command')
+    expect(briefFor({ id: 'T2', title: 'en', channels: [] } as unknown as Ticket, '/wt/T2'), 'English, whatever the model thinks in')
+      .toMatch(/Write in English: every pull request title and body[\s\S]*whatever language you think in/)
   })
 })
 
