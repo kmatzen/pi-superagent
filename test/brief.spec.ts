@@ -13,6 +13,8 @@ describe('the worker brief', () => {
 
   it('still briefs a ticket whose mandate is missing', () => {
     expect(briefFor({ id: 'T2', title: 'no mandate', channels: [] } as unknown as Ticket, '/wt/T2')).toContain('Mandate: (the ticket text)')
+    expect(briefFor({ id: 'T2', title: 'ci', channels: [] } as unknown as Ticket, '/wt/T2'), 'how to wait on CI without going deaf')
+      .toContain('poll it one step per command')
   })
 })
 

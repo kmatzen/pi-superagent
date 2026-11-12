@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { checkoutRepository, DELEGATION_TOOLS, decideToolCall, prepareWorkspace, setupProblems, WorkspaceError } from '../src/pi/workspace.ts'
+import { checkoutRepository, DELEGATION_TOOLS, decideToolCall, prepareWorkspace, setupProblems, WorkspaceError, longWait } from '../src/pi/workspace.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ws-')); dirs.push(d); return d }
@@ -128,3 +128,21 @@ describe('the worker tool-call boundary', () => {
   })
 })
 
+describe('waits that would hold a person\'s review back', () => {
+  it('refuses one command that waits minutes, and lets short waits and local loops through', () => {
+    // 2026-11-12: workers slept 300-600 s per command polling CI while the operator's reviews queued behind them.
+    expect(longWait('sleep 300')).toMatch(/sleep 300 waits past 60 s/)
+    expect(longWait('git push && sleep 2m && gh pr checks 12')).toMatch(/sleep 2m/)
+    expect(longWait('gh pr checks 12 --watch')).toMatch(/a watch blocks until CI finishes/)
+    expect(longWait('gh run watch 4567 --exit-status')).toMatch(/a watch blocks/)
+    expect(longWait('until gh pr checks 12 | grep -q pass; do sleep 30; done')).toMatch(/a loop that polls GitHub/)
+    expect(longWait('sleep 60; gh pr checks 12')).toBeUndefined()
+    expect(longWait('until curl -s localhost:3000 >/dev/null; do sleep 1; done')).toBeUndefined()
+    expect(longWait('echo "sleep 900 seconds is too long"'), 'a word in a string is not a sleep').toBeUndefined()
+  })
+
+  it('the guard refuses a long wait with the way to poll instead', () => {
+    const verdict = decideToolCall({ toolName: 'bash', args: { command: 'sleep 600' } }, { blocked: [], workspace: '/w', allowDelegation: false })
+    expect(verdict?.deny).toMatch(/one `gh pr checks`.*then `sleep 60` at most/)
+  })
+})
