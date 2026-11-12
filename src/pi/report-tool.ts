@@ -58,6 +58,14 @@ export function reportTool(report: Reporter): ReportTool {
           content: [{ type: 'text', text: `not a pull request URL: ${unreadable.map(u => u.slice(0, 200)).join(', ')} — ${PULL_URL_HELP}. Nothing was reported; fix the entry and call ticket_report again.` }],
         }
       }
+      // The engine refuses a question on a ready result; saying so here lets the worker fix it in this turn, where the
+      // router's refusal reached no one (2026-11-12: a ready report asking for owner approval was dropped unread).
+      if (a.question && a.state === 'ready') {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: 'a ready result cannot carry a question: report blocked with the question if you need a person, or put the follow-up in the summary. Nothing was reported; call ticket_report again.' }],
+        }
+      }
       const outcome = report(a.state, a.summary, a.question ?? null, undefined, pulls.length ? pulls : undefined)
       // A reporter that answers nothing (the worker pane's file bridge) cannot know the verdict; say the plain
       // thing. The router process says `dropped` loudly in its own log, which is where the operator reads it.
