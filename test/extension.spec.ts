@@ -1151,6 +1151,39 @@ describe('a pull request per ticket', () => {
     void second
   })
 
+  it("a person's review the worker took mid-run stays answered: its ready report hands it to no fresh worker", async () => {
+    // 2026-11-12: only a run start marked input read and a steer starts none, so the release requeued a review the worker had answered.
+    const pulls = pullsFake()
+    const h = memoryHerdr()
+    const f = fixture(true, undefined, undefined, h.herdr, { pullApi: pulls.api, workerTiming: { pollMs: 10 } })
+    f.addComment('494', 'octocat', 'rename the Export button to Ship')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    const starts = () => h.calls.filter(c => c === 'agentStart').length
+    expect(starts()).toBe(1)
+    const bridge = join(f.dir, 'workers', readdirSync(join(f.dir, 'workers')).find(d => d.length === 36)!)
+    const inbox = () => readdirSync(join(bridge, 'inbox')).sort()
+    appendFileSync(join(bridge, 'events.jsonl'), '{"type":"turnStarted"}\n')
+    const pumped = () => existsSync(join(bridge, 'cursor.json')) && (JSON.parse(readFileSync(join(bridge, 'cursor.json'), 'utf8')) as { events: number }).events > 0
+    await until(pumped)
+    f.addComment('494', 'octocat', 'keep the old name as a tooltip', '2026-11-05T09:30:00Z')
+    await f.running.tick()
+    await until(() => inbox().length === 2)
+    appendFileSync(join(bridge, 'events.jsonl'), `{"type":"input_read","name":"${inbox()[1]}"}\n`)
+    pulls.open('o/r', 77)
+    appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"ready","summary":"renamed it","pullRequests":["https://github.com/o/r/pull/77"]}\n')
+    await until(() => f.receipts('494').includes('renamed it'))
+    for (let pass = 0; pass < 3; pass++) { await f.running.tick(); await settle() }
+    await until(() => starts() > 1, 1000)
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8'), 'the ready report freed the worker').toMatch(/worker\.released/)
+    expect(starts(), 'the review it read is not handed to a second worker').toBe(1)
+    const ticket = new SqliteRepositories(`${f.dir}/tickets.db`).tickets.list().find(t => t.channels[0]?.thread === '#494')!
+    expect(ticket.undelivered).toEqual([])
+    expect(ticket.inputs.filter(i => i.kind === 'trigger' && i.deliveredTo).map(i => i.kind === 'trigger' && !!i.readAt)).toEqual([true])
+  })
+
   it('a pull request closed without merging ends the ticket, and the issue says how to start again', async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
