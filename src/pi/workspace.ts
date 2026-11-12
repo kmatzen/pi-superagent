@@ -149,6 +149,23 @@ export function guardExtension(policy: ToolCallPolicy): (pi: { on(event: 'tool_c
 /** Delegated work leaves the mandate, the workspace bound and the report behind. */
 export const DELEGATION_TOOLS = ['subagent', 'workflow', 'workflow_control', 'session_spawn', 'session_bus']
 
+/** pi hands a worker new messages only between tool calls, so one command that waits minutes holds a person's review
+ *  back that long (2026-11-12: workers slept 300-600 s per command polling CI while the operator's reviews queued). */
+export const MAX_WAIT_S = 60
+const WAIT_HELP = `poll in steps instead: one \`gh pr checks\` (or \`gh run view\`) per command, then \`sleep ${MAX_WAIT_S}\` at most, and look again. A person's review reaches you only between commands`
+const UNIT_S: Record<string, number> = { '': 1, s: 1, m: 60, h: 3600, d: 86400 }
+
+export function longWait(command: string): string | undefined {
+  for (const m of command.matchAll(/(?:^|[;&|\s(`])sleep\s+(\d+(?:\.\d+)?)([smhd]?)(?=$|[\s;&|)`])/g)) {
+    if (Number(m[1]) * UNIT_S[m[2] ?? '']! > MAX_WAIT_S) return `sleep ${m[1]}${m[2]} waits past ${MAX_WAIT_S} s in one command; ${WAIT_HELP}`
+  }
+  if (/\bgh\s+(pr\s+checks\b[^;&|]*--watch|run\s+watch)\b/.test(command)) return `a watch blocks until CI finishes; ${WAIT_HELP}`
+  if (/\b(while|until|for)\b[\s\S]*\bsleep\b/.test(command) && /\bgh\s+(pr|run|api)\b/.test(command)) {
+    return `a loop that polls GitHub inside one command waits as long as CI does; ${WAIT_HELP}`
+  }
+  return undefined
+}
+
 export function decideToolCall(call: ToolCall, policy: ToolCallPolicy): { deny: string } | undefined {
   if (!policy.allowDelegation && DELEGATION_TOOLS.includes(call.toolName)) {
     return { deny: `${call.toolName} is closed to a ticket worker: work outside this session has no mandate, no workspace bound, and no report` }
@@ -160,7 +177,8 @@ export function decideToolCall(call: ToolCall, policy: ToolCallPolicy): { deny: 
       const re = new RegExp(`(^|[;&|\\s(/\x60])(sudo\\s+)?${name}(\\s|$|\x60)`)
       if (re.test(command)) return { deny: `${name} is blocked for ticket workers; the operator's identity is not yours to use` }
     }
-    return undefined
+    const wait = longWait(command)
+    return wait ? { deny: wait } : undefined
   }
   if (call.toolName === 'edit' || call.toolName === 'write') {
     const path = String(call.args.path ?? '')

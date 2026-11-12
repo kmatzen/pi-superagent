@@ -243,7 +243,10 @@ export class PiExecutor {
       return this.engine.deliveryFailed(ticket.id, assignment.id, NO_LIVE_WORKER)
     }
       // An idle session queues a mode-tagged message and never starts it: an operator reply sat as "3 awaiting input".
-    const mode = live.busy ? 'followUp' : 'steer'
+    // A person's message steers a busy worker too: pi hands it over at the next tool boundary. As a follow-up it waited
+    // for the whole run, and a worker polling CI read the operator's review long after it was written (2026-11-12).
+    const fromPerson = pending.some(i => i.kind === 'trigger' && i.human === true)
+    const mode = live.busy && !fromPerson ? 'followUp' : 'steer'
     const texts = visible.map(i => String(i.text))
     // One prompt for the whole batch. Each `prompt` call is its own steering message, and pi steers the session
     // with the first while the rest queue: a review that arrived as five comments was answered one comment at a
