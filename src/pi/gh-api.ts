@@ -292,6 +292,14 @@ export function ghPulls(options: GhOptions = {}): PullApi {
         pr: number, repo, id: r.id, author: r.user?.login ?? 'anonymous', association: associationOf(r), state: r.state, at: r.submitted_at!, body: r.body ?? '',
       }))
     },
+    async reviewComments(repo, number, reviewId) {
+      const rows = await paged<{ path?: string; line?: number | null; original_line?: number | null; body?: string; html_url?: string }>(call,
+        page => `repos/${repo}/pulls/${number}/reviews/${reviewId}/comments?page=${page}`, r => r)
+      return rows.map(r => {
+        const line = r.line ?? r.original_line
+        return { path: r.path ?? '', ...(line ? { line } : {}), body: r.body ?? '', url: r.html_url ?? '' }
+      })
+    },
   }
 }
 
