@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { stopWorkerScope } from './worker-limits.ts'
 import { fileURLToPath } from 'node:url'
 import type { Ticket } from '../core/index.ts'
 import type { WorkerEvent, WorkerSession } from './executor.ts'
@@ -39,6 +40,8 @@ export interface HerdrWorkersOptions {
   lingerMs?: number
   /** How long a retired worker's agent gets to wind down before its tab closes at a busy agent. */
   retireGraceMs?: number
+  /** Ends a worker's processes, background tasks included; defaults to stopping its systemd scope. */
+  stopScope?: (sessionId: string) => void
   startTimeoutMs?: number
   shellWaitMs?: number
   /** How often a starting worker's tab is read for a pi that died at boot. */
@@ -68,6 +71,13 @@ export class HerdrWorkers {
 
   async launch(input: { ticket: Ticket; thread: string; workspace: string; env: Record<string, string>; report: Reporter }): Promise<WorkerSession> {
     const { herdr, log } = this.options
+    // One live worker per ticket. A released worker kept its tab while a background task kept it busy, woke on its
+    // own, and worked the same checkout as the worker launched after it (2026-11-12, ticket 340).
+    for (const old of [...this.records(), ...this.records(true)].filter(r => r.ticketId === input.ticket.id)) {
+      if (!(await this.inTab(old))) continue
+      log.line('warn', 'worker.superseded', { ticket: input.ticket.id, agent: old.agent, tab: old.tabId })
+      await this.end(old)
+    }
     const sessionId = randomUUID()
     const dir = join(this.root, sessionId)
     mkdirSync(join(dir, 'inbox'), { recursive: true })
@@ -341,8 +351,29 @@ export class HerdrWorkers {
         record.endedAt = new Date().toISOString()
         writeFileSync(join(record.dir, 'worker.json'), JSON.stringify(record, null, 2))
         setTimeout(() => { void this.closeIfIdle(record) }, this.options.lingerMs ?? 600_000).unref()
+        // The keep waits for idle, and a background task kept a released worker busy forever (2026-11-12): past the
+        // deadline it ends, scope and tab, busy or not.
+        setTimeout(() => { void this.endIfStill(record) },
+          (this.options.lingerMs ?? 600_000) + RETIRE_CLOSE_TRIES * (this.options.retireGraceMs ?? 60_000)).unref()
       },
     }
+  }
+
+  private async endIfStill(record: WorkerRecord): Promise<void> {
+    if (record.tabSettledAt || !(await this.inTab(record))) return
+    this.options.log.line('info', 'worker.tab_closed_busy', { agent: record.agent, tab: record.tabId, ticket: record.ticketId, after: 'release deadline' })
+    await this.end(record)
+  }
+
+  /** Ends a worker now: its scope (pi and background tasks), then its tab. */
+  private async end(record: WorkerRecord): Promise<void> {
+    ;(this.options.stopScope ?? stopWorkerScope)(record.sessionId)
+    await this.options.herdr.tabClose(record.tabId)
+      .catch((error: unknown) => this.options.log.line('warn', 'worker.tab_close_failed', { tab: record.tabId, error: String(error).slice(0, 160) }))
+    const now = new Date().toISOString()
+    record.endedAt ??= now
+    record.tabSettledAt = now
+    writeFileSync(join(record.dir, 'worker.json'), JSON.stringify(record, null, 2))
   }
 
   // A bounded keep: without the budget a busy agent holds a retired tab forever, which is the leak being closed.
@@ -361,6 +392,7 @@ export class HerdrWorkers {
         this.options.log.line('info', 'worker.tab_closed_busy', {
           agent: record.agent, tab: record.tabId, status: agent.agent_status, ticket: record.ticketId,
         })
+        ;(this.options.stopScope ?? stopWorkerScope)(record.sessionId)
         await this.options.herdr.tabClose(record.tabId)
           .then(() => { settle() })
           .catch((error: unknown) => this.options.log.line('warn', 'worker.tab_close_failed', { tab: record.tabId, error: String(error).slice(0, 160) }))
@@ -375,6 +407,7 @@ export class HerdrWorkers {
       settle()
       return
     }
+    ;(this.options.stopScope ?? stopWorkerScope)(record.sessionId)
     await this.options.herdr.tabClose(record.tabId)
       .then(() => { settle(); this.options.log.line('info', 'worker.tab_closed', { agent: record.agent, tab: record.tabId }) })
       .catch((error: unknown) => this.options.log.line('warn', 'worker.tab_close_failed', { tab: record.tabId, error: String(error).slice(0, 160) }))

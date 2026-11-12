@@ -73,6 +73,17 @@ export function scopesWork(run: typeof execFileSync = execFileSync): boolean {
   }
 }
 
+/** Stops a worker's scope: its pi and everything it left running, background tasks included, which a tab close
+ *  does not reach. A worker with no scope (limits off, not Linux, already gone) is left as it is. */
+export function stopWorkerScope(sessionId: string, run: typeof execFileSync = execFileSync): void {
+  if (process.platform !== 'linux' || typeof process.getuid !== 'function') return
+  try {
+    run('systemctl', ['--user', 'stop', `pi-superagent-worker-${sessionId}.scope`], {
+      env: { ...process.env, XDG_RUNTIME_DIR: `/run/user/${process.getuid()}` }, stdio: 'ignore', timeout: 15_000,
+    })
+  } catch { /* no such scope */ }
+}
+
 export function installShim(stateDir: string, limits: WorkerLimits): string {
   const bin = join(stateDir, 'bin')
   mkdirSync(bin, { recursive: true })

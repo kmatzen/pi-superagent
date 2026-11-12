@@ -77,6 +77,36 @@ describe('herdr workers', () => {
     expect(m.calls, 'a worker this router adopted is never interrupted, busy or not').not.toContain('tabClose w1:t7')
   })
 
+  it('a new worker for a ticket first ends the one still in its tab, scope and tab', async () => {
+    // 2026-11-12, ticket 340: a released worker, kept busy by its own background task, worked the same checkout as the
+    // worker launched after it.
+    const m = memoryHerdr()
+    const stopped: string[] = []
+    const workers = new HerdrWorkers({ ...options(tmp(), m.herdr), lingerMs: 60_000, stopScope: id => { stopped.push(id) } })
+    const first = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    first.dispose()
+    for (const a of m.agents.values()) a.agent_status = 'working'
+    const second = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    expect(stopped, 'the old worker\'s processes ended, background tasks included').toEqual([first.sessionId])
+    const closed = m.calls.indexOf('tabClose w1:t1')
+    const started = m.calls.findIndex(c => c.startsWith('agentStart') && c.includes(second.sessionId))
+    expect(closed, 'its tab closed').toBeGreaterThan(-1)
+    expect(closed, 'before the new worker started').toBeLessThan(started)
+    expect([...m.agents.keys()].filter(n => n.startsWith('sa-')), 'one live worker on the ticket').toHaveLength(1)
+  })
+
+  it('a released worker a background task keeps busy is closed after its bounded keep, scope included', async () => {
+    const m = memoryHerdr()
+    const stopped: string[] = []
+    const workers = new HerdrWorkers({ ...options(tmp(), m.herdr), lingerMs: 10, retireGraceMs: 10, stopScope: id => { stopped.push(id) } })
+    const s = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    for (const a of m.agents.values()) a.agent_status = 'working'
+    s.dispose()
+    await until(() => stopped.length === 1)
+    expect(stopped).toEqual([s.sessionId])
+    expect(m.calls, 'and its tab closed, busy or not').toContain('tabClose w1:t1')
+  })
+
   it('names a worker the way herdr requires, uniquely per launch', () => {
     expect(agentName('#159', '4f02aa')).toBe('sa-gh159-4f02')
     expect(agentName('#59', 'ab12cd')).toBe('sa-gh59-ab12')
@@ -325,7 +355,7 @@ describe('herdr workers', () => {
     const m = memoryHerdr()
     const before = new HerdrWorkers(options(dir, m.herdr))
     const kept = await before.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
-    const adopted = await before.launch({ ticket, thread: '#8', workspace: '/w/8', env: {}, report: () => {} })
+    const adopted = await before.launch({ ticket: { ...(ticket as object), id: 'T8' } as typeof ticket, thread: '#8', workspace: '/w/8', env: {}, report: () => {} })
     await new Promise(resolve => setTimeout(resolve, 5))
     const workers = new HerdrWorkers(options(dir, m.herdr))
     const retired = await workers.retireOrphans(new Set([adopted.sessionId]))
