@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { AFTER_HANDOVER, PERSON_FILE, SILENT_FINISH, SILENT_NUDGE_FILE, workerRole, type WorkerPi } from '../src/pi/worker-role.ts'
+import { NOT_ENGLISH } from '../src/pi/english.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'wrole-')); dirs.push(d); return d }
@@ -138,6 +139,19 @@ describe('the worker role', () => {
     workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp(), PI_SUPERAGENT_WORKSPACE: '/w' })
     f.emit('tool_call', { toolName: 'ask_user_question', input: { questions: [{ question: 'Make it uniform?' }] } })
     expect(f.emit('tool_call', { toolName: 'bash', input: { command: 'git push' } }).find(v => v)).toMatchObject({ block: true, reason: AFTER_HANDOVER })
+  })
+
+  it('refuses a report or a pull request that is not in English, and lets every other command through', () => {
+    // 2026-11-12: the fleet's default model opened four pull requests with Chinese bodies.
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp(), PI_SUPERAGENT_WORKSPACE: '/w' })
+    const chinese = '## 这个 PR 是什么\n把注意力脚手架拆成五个按层的 PR，按顺序合并。'
+    const verdict = (toolName: string, input: Record<string, unknown>) => f.emit('tool_call', { toolName, input }).find(v => v)
+    expect(verdict('ticket_report', { state: 'ready', summary: chinese })).toMatchObject({ block: true, reason: NOT_ENGLISH })
+    expect(verdict('ticket_report', { state: 'ready', summary: 'Split into five stacked pull requests.' })).toBeUndefined()
+    expect(verdict('bash', { command: `gh pr create --title Split --body "${chinese}"` })).toMatchObject({ block: true, reason: NOT_ENGLISH })
+    expect(verdict('bash', { command: 'gh pr create --title Split --body "Five stacked pull requests."' })).toBeUndefined()
+    expect(verdict('bash', { command: `grep -rn "${chinese}" docs/` }), 'searching is not publishing').toBeUndefined()
   })
 
   it('a person typing in the tab lifts the handover, and leaves word for the router that a person is there', () => {
