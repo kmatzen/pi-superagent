@@ -3,6 +3,7 @@ import {appendFileSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync
 import { join } from 'node:path'
 import { reportTool } from './report-tool.ts'
 import { guardExtension } from './workspace.ts'
+import { NOT_ENGLISH, nonEnglish, publishedText } from './english.ts'
 
 export interface WorkerPi {
   registerTool(tool: ReturnType<typeof reportTool>): void
@@ -80,6 +81,13 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   pi.on('tool_call', (event?: unknown) => {
     if (!handedOver || (event as { toolName?: string }).toolName === 'ticket_report') return
     return { block: true, reason: AFTER_HANDOVER }
+  })
+  pi.on('tool_call', (event?: unknown) => {
+    const call = event as { toolName?: string; input?: Record<string, unknown> }
+    const text = call.toolName === 'ticket_report' ? `${call.input?.summary ?? ''}\n${call.input?.question ?? ''}`
+      : call.toolName === 'bash' && typeof call.input?.command === 'string'
+        ? publishedText(call.input.command, env.PI_SUPERAGENT_WORKSPACE ?? process.cwd()) : undefined
+    if (text && nonEnglish(text)) return { block: true, reason: NOT_ENGLISH }
   })
   // A person typing here is new work, not the worker running on alone: the handover refused the operator every tool (2026-11-12).
   pi.on('input', (event?: unknown) => {
