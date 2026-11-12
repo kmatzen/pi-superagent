@@ -1102,13 +1102,14 @@ describe('a pull request per ticket', () => {
     const states = new Map<string, PullState>()
     const comments = new Map<string, IssueComment[]>()
     const created = new Date(Date.now() - 60_000).toISOString()
+    const failing = new Set<string>()
     const api: PullApi = {
-      pull: async (repo, n) => states.get(`${repo}#${n}`),
+      pull: async (repo, n) => { if (failing.has(`${repo}#${n}`)) throw new Error('HTTP 502 Bad Gateway'); return states.get(`${repo}#${n}`) },
       comments: async (repo, n) => comments.get(`${repo}#${n}`) ?? [],
       reviews: async () => [],
     }
     return {
-      api, comments, states,
+      api, comments, states, failing,
       open: (repo: string, n: number, more: Partial<PullState> = {}) => states.set(`${repo}#${n}`, { open: true, merged: false, createdAt: created, ...more }),
       end: (repo: string, n: number, merged: boolean, closedAt = new Date().toISOString(), mergedBy?: string) =>
         states.set(`${repo}#${n}`, { open: false, merged, createdAt: created, closedAt, ...(mergedBy ? { mergedBy } : {}) }),
@@ -1293,6 +1294,23 @@ describe('a pull request per ticket', () => {
     expect(f.trackers.at(-1)!.body).toContain('| 1 | [r#86](https://github.com/o/r/pull/86) kit: build-heap CLI | merged | - |')
     expect(f.trackers.at(-1)!.body).toContain('| draft | **you: review, then mark it ready** |')
     expect(ticket().ended, 'one merge of two ends nothing').toBeUndefined()
+  })
+
+  it('a restart edits no status comment, even before it has read every pull request again', async () => {
+    // 2026-11-12: each restart rendered from an empty memory, so every status lost its titles for a pass and was edited twice.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    await working(f, '501')
+    pulls.open('o/r', 94, { title: 'kit change', mergeableState: 'clean' })
+    pulls.open('o/r', 95, { title: 'app change', draft: true })
+    f.workers[0]!.report!({ state: 'ready', summary: 'two', pullRequests: ['https://github.com/o/r/pull/94', 'https://github.com/o/r/pull/95'] })
+    await f.running.tick()
+    await until(() => !!f.trackers.at(-1)?.body.includes('app change'))
+    f.running.stop()
+    pulls.failing.add('o/r#95')
+    const g = fixture(true, undefined, f.dir, undefined, { pullApi: pulls.api, issues: f.feed.issues })
+    for (let pass = 0; pass < 3; pass++) { await g.running.tick(); await settle() }
+    expect(g.trackers, 'the same text as before the restart, so no edit').toEqual([])
   })
 
   it('a merge that leaves another pull request open wakes the worker for the follow-on change', async () => {
