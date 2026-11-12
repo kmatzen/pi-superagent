@@ -40,6 +40,10 @@ describe('the status of a ticket with several pull requests', () => {
       { thread: 'github:org/app#199' }])
     const rows = trackerRows(t, ['https://github.com/org/kit/pull/345', 'https://github.com/org/app/pull/210'], states({}), 'o/inbox')
     expect(rows.map(r => r.label), 'the superseded close is history; the forgotten open one is news').toEqual(['kit#345', 'app#210', 'app#199'])
+    const said = trackerRows(t, ['https://github.com/org/kit/pull/343', 'https://github.com/org/kit/pull/345'], states({}), 'o/inbox', true)
+    expect(said.map(r => [r.label, r.status])[0], 'in a declared plan, a step someone closed unmerged stays said').toEqual(['kit#343', 'closed without merging'])
+    expect(trackerRows(t, ['https://github.com/org/kit/pull/343', 'https://github.com/org/kit/pull/345'], states({}), 'o/inbox', false)
+      .map(r => r.label), 'with no plan declared it is noise').not.toContain('kit#343')
   })
 
   it('names the order\'s pull requests only when the ticket follows them', () => {
@@ -89,6 +93,9 @@ describe('the status comment on the issue', () => {
     expect(writes.at(-1)).not.toContain('after #')
     await b.tracker.refresh(ticket([{ thread: 'github:org/kit#345', closed: 'merged' }, { thread: 'github:org/app#210' }]))
     expect(writes.at(-1), 'the merged one is still there, counted').toContain('1 of 2 merged')
+    await b.tracker.refresh(ticket([{ thread: 'github:org/kit#345', closed: 'merged' }, { thread: 'github:org/app#210', closed: 'closed' }]))
+    expect(writes.at(-1), 'one the work dropped, with no plan declared, drops off').toContain('1 of 1 merged')
+    expect(writes.at(-1)).not.toContain('app#210')
     expect(writes.at(-1)).toContain('[kit#345](https://github.com/org/kit/pull/345) | merged | - |')
   })
 
