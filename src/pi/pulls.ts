@@ -132,6 +132,9 @@ export interface ReconcileReport {
   atOnce: number
 }
 
+/** Moving off the old id cursor, the reviews submitted this long ago are read again once: the ones it skipped are new. */
+const REVIEW_CATCH_UP_MS = 6 * 3_600_000
+
 /** A comment that opens with an HTML marker is one a tool keeps updating (a CI dashboard, a coverage bot), whoever's
  *  token posted it: it is automation, not the person, and it must not resume a ticket the way a person can. */
 const MACHINE_WRITTEN = /^\s*<!--[\s\S]*?-->/
@@ -338,16 +341,24 @@ export class PullFollower {
         const settled = Math.min(Date.parse(newest) + 1, (this.options.now?.() ?? Date.now()) - CURSOR_LAG_MS)
         this.options.positions.set(sinceKey, new Date(Math.max(Date.parse(since), settled)).toISOString())
       }
-      const seen = this.options.positions.get<number>(reviewKey) ?? 0
-      let top = seen
+      // By submission time: GitHub numbers a review when it is started, so an id cursor skipped a person's review submitted
+      // after the fleet's own (2026-11-12). Trigger ids carry the review id, so a re-read inside the lag is a dropped duplicate.
+      const reviewSince = `${reviewKey}-since`
+      const nowMs = this.options.now?.() ?? Date.now()
+      const reviewedTo = this.options.positions.get<string>(reviewSince)
+        ?? (this.options.positions.get<number>(reviewKey) !== undefined ? new Date(nowMs - REVIEW_CATCH_UP_MS).toISOString() : undefined)
+      let latest = reviewedTo
       for (const r of await this.options.api.reviews(pull.repo, pull.number)) {
-        if (r.id <= seen) continue
-        top = Math.max(top, r.id)
+        if (reviewedTo && Date.parse(r.at) <= Date.parse(reviewedTo)) continue
+        if (!latest || Date.parse(r.at) > Date.parse(latest)) latest = r.at
         if (this.ours(r.author, r.body)) continue
         const said = `${pull.repo}#${pull.number}: ${r.author} ${r.state.toLowerCase().replace(/_/g, ' ')}${r.body ? `\n\n${r.body.slice(0, 4000)}` : ''}`
         this.options.receive(this.trigger(id, pull, r.author, r.association, r.at, said, 'review', `github:${id}:review:${r.id}`))
       }
-      if (top !== seen) this.options.positions.set(reviewKey, top)
+      if (latest && latest !== reviewedTo) {
+        const settled = Math.min(Date.parse(latest) + 1, nowMs - CURSOR_LAG_MS)
+        this.options.positions.set(reviewSince, new Date(Math.max(reviewedTo ? Date.parse(reviewedTo) : 0, settled)).toISOString())
+      }
       if (this.unreadable.delete(id)) this.options.warn('pull.listen_readable', { thread: id })
     } catch (error) {
       // Once per pull request, not once per poll: 720 identical lines a day bury the one that is new.
