@@ -129,6 +129,8 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   `reviewer needs; question = the single yes/no the operator must answer, and only for state=blocked.`,
   'End every run with ticket_report, including a run that answers a follow-up: a run that ends without it is',
   'posted on the issue as stopped without a result, and your prose answer stays in this tab, unread.',
+  'A ready or blocked report is your last act: it hands the ticket to a person and frees this session, so finish every',
+  'change first, then report, then end your turn. Tools stop working after it, and nothing you do afterwards is read.',
   'Do not edit the ticket and do not post reply comments: the router writes receipts, you report.',
   'This machine is shared: budget CPU and memory. Run builds and tests sequentially, cap parallel jobs',
   '(make -j4, pytest -n4, not an unbounded fan-out), avoid pulling huge caches, and stop every process',
