@@ -121,6 +121,19 @@ describe('PiExecutor', () => {
     expect(f.calls_of('assignmentStarted').map(c => c.args[1])).toEqual(['A1'])
   })
 
+  it('a ticket that ends while its worker boots gets no brief, and its fresh worker is let go', async () => {
+    // 2026-11-12: an issue closed one second into a launch; the stop found no worker yet, and the worker then ran on.
+    let checks = 0
+    const f = fixture({ stillWanted: t => (++checks === 1 ? t : undefined) })
+    f.executor.start(ticket(), assignment('A1'))
+    await f.executor.idle()
+    expect(f.sessions, 'wanted when its slot opened, so it booted').toHaveLength(1)
+    expect(f.sessions[0]!.prompts, 'no brief: nothing to work on').toEqual([])
+    expect(f.sessions[0]!.disposed, 'let go at once').toBe(1)
+    expect(f.calls_of('assignmentStarted')).toEqual([])
+    expect(f.executor.running + f.executor.parked, 'holding no slot').toBe(0)
+  })
+
   it('a delayed stop for a crashed assignment leaves its replacement running', async () => {
     const f = fixture()
     f.executor.start(ticket(), assignment('replacement'))
