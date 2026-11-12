@@ -287,8 +287,14 @@ export class HerdrWorkers {
       }
       for (const r of fresh('reports.jsonl', 'reports')) {
         const pulls = Array.isArray(r.pullRequests) ? r.pullRequests.filter((p): p is string => typeof p === 'string') : []
-        report(String(r.state), String(r.summary), typeof r.question === 'string' ? r.question : null, r.origin === 'silent' ? 'silent' : 'worker',
-          pulls.length ? pulls : undefined)
+        // A report the engine refuses is the worker's mistake and already logged as dropped. Thrown from this timer it
+        // killed the router, and the unsaved cursor replayed it into every restart (2026-11-12: a ready with a question).
+        try {
+          report(String(r.state), String(r.summary), typeof r.question === 'string' ? r.question : null, r.origin === 'silent' ? 'silent' : 'worker',
+            pulls.length ? pulls : undefined)
+        } catch (error) {
+          log.line('warn', 'worker.report_refused', { agent: record.agent, error: String(error).slice(0, 200) })
+        }
       }
       if (`${cursor.events}/${cursor.reports}` !== before) writeFileSync(cursorFile, JSON.stringify(cursor))
     }

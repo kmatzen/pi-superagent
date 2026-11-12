@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -173,6 +173,28 @@ describe('herdr workers', () => {
       '{"state":"blocked","summary":"need a key","question":"rotate prod too?"}\n{"state":"failed","summary":"no report","origin":"silent"}\n')
     await until(() => origins.length === 2)
     expect(origins).toEqual(['worker', 'silent'])
+    off()
+  })
+
+  it('a report the engine refuses is skipped: the pump lives, the next report arrives, and a restart cannot replay it', async () => {
+    // 2026-11-12: a ready report carrying a question threw out of this timer, killed the router, and its unsaved cursor
+    // replayed it into every restart.
+    const dir = tmp()
+    const filed: string[] = []
+    const session = await new HerdrWorkers(options(dir, memoryHerdr().herdr)).launch({ ticket, thread: '#7', workspace: '/w/7', env: {},
+      report: (state, summary) => {
+        if (state === 'ready' && summary === 'asks') throw new Error('A question for a person cannot also be a ready result')
+        filed.push(summary)
+      } })
+    const off = session.subscribe(() => {})
+    const bridge = join(dir, 'workers', session.sessionId)
+    appendFileSync(join(bridge, 'reports.jsonl'),
+      '{"state":"ready","summary":"asks","question":"approve?"}\n{"state":"blocked","summary":"asks properly","question":"approve?"}\n')
+    await until(() => filed.length === 1)
+    expect(filed).toEqual(['asks properly'])
+    const saved = () => (JSON.parse(readFileSync(join(bridge, 'cursor.json'), 'utf8')) as { reports: number }).reports
+    await until(() => existsSync(join(bridge, 'cursor.json')) && saved() > 0)
+    expect(saved(), 'saved past both lines').toBe(statSync(join(bridge, 'reports.jsonl')).size)
     off()
   })
 
