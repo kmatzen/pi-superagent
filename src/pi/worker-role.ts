@@ -35,6 +35,11 @@ export const SILENT_NUDGE = 'You ended your turn without calling ticket_report, 
   + 'blocked (you need a person, with the question), or failed (what broke). One line is enough.'
 export const SILENT_NUDGE_FILE = 'zz-self-nudge.json'
 
+const HANDS_OVER = ['ready', 'blocked', 'waiting']
+export const AFTER_HANDOVER = 'Your ticket_report handed this ticket to a person, and the router has freed this session: nothing you do '
+  + 'from here is read, and the session is ended soon. End your turn now. More work belongs in a new report before you hand over, '
+  + 'or in the fresh worker that a new message on the ticket starts in this same workspace.'
+
 // One role per worker dir per process: the harness's copy of this package and the launch's --extension both offer
 // it, and a second ticket_report registration makes pi refuse to boot (2026-11-11: every launch died at startup).
 const ROLES_HELD = Symbol.for('pi-superagent.worker-roles-held')
@@ -61,10 +66,18 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
 
   // Counted per settle cycle, not per run: an automatic retry starts a new run after a report already filed.
   let reported = false
+  // A report that hands the ticket to a person frees this session at once: whatever the worker does after it, the router
+  // never reads. A worker that kept refactoring after its ready report was ended mid-change, work unpushed (2026-11-12).
+  let handedOver = false
   pi.registerTool(reportTool((state, summary, question, _origin, pullRequests) => {
     reported = true
+    if (HANDS_OVER.includes(state)) handedOver = true
     append('reports.jsonl', { state, summary, question: question ?? null, ...(pullRequests?.length ? { pullRequests } : {}) })
   }))
+  pi.on('tool_call', (event?: unknown) => {
+    if (!handedOver || (event as { toolName?: string }).toolName === 'ticket_report') return
+    return { block: true, reason: AFTER_HANDOVER }
+  })
   guardExtension({
     blocked: (env.PI_SUPERAGENT_BLOCKED ?? '').split(',').map(s => s.trim()).filter(Boolean),
     workspace: env.PI_SUPERAGENT_WORKSPACE ?? process.cwd(),
@@ -82,6 +95,7 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
     const ask = askText(call.input?.questions)
     if (!ask) return
     reported = true
+    handedOver = true
     append('reports.jsonl', { state: 'blocked', summary: ask, question: ask, origin: 'ask' })
     return { block: true, reason: 'Filed on the ticket as a blocked report. End your turn now: the answer arrives as a new input. Asking again buries it.' }
   })
