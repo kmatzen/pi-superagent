@@ -247,9 +247,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const threads = (t: Ticket) => t.channels.map(c => c.thread)
     const open = repos.tickets.open()
     const claimed = new Set(open.filter(t => { const a = t.assignments.at(-1); return a && a.state !== 'pending' }).flatMap(threads))
+    // Ended tickets count as put-on: finished work waits on a person, not a slot (2026-11-12: two read as waiting).
+    const live = new Set(open.flatMap(threads))
+    const finished = new Set(repos.tickets.list().filter(t => t.ended).flatMap(threads).filter(thread => !live.has(thread)))
     const onIt = new Set(open.filter(t => ['running', 'pending', 'ready', 'blocked'].includes(t.assignments.at(-1)?.state ?? '')).flatMap(threads))
     const board = openBoard
-    const waiting = board.filter(i => !claimed.has(`#${i.issue}`))
+    const waiting = board.filter(i => !claimed.has(`#${i.issue}`) && !finished.has(`#${i.issue}`))
     const hours = (iso: string) => (Date.now() - Date.parse(iso)) / 3.6e6
     const oldest = waiting.reduce((m, i) => Math.max(m, hours(i.updatedAt)), 0)
     return {
