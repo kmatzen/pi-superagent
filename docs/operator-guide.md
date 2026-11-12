@@ -38,6 +38,13 @@ Merging ends the ticket as merged. Closing the PR unmerged also ends the ticket,
 comment on the issue to ask for another attempt. The router checks PRs in other repositories every
 two minutes. An answer, investigation or operation can finish with the worker’s ready report.
 
+When one issue needs several PRs, in one repository or across several, the worker lists them in
+the order you should merge them. The router keeps one status comment on the issue, edited in place:
+each PR in that order, its state (draft, ready to merge, conflict, merged), and who acts next. Each
+report links it. When you merge one PR and others stay open, the worker is woken to make the
+follow-on change the rest need, such as a version pin or a rebase. The ticket ends when the last
+PR is merged or closed.
+
 A comment or submitted review on a PR without a ticket goes to the judge. The router replies in
 that PR’s conversation.
 

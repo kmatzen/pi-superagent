@@ -7,12 +7,13 @@ import { promisify } from 'node:util'
 
 const runGit = promisify(execFile)
 import { join, resolve } from 'node:path'
-import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
+import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type ThreadRef, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
 import {GithubSource, REPLY_MARKER, type GithubApi, type IssueState} from './source-github.ts'
 import { ghApi, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
-import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type ReconcileReport } from './pulls.ts'
+import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type PullRef, type PullState, type ReconcileReport } from './pulls.ts'
+import { PullTracker } from './tracker.ts'
 import { CommentOutbox } from './outbox.ts'
 import { IssueCloser } from './issue-closer.ts'
 import { PiExecutor } from './executor.ts'
@@ -399,6 +400,20 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     log.line('info', 'worker.released', { ticket: ticketId, assignment: assignmentId, state })
   }
 
+  // Kept across restarts: rendered from an empty map, every status comment lost its titles and states for a pass.
+  const PULL_STATES = 'router:pull-states'
+  const pullStates = new Map<string, PullState>(Object.entries(repos.kv.get<Record<string, PullState>>(PULL_STATES) ?? {}))
+  const tracker = new PullTracker({
+    kv: repos.kv, home: cfg.githubRepo ?? '', state: id => pullStates.get(id),
+    ...(githubApi?.upsertComment ? { write: (issue: number, comment: number | undefined, body: string, repo?: string) => githubApi.upsertComment!(issue, comment, body, repo) } : {}),
+    log: (event, fields) => log.line(event.endsWith('failed') ? 'warn' : 'info', event, fields),
+    now: () => new Date(deps.now ? deps.now() : Date.now()),
+  })
+  const refreshTracker = (ticketId: string): void => {
+    const ticket = repos.tickets.get(ticketId)
+    if (ticket) void tracker.refresh(ticket)
+  }
+
   // One message per assignment, ending and text; a failed launch drops the text, since it retries every poll.
   const announce = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun, relaunched: boolean): void => {
     const channel = ticket.channels[0]
@@ -406,7 +421,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const said = origin === 'launch' ? ''
       : createHash('sha1').update(JSON.stringify([run.state, run.summary, run.question ?? null, run.pullRequests ?? []])).digest('hex').slice(0, 12)
     outbox.send({ id: `report:${assignmentId}:${origin}:${said}`, channel, kind: 'reply', ticketId: ticket.id,
-      text: receiptText(channel.thread, origin, run, relaunched) })
+      text: receiptText(channel.thread, origin, run, relaunched, tracker.url(ticket.id)) })
   }
   // One fresh worker per crash, per ticket per process; the engine's retry requeues comments the dead one never read.
   const relaunched = new Set<string>()
@@ -439,6 +454,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       releaseIfWaiting(ticket.id, assignmentId, run.state)
     }
     announce(ticket, assignmentId, origin, run, fresh)
+    if (run.pullRequests?.length) { tracker.ordered(repos.tickets.get(ticket.id) ?? ticket, run.pullRequests); refreshTracker(ticket.id) }
     // The operator's rule 2026-11-08 and its 2026-11-09 extension: a worker gives up its agent, tab and slot
     // whenever a person is the only thing it can be waiting for — it asked, it needs an answer, or it finished
     // its turn and its own pull request waits for a human merge. A ticket the report ENDED needs none of this:
@@ -551,6 +567,26 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // The merge was the work landing: with the pull request done, the ticket has nothing left to wait on.
     finishIssue(ticket.id)
   }
+  // A merge that leaves other pull requests open wakes the worker for the follow-on change (operator, 2026-11-12).
+  const mergedPart = (ticketId: string, thread: ThreadRef, pull: PullRef, at: string, by: string | undefined): void => {
+    const ticket = repos.tickets.get(ticketId)
+    if (!ticket || ticket.ended) return
+    // The fleet's own merge happened inside a run that already knows it.
+    if (by && isListed(by, new Set([cfg.githubSelf ?? cfg.self]))) return
+    const left = (ticket.follows ?? []).filter(f => f.own && !f.closed)
+      .flatMap(f => { const ref = parseThread(f.thread.replace(/^github:/, ''), home); return ref ? [pullUrl(ref)] : [] })
+    if (!left.length) return
+    engine.receive({
+      id: `github:${thread.id}:merged`, source: 'github', threads: [thread],
+      actor: { source: 'github', id: by ?? 'github' }, human: true, at,
+      text: `${pullUrl(pull)} was merged${by ? ` by ${by}` : ''}. Still open on this ticket: ${left.join(', ')}. Make the follow-on`
+        + ' change the open ones need because of this merge, such as a version pin or a rebase, push it, and report; if they'
+        + ' need nothing, report ready and say what is left for a person.',
+      channel: { source: 'github', thread: thread.id, address: { repo: pull.repo, issue: String(pull.number) } },
+      meta: { via: 'merge', author: by ?? '', repo: pull.repo },
+    })
+    log.line('info', 'pull.merged_part', { ticket: ticketId, thread: thread.id, left: left.length })
+  }
   const follower = new PullFollower({
     home, api: pullApi,
     openThreads: () => github?.openThreads(), positions: repos.kv,
@@ -561,12 +597,27 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     ...(cfg.pullReadBudgetMs === undefined ? {} : { budgetMs: cfg.pullReadBudgetMs }),
     receive: trigger => { engine.receive(trigger) },
     warn: (event, fields) => log.line('warn', event, fields),
-    closed: (thread, pull, outcome, at) => {
+    observed: (thread, _pull, state) => {
+      // GitHub answers `unknown` while it recomputes after a push: the last known verdict stands until it answers.
+      const before = pullStates.get(thread.id)
+      const after: PullState = { ...before, ...state,
+        ...(state.mergeableState === 'unknown' && before?.mergeableState ? { mergeableState: before.mergeableState } : {}) }
+      if (JSON.stringify(after) === JSON.stringify(before)) return
+      pullStates.delete(thread.id)
+      pullStates.set(thread.id, after)
+      for (const stale of [...pullStates.keys()].slice(0, Math.max(0, pullStates.size - 500))) pullStates.delete(stale)
+      repos.kv.set(PULL_STATES, Object.fromEntries(pullStates))
+    },
+    closed: (thread, pull, outcome, at, state) => {
       const key = `github:${thread.id}`
       const waiting = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && !f.closed)).map(t => t.id)
       engine.threadClosed(thread, outcome, at)
       log.line('info', 'pull.closed', { thread: thread.id, outcome, url: pullUrl(pull), tickets: waiting.length })
-      for (const id of waiting) pullEnded(id)
+      for (const id of waiting) {
+        pullEnded(id)
+        if (outcome === 'merged') mergedPart(id, thread, pull, at, state?.mergedBy)
+        refreshTracker(id)
+      }
     },
     // The other half of `closed`: a close written down by a read that failed (GitHub answers 404 for a private
     // repository the account cannot see) leaves a live ticket holding a closed follow on a pull request that is
@@ -874,6 +925,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       log.line('error', 'pull.reconcile_failed', { error: String(error).slice(0, 200) })
     }
     reconcileMs = Date.now() - reconcileAt
+    for (const open of repos.tickets.open()) if ((open.follows?.length ?? 0) > 1) void tracker.refresh(open)
     // The conversation a ticket lives in can end on GitHub: a merge closes the issue it names, and
     // closing without merging is a person saying no. Either way the ticket stops and says so, unless it
     // follows its own pull request, whose close ends it (above).

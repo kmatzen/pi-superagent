@@ -11,6 +11,14 @@ export interface ReportedRun {
 
 const STILL_OPEN = 'The worker is still open: reply here to steer it, or close the issue to drop the ticket.'
 const IN_REVIEW = 'This ticket stays open until the pull request is merged or closed; comments and reviews on it go to the worker.'
+const IN_REVIEW_MANY = 'This ticket stays open until its pull requests are merged or closed; comments, reviews and each merge go to the worker.'
+
+/** One pull request keeps its one line; several are numbered in the order the worker said to merge them. */
+function pullLines(urls: readonly string[], tracker?: string): string {
+  if (urls.length === 1) return `\n\n**Pull request:** ${urls[0]}`
+  return `\n\n**Pull requests, in merge order:**\n${urls.map((url, i) => `${i + 1}. ${url}`).join('\n')}`
+    + (tracker ? `\n\nEach one's state, kept current: ${tracker}` : '')
+}
 /**
  * The terminal end, said out loud. A `ready` report with no pull request ends the ticket in the engine and
  * left nothing to read on the issue: no merge to wait for, no door closed, so the board kept asking (measured
@@ -20,7 +28,7 @@ const IN_REVIEW = 'This ticket stays open until the pull request is merged or cl
 const FINISHED = 'This ticket ends with the report: no pull request is open on it, so nothing runs it now, and this issue closes with it. '
   + 'A comment on the closed issue, or reopening it, starts the work again; nothing else does.'
 
-export function receiptText(thread: string, origin: ReportOrigin, run: ReportedRun, relaunched = false): string {
+export function receiptText(thread: string, origin: ReportOrigin, run: ReportedRun, relaunched = false, tracker?: string): string {
   const head = `${thread} ${run.state}: ${run.summary}`
   switch (origin) {
     case 'crash':
@@ -32,13 +40,13 @@ export function receiptText(thread: string, origin: ReportOrigin, run: ReportedR
     case 'silent':
       return `${thread}: the worker stopped without reporting a result.\n\n${STILL_OPEN}`
     case 'worker': {
-      const pulls = run.pullRequests?.length ? `\n\n${run.pullRequests.map(url => `**Pull request:** ${url}`).join('\n')}` : ''
+      const pulls = run.pullRequests?.length ? pullLines(run.pullRequests, tracker) : ''
       if (run.state === 'blocked') {
         return `${head}${pulls}\n\n${run.question ? `**Question:** ${run.question}\n\n` : ''}Reply here; the worker reads every comment.`
       }
       if (run.state === 'failed') return `${head}${pulls}\n\n${STILL_OPEN}`
       if (run.state === 'ready' && !pulls) return `${head}\n\n${FINISHED}`
-      return run.state === 'ready' && pulls ? `${head}${pulls}\n\n${IN_REVIEW}` : `${head}${pulls}`
+      return run.state === 'ready' && pulls ? `${head}${pulls}\n\n${(run.pullRequests?.length ?? 0) > 1 ? IN_REVIEW_MANY : IN_REVIEW}` : `${head}${pulls}`
     }
   }
 }

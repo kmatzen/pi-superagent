@@ -14,6 +14,11 @@ export interface PullState {
   mergeable?: boolean | null
   createdAt: string
   closedAt?: string
+  /** For the status a person reads: GitHub's title, draft flag, merge readiness (`mergeable_state`), and who merged. */
+  title?: string
+  draft?: boolean
+  mergeableState?: string
+  mergedBy?: string
 }
 
 export interface PullApi {
@@ -75,7 +80,9 @@ export interface FollowerOptions {
   positions: PositionStore
   self: string
   bots?: ReadonlySet<string>
-  closed(thread: ThreadRef, pull: PullRef, outcome: 'merged' | 'closed', at: string): void
+  closed(thread: ThreadRef, pull: PullRef, outcome: 'merged' | 'closed', at: string, state?: PullState): void
+  /** Every state a read returned, open or closed: the live status a ticket's tracker shows. */
+  observed?(thread: ThreadRef, pull: PullRef, state: PullState): void
   /** A follow records a close GitHub denies: the pull request is open. Reopen the follow on the tickets waiting on
    *  it and return how many it reopened. Called on every read that finds a pull request open, so it is a no-op
    *  unless a recorded close is false; it posts nothing, because the router writing on a thread is what recruits a
@@ -272,11 +279,12 @@ export class PullFollower {
     this.cooldown.delete(id)
     this.failures.delete(id)
     if (this.unread.delete(id)) this.options.warn('pull.read_readable', { thread: id })
+    if (state) this.options.observed?.({ source: 'github', id }, pull, state)
     // A pull request GitHub no longer has cannot be merged, so the ticket's wait ends here. `undefined` is GitHub's
     // answer for one *to a reader that can see the repository*: a repository this account cannot read throws above
     // and returns here as an untouched follow, because 404 is also what GitHub says about a private repository.
     if (!state || !state.open) {
-      if (!reopen) this.options.closed({ source: 'github', id }, pull, state?.merged ? 'merged' : 'closed', state?.closedAt ?? new Date(now).toISOString())
+      if (!reopen) this.options.closed({ source: 'github', id }, pull, state?.merged ? 'merged' : 'closed', state?.closedAt ?? new Date(now).toISOString(), state)
       return
     }
     // Open: any ticket holding a close on this thread holds one that never happened.
