@@ -59,7 +59,7 @@ describe('the status comment on the issue', () => {
       home: 'o/inbox', state: id => states(byId)(id), log: event => logged.push(event), now: () => new Date('2026-11-12T03:41:00Z'),
       ...(write ? { write } : {}),
     })
-    return { tracker, logged, byId }
+    return { tracker, logged, byId, kv }
   }
   const two = ticket([{ thread: 'github:org/kit#345' }, { thread: 'github:org/app#210' }])
 
@@ -68,7 +68,7 @@ describe('the status comment on the issue', () => {
     const b = board(async (_issue, id, body) => { writes.push({ id, body }); return { id: id ?? 77, url: 'https://github.com/o/inbox/issues/382#issuecomment-77' } })
     await b.tracker.refresh(ticket([{ thread: 'github:org/kit#345' }]))
     expect(writes, 'one pull request is its own status').toEqual([])
-    b.tracker.ordered('t1', ['https://github.com/org/kit/pull/345', 'https://github.com/org/app/pull/210'])
+    b.tracker.ordered(two, ['https://github.com/org/kit/pull/345', 'https://github.com/org/app/pull/210'])
     await b.tracker.refresh(two)
     await b.tracker.refresh(two)
     expect(writes.map(w => w.id), 'posted, then unchanged').toEqual([undefined])
@@ -80,11 +80,33 @@ describe('the status comment on the issue', () => {
     expect(writes[1]!.body).toContain('ready to merge')
   })
 
+  it('with no order from a report, each pull request names its own next step, and a merge stays on the list', async () => {
+    const writes: string[] = []
+    const b = board(async (_issue, id, body) => { writes.push(body); return { id: id ?? 9, url: 'u' } },
+      { 'org/kit#345': { mergeableState: 'clean' }, 'org/app#210': { mergeableState: 'clean' } })
+    await b.tracker.refresh(two)
+    expect(writes.at(-1), 'independent pull requests are not a sequence nobody declared').toContain('| ready to merge | **you: merge** |\n| 2 |')
+    expect(writes.at(-1)).not.toContain('after #')
+    await b.tracker.refresh(ticket([{ thread: 'github:org/kit#345', closed: 'merged' }, { thread: 'github:org/app#210' }]))
+    expect(writes.at(-1), 'the merged one is still there, counted').toContain('1 of 2 merged')
+    expect(writes.at(-1)).toContain('[kit#345](https://github.com/org/kit/pull/345) | merged | - |')
+  })
+
+  it('a new report keeps what already merged at the top, and drops what closed unmerged', () => {
+    const b = board()
+    const landed = ticket([{ thread: 'github:org/kit#343', closed: 'closed' }, { thread: 'github:org/kit#345', closed: 'merged' },
+      { thread: 'github:org/app#210' }, { thread: 'github:org/doc#7' }])
+    b.tracker.ordered(landed, ['https://github.com/org/kit/pull/343', 'https://github.com/org/kit/pull/345', 'https://github.com/org/app/pull/210'])
+    b.tracker.ordered(landed, ['https://github.com/org/app/pull/210', 'https://github.com/org/doc/pull/7'])
+    const order = (b.kv.get('tracker:t1') as { order: string[] }).order
+    expect(trackerRows(landed, order, () => undefined, 'o/inbox').map(r => r.label)).toEqual(['kit#345', 'app#210', 'doc#7'])
+  })
+
   it('a write that fails is said and tried again on the next change, not lost', async () => {
     let fail = true
     const writes: Array<number | undefined> = []
     const b = board(async (_issue, id) => { if (fail) throw new Error('HTTP 502'); writes.push(id); return { id: 5, url: 'u' } })
-    b.tracker.ordered('t1', ['https://github.com/org/kit/pull/345', 'https://github.com/org/app/pull/210'])
+    b.tracker.ordered(two, ['https://github.com/org/kit/pull/345', 'https://github.com/org/app/pull/210'])
     await b.tracker.refresh(two)
     expect(b.logged).toEqual(['tracker.write_failed'])
     fail = false
