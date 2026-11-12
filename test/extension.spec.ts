@@ -85,7 +85,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
                    workerQuietMinutes?: number; pullApi?: PullApi; blocked?: string[];
                    judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
                    maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number;
-                   workerStartMs?: number; closeRecheckMs?: number } = {}) {
+                   workerStartMs?: number; closeRecheckMs?: number; scopesWork?: boolean } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [], closedIssues: [] }
   const closes: number[] = []
@@ -155,7 +155,8 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   const pi = fakePi()
   before?.(dir)
   const running = createRouterExtension(pi, { config, sdk, ...(herdr ? { herdr } : {}), githubApi: api, now: () => new Date().toISOString(),
-    ...(options.workerTiming ? { workerTiming: options.workerTiming } : {}), ...(options.pullApi ? { pullApi: options.pullApi } : {}) })
+    ...(options.workerTiming ? { workerTiming: options.workerTiming } : {}), ...(options.pullApi ? { pullApi: options.pullApi } : {}),
+    scopesWork: () => options.scopesWork ?? false })
   live.push(running)
   // A deterministic stand-in for the model: the tests bind the wiring, not the judgement.
   const decide = (kind: 'accept' | 'ignore') => {
@@ -551,6 +552,37 @@ describe('the router extension', () => {
     appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"ready","summary":"image bumped after a long build"}\n')
     await until(() => f.receipts('512').includes('image bumped after a long build'))
     expect(f.receipts('512')).toContain('ready: image bumped after a long build')
+  })
+
+  it('a worker on a host with user scopes starts through the limit shim, and its brief names the limits', async () => {
+    // 2026-11-11: one worker's leak test reached 8.5 GB and the host went down with every worker on it.
+    const h = memoryHerdr()
+    const f = fixture(true, undefined, undefined, h.herdr, { scopesWork: true, maxConcurrent: 3 })
+    f.addComment('515', 'octocat', 'bump the base image')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await until(() => h.envs.length === 1)
+    const bin = join(f.dir, 'bin')
+    expect(h.envs[0]!.PATH?.startsWith(`${bin}:`), 'the shim comes first on the worker tab PATH').toBe(true)
+    expect(statSync(join(bin, 'pi')).mode & 0o111, 'the shim is executable').not.toBe(0)
+    expect(readFileSync(join(bin, 'pi'), 'utf8')).toMatch(/systemd-run --user --scope .*--slice=pi-superagent\.slice/)
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/worker\.limits memoryMaxBytes=\d+ cpuPercent=\d+ tasksMax=2048/)
+    const brief = readdirSync(join(f.dir, 'workers')).map(d => join(f.dir, 'workers', d, 'inbox'))
+      .flatMap(i => readdirSync(i).map(n => readFileSync(join(i, n), 'utf8'))).join('\n')
+    expect(brief, 'the worker is told its limits').toContain('Hard limits: your processes share')
+  })
+
+  it('a worker on a host without user scopes runs unconfined, and the log says so once', async () => {
+    const h = memoryHerdr()
+    const f = fixture(true, undefined, undefined, h.herdr, { scopesWork: false })
+    f.addComment('516', 'octocat', 'bump the base image')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await until(() => h.envs.length === 1)
+    expect(h.envs[0]!.PATH, 'no shim, no PATH override').toBeUndefined()
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8').match(/worker\.limits_unavailable/g)).toHaveLength(1)
   })
 
   it('the bot\'s token reaches a worker by its file, never on herdr\'s command line', async () => {
