@@ -336,6 +336,28 @@ describe('following a ticket\'s pull requests', () => {
     expect(t.received.filter(r => r.text.includes('not yet')), 'a review is delivered once').toHaveLength(0)
   })
 
+  it('hears a review submitted after newer-numbered ones: GitHub numbers a review when it is started', async () => {
+    // 2026-11-12: a person started a review, the fleet's account posted two of its own, then the person submitted. Theirs
+    // carried the lowest id, the id cursor had already passed it, and no worker ever heard the changes requested.
+    let reviews = [review({ id: 905, author: 'agent-bot', state: 'COMMENTED', body: 'inline notes' })]
+    const t = follower({ pull: async () => openPull, reviews: async () => reviews })
+    await t.f.reconcile(t.following('other/lib#5'))
+    reviews = [...reviews, review({ id: 900, at: new Date(Date.parse(later) + 5 * 60_000).toISOString() })]
+    t.tick(120_000)
+    await t.f.reconcile(t.following('other/lib#5'))
+    expect(t.received.map(r => r.id)).toEqual(['github:other/lib#5:review:900'])
+  })
+
+  it('moving off the id cursor catches up on the last hours once, not on the whole history', async () => {
+    const t = follower({ pull: async () => openPull, reviews: async () => [
+      review({ id: 700, at: new Date(Date.now() - 2 * 86_400_000).toISOString(), body: 'two days old' }),
+      review({ id: 800, at: new Date(Date.now() - 3_600_000).toISOString(), body: 'missed this morning' }),
+    ] })
+    t.kv.set('pulls:other/lib#5:review', 950)
+    await t.f.reconcile(t.following('other/lib#5'))
+    expect(t.received.map(r => r.text)).toEqual(['other/lib#5: reviewer changes requested\n\nmissed this morning'])
+  })
+
   it("another repository's closed pull request is reported, and its talk is not read", async () => {
     const t = follower({ pull: async () => ({ open: false, merged: false, createdAt: created, closedAt: later }) })
     await t.f.reconcile(t.following('other/lib#5'))
