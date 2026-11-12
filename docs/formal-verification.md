@@ -46,6 +46,8 @@ violation or a run ends early.
   once, and a sent message stays sent.
 - **LT_Delivered.** Under the stated fairness, every incoming message eventually reaches intake: intake
   never stalls.
+- **R7 OrphanGetsAWorker.** A live ticket the fleet freed with nothing asked of a person (no question, no
+  delivered pull request awaiting a merge) eventually runs a worker again, though no person speaks.
 
 ### `Intake.tla`: the GitHub source
 
