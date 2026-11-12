@@ -21,7 +21,11 @@ export type ReportOrigin = 'worker' | 'crash' | 'silent' | 'launch'
 export type ReportOutcome = 'recorded' | 'dropped'
 
 export type Reporter = (state: string, summary: string, question?: string | null, origin?: ReportOrigin,
-                        pullRequests?: readonly string[]) => ReportOutcome | void
+                        pullRequests?: readonly string[], wakeInMinutes?: number) => ReportOutcome | void
+
+/** How soon a fresh worker may be called back to check what a worker left running, in minutes. */
+export const WAKE_MIN = 5
+export const WAKE_MAX = 360
 
 const NOT_RECORDED = 'not recorded: this ticket has no running worker, so nothing was written to it and no reply was posted. '
   + 'End your turn now. A comment on the issue starts the work again; reporting again reaches nobody.'
@@ -38,18 +42,21 @@ export function reportTool(report: Reporter): ReportTool {
   return {
     name: 'ticket_report', label: 'Report the ticket result',
     description: 'Report the result of this ticket. Call it once, at the end. state=blocked requires one yes/no question for the operator. '
+      + 'state=waiting means something you started still runs (training, CI, a deploy): set wakeInMinutes to when a fresh worker '
+      + `should check on it (${WAKE_MIN}-${WAKE_MAX}), and say in the summary what to check. `
       + 'pullRequests lists the URLs of the pull requests this work opened; leave it out when the work changed no repository. '
       + 'Every entry must be the URL gh pr create printed, on github.com — an entry the router cannot follow refuses the report.',
     parameters: {
       type: 'object',
       properties: {
-        state: { type: 'string', enum: ['ready', 'blocked', 'failed', 'cancelled'] }, summary: { type: 'string' }, question: { type: 'string' },
+        state: { type: 'string', enum: ['ready', 'waiting', 'blocked', 'failed', 'cancelled'] }, summary: { type: 'string' }, question: { type: 'string' },
         pullRequests: { type: 'array', items: { type: 'string' } },
+        wakeInMinutes: { type: 'number' },
       },
       required: ['state', 'summary'],
     },
     execute: (_id, args) => {
-      const a = args as unknown as { state: string; summary: string; question?: string; pullRequests?: unknown }
+      const a = args as unknown as { state: string; summary: string; question?: string; pullRequests?: unknown; wakeInMinutes?: unknown }
       const pulls = Array.isArray(a.pullRequests) ? a.pullRequests.filter((p): p is string => typeof p === 'string') : []
       const unreadable = pulls.filter(url => !parsePull(url))
       if (unreadable.length) {
@@ -66,7 +73,16 @@ export function reportTool(report: Reporter): ReportTool {
           content: [{ type: 'text', text: 'a ready result cannot carry a question: report blocked with the question if you need a person, or put the follow-up in the summary. Nothing was reported; call ticket_report again.' }],
         }
       }
-      const outcome = report(a.state, a.summary, a.question ?? null, undefined, pulls.length ? pulls : undefined)
+      const wake = typeof a.wakeInMinutes === 'number' && Number.isFinite(a.wakeInMinutes) ? a.wakeInMinutes : undefined
+      const refuse = (why: string) => ({ isError: true, content: [{ type: 'text' as const, text: `${why} Nothing was reported; call ticket_report again.` }] })
+      if (a.state === 'waiting' && wake === undefined) {
+        return refuse(`waiting needs wakeInMinutes: when a fresh worker should check on what you left running (${WAKE_MIN}-${WAKE_MAX}).`)
+      }
+      if (wake !== undefined && (wake < WAKE_MIN || wake > WAKE_MAX)) return refuse(`wakeInMinutes must be ${WAKE_MIN}-${WAKE_MAX}.`)
+      if (wake !== undefined && a.state !== 'waiting' && a.state !== 'blocked') {
+        return refuse('only a waiting or blocked report schedules a wake-up: if something you started still runs, report waiting.')
+      }
+      const outcome = report(a.state, a.summary, a.question ?? null, undefined, pulls.length ? pulls : undefined, wake)
       // A reporter that answers nothing (the worker pane's file bridge) cannot know the verdict; say the plain
       // thing. The router process says `dropped` loudly in its own log, which is where the operator reads it.
       return { content: [{ type: 'text', text: outcome === 'dropped' ? NOT_RECORDED : 'reported' }] }

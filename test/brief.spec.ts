@@ -19,6 +19,8 @@ describe('the worker brief', () => {
       .toContain('poll it one step per command')
     expect(briefFor({ id: 'T2', title: 'en', channels: [] } as unknown as Ticket, '/wt/T2'), 'English, whatever the model thinks in')
       .toMatch(/Write in English: every pull request title and body[\s\S]*whatever language you think in/)
+    expect(briefFor({ id: 'T2', title: 'watch', channels: [] } as unknown as Ticket, '/wt/T2'), 'someone always watches')
+      .toMatch(/Someone always watches what you start[\s\S]*report waiting\s+with wakeInMinutes/)
   })
 })
 

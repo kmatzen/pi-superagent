@@ -85,7 +85,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
                    workerQuietMinutes?: number; pullApi?: PullApi; blocked?: string[];
                    judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
                    maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number;
-                   workerStartMs?: number; closeRecheckMs?: number; scopesWork?: boolean; groupCap?: boolean } = {}) {
+                   workerStartMs?: number; closeRecheckMs?: number; scopesWork?: boolean; groupCap?: boolean; clock?: () => number } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [], closedIssues: [] }
   const closes: number[] = []
@@ -161,7 +161,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   }
   const pi = fakePi()
   before?.(dir)
-  const running = createRouterExtension(pi, { config, sdk, ...(herdr ? { herdr } : {}), githubApi: api, now: () => new Date().toISOString(),
+  const running = createRouterExtension(pi, { config, sdk, ...(herdr ? { herdr } : {}), githubApi: api, now: () => new Date(options.clock?.() ?? Date.now()).toISOString(),
     ...(options.workerTiming ? { workerTiming: options.workerTiming } : {}), ...(options.pullApi ? { pullApi: options.pullApi } : {}),
     scopesWork: () => options.scopesWork ?? false, capWorkerGroup: () => options.groupCap ?? true })
   live.push(running)
@@ -578,6 +578,43 @@ describe('the router extension', () => {
     await f.running.tick()
     expect(f.running.load().starved, 'its work is done: a free slot unblocks nothing here').toBe(0)
     expect(f.running.load().unanswered, 'the open issue still waits for a person to read it').toBe(1)
+  })
+
+  it('a worker that leaves a run going is called back when it asked, and nobody holds a slot in between', async () => {
+    // Operator, 2026-11-12: there should always be someone watching. A training run went unwatched after its worker left.
+    let now = Date.now()
+    const f = fixture(true, undefined, undefined, undefined, { clock: () => now })
+    const log = () => readFileSync(join(f.dir, 'engine.log'), 'utf8')
+    f.addComment('468', 'octocat', 'Train ranks 16, 32 and 64.')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    await until(() => f.workers.length === 1)
+    f.workers[0]!.report!({ state: 'waiting', summary: 'Run 31 is training; check its dose curve.', wakeInMinutes: 30 })
+    await settle()
+    expect(log()).toMatch(/wake\.scheduled ticket=\S+ at=/)
+    expect(f.receipts('468'), 'the issue says when the next look is').toMatch(/Next check: a fresh worker looks at it at \d\d:\d\d UTC/)
+    await f.running.tick()
+    expect(f.workers, 'before the hour it set, nobody is called').toHaveLength(1)
+    now += 31 * 60_000
+    await f.running.tick()
+    await until(() => f.workers.length === 2)
+    await f.running.tick()
+    await until(() => f.workers[1]!.prompts.join('\n').includes('Run 31 is training'))
+    expect(log()).toMatch(/wake\.fired ticket=/)
+    f.workers[1]!.report!({ state: 'waiting', summary: 'Still training; look again at the end.', wakeInMinutes: 60 })
+    await settle()
+    f.addComment('468', 'octocat', 'Only the dose curve matters; report it as soon as you have it.')
+    await f.running.tick()
+    await until(() => f.workers.length === 3)
+    f.workers[2]!.report!({ state: 'blocked', summary: 'The dose curve is flat past 128 steps.', question: 'Is a flat curve past 128 steps good enough to ship?' })
+    await settle()
+    expect(log(), 'a report without a wake-up ends the watch').toMatch(/wake\.cleared ticket=/)
+    now += 61 * 60_000
+    await f.running.tick()
+    await settle()
+    expect(log().match(/wake\.fired/g), 'and the cancelled wake-up never fires, though the ticket is still open').toHaveLength(1)
   })
 
   it('a quiet worker gets a question and keeps its session, so a report it files later still reaches the issue', async () => {

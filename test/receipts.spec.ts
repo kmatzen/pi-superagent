@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { pullEndText, receiptText } from '../src/pi/receipts.ts'
 
 describe('what the thread reads when a run ends', () => {
+  it('a run that left something going says when the next look is', () => {
+    const text = receiptText('#145', 'worker', { state: 'waiting', summary: 'run 31 trains', wakeAt: '2026-11-12T20:15:00.000Z' })
+    expect(text).toBe('#145 waiting: run 31 trains\n\nNext check: a fresh worker looks at it at 20:15 UTC.')
+    expect(receiptText('#145', 'worker', { state: 'blocked', summary: 'pod idle', question: 'Stop it?', wakeAt: '2026-11-12T20:15:00.000Z' }))
+      .toMatch(/\*\*Question:\*\* Stop it\?[\s\S]*Next check: a fresh worker looks at it at 20:15 UTC\./)
+  })
+
   it('a result is one line: the thread, the state, the summary, and the end of the ticket', () => {
     const text = receiptText('#400', 'worker', { state: 'ready', summary: 'merged and deployed' })
     expect(text.startsWith('#400 ready: merged and deployed'), text).toBe(true)
