@@ -136,6 +136,8 @@ function follower(api: Partial<PullApi>, open: string[] | null = [],
   const kv = new Map<string, unknown>()
   const calls: string[] = []
   const closed: Array<{ id: string; outcome: string; at: string }> = []
+  const seenStates: string[] = []
+  const mergers: string[] = []
   const reopened: string[] = []
   const received: Trigger[] = []
   const warned: string[] = []
@@ -150,7 +152,8 @@ function follower(api: Partial<PullApi>, open: string[] | null = [],
     home: 'o/r', api: full, openThreads: () => open === null ? undefined : new Set(open),
     positions: { get: <T,>(k: string) => kv.get(k) as T | undefined, set: (k, v) => { kv.set(k, v) } },
     self: 'agent-bot', bots: new Set(['ci-*']),
-    closed: (thread, _pull, outcome, at) => closed.push({ id: thread.id, outcome, at }),
+    closed: (thread, _pull, outcome, at, state) => { closed.push({ id: thread.id, outcome, at }); if (state?.mergedBy) mergers.push(`${thread.id} ${state.mergedBy}`) },
+    observed: (thread, _pull, state) => { seenStates.push(`${thread.id} ${state.merged ? 'merged' : state.open ? 'open' : 'closed'}`) },
     // What the router does with this callback: count the tickets holding a recorded close on the thread GitHub says
     // is open, and open their wait. Zero is the common case, and it is the case that must stay silent.
     reopened: thread => {
@@ -170,7 +173,7 @@ function follower(api: Partial<PullApi>, open: string[] | null = [],
   const recorded = (...threads: string[]) => [{ follows: threads.map(t => ({ thread: `github:${t}`, own: true, closed: { at: created, outcome: 'closed' as const } })) }] as unknown as Ticket[]
   // The fake `reopened` reads the tickets of the pass in hand, the way the router reads them out of its store.
   const reconcile = (tickets: Ticket[]) => { seen = tickets; return f.reconcile(tickets) }
-  return { f, kv, calls, closed, reopened, received, warned, following, recorded, reconcile, tick: (ms: number) => { clock += ms } }
+  return { f, kv, calls, closed, reopened, received, warned, following, recorded, reconcile, seenStates, mergers, tick: (ms: number) => { clock += ms } }
 }
 
 const openPull: PullState = { open: true, merged: false, createdAt: created }
@@ -192,6 +195,15 @@ describe('following a ticket\'s pull requests', () => {
     })
     await t.f.reconcile(t.following('#9', '#10'))
     expect(t.closed).toEqual([{ id: '#9', outcome: 'merged', at: later }, { id: '#10', outcome: 'closed', at: expect.any(String) }])
+  })
+
+  it('hands every state it reads to the status comment, and who merged to the close', async () => {
+    const t = follower({
+      pull: async (_r, n) => n === 9 ? { open: false, merged: true, createdAt: created, closedAt: later, mergedBy: 'octocat' } : openPull,
+    })
+    await t.f.reconcile(t.following('other/r#9', 'other/r#10'))
+    expect(t.seenStates.sort()).toEqual(['other/r#10 open', 'other/r#9 merged'])
+    expect(t.mergers).toEqual(['other/r#9 octocat'])
   })
 
   it('a pull request the reader cannot see keeps its ticket waiting, and is complained about once', async () => {

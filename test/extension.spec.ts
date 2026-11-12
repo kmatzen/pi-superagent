@@ -91,6 +91,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   const closes: number[] = []
   // One ordered log of the writes to GitHub, so a test can pin the order a person reads the thread in.
   const calls: string[] = []
+  const trackers: Array<{ issue: number; id: number; edit: boolean; body: string }> = []
   const api: GithubApi = options.githubApi ?? {
     // The fakes deliver everything and let the source's own rules do the filtering, as server.spec does.
     issues: async () => [...feed.issues],
@@ -98,6 +99,12 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     comments: async () => [...feed.comments],
     postComment: async (issue, body, repo) => { calls.push(`post:${issue}`); feed.posts.push({ issue, body, ...(repo ? { repo } : {}) }) },
     closeIssue: async issue => { calls.push(`close:${issue}`); closes.push(issue) },
+    // Apart from `calls`: the status comment is edited in place, and the call-order tests pin what a person is notified of.
+    upsertComment: async (issue, id, body) => {
+      const comment = id ?? 900 + trackers.length
+      trackers.push({ issue, id: comment, edit: id !== undefined, body })
+      return { id: comment, url: `https://github.com/o/r/issues/${issue}#issuecomment-${comment}` }
+    },
   }
   const addComment = (n: string, author: string, body: string, at = '2026-11-05T09:00:00Z', association = 'OWNER') => {
     if (!feed.issues.some(i => String(i.issue) === n)) feed.issues.push({
@@ -167,7 +174,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   const settleJudge = () => { for (const l of judgeListeners) l({ type: 'agent_settled' }) }
   // The Session's own events, so a test can die one: the pane closes, the process exits, a restart adopts a ticket whose session is gone.
   const events = (i = 0) => workers[i]!.events
-  return { dir, feed, addComment, receipts, config, pi, running, workers, judge, judgeSessions, events, loaders, settleJudge, sdk, accept, decide, closes, calls }
+  return { dir, feed, addComment, receipts, config, pi, running, workers, judge, judgeSessions, events, loaders, settleJudge, sdk, accept, decide, closes, calls, trackers }
 }
 
 describe('the router extension', () => {
@@ -1102,9 +1109,9 @@ describe('a pull request per ticket', () => {
     }
     return {
       api, comments, states,
-      open: (repo: string, n: number) => states.set(`${repo}#${n}`, { open: true, merged: false, createdAt: created }),
-      end: (repo: string, n: number, merged: boolean, closedAt = new Date().toISOString()) =>
-        states.set(`${repo}#${n}`, { open: false, merged, createdAt: created, closedAt }),
+      open: (repo: string, n: number, more: Partial<PullState> = {}) => states.set(`${repo}#${n}`, { open: true, merged: false, createdAt: created, ...more }),
+      end: (repo: string, n: number, merged: boolean, closedAt = new Date().toISOString(), mergedBy?: string) =>
+        states.set(`${repo}#${n}`, { open: false, merged, createdAt: created, closedAt, ...(mergedBy ? { mergedBy } : {}) }),
     }
   }
   /** The router's writes to one issue, in the order GitHub received them. */
@@ -1260,6 +1267,84 @@ describe('a pull request per ticket', () => {
     expect(h.workers, 'a second loss gets a second worker').toHaveLength(1)
   })
 
+  it('several pull requests get one status comment in the worker\'s merge order, edited in place as they land', async () => {
+    // Operator, 2026-11-12: a multi-repository change was a plan pieced together from report comments whose lists drifted.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '497')
+    pulls.open('o/r', 86, { title: 'kit: build-heap CLI', mergeableState: 'clean' })
+    pulls.open('o/r', 87, { title: 'app: call the kit CLI', draft: true })
+    f.workers[0]!.report!({ state: 'ready', summary: 'two changes',
+      pullRequests: ['https://github.com/o/r/pull/86', 'https://github.com/o/r/pull/87'] })
+    await f.running.tick()
+    await until(() => !!f.trackers.at(-1)?.body.includes('ready to merge'))
+    const first = f.trackers[0]!
+    expect(first).toMatchObject({ issue: 497, edit: false })
+    const status = f.trackers.at(-1)!.body
+    expect(status).toContain('### Pull requests for #497: 0 of 2 merged')
+    expect(status).toContain('| 1 | [r#86](https://github.com/o/r/pull/86) kit: build-heap CLI | ready to merge | **you: merge** |')
+    expect(status).toContain('| 2 | [r#87](https://github.com/o/r/pull/87) app: call the kit CLI | draft | after #1 |')
+    expect(f.receipts('497'), 'the report numbers them in the same order')
+      .toContain('**Pull requests, in merge order:**\n1. https://github.com/o/r/pull/86\n2. https://github.com/o/r/pull/87')
+    pulls.end('o/r', 86, true, undefined, 'octocat')
+    await f.running.tick()
+    await until(() => !!f.trackers.at(-1)?.body.includes('1 of 2 merged'))
+    expect(f.trackers.every(t => t.id === first.id), 'one comment, edited, never a second').toBe(true)
+    expect(f.trackers.at(-1)!.body).toContain('| 1 | [r#86](https://github.com/o/r/pull/86) kit: build-heap CLI | merged | - |')
+    expect(f.trackers.at(-1)!.body).toContain('| draft | **you: review, then mark it ready** |')
+    expect(ticket().ended, 'one merge of two ends nothing').toBeUndefined()
+  })
+
+  it('a merge that leaves another pull request open wakes the worker for the follow-on change', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    await working(f, '498')
+    pulls.open('o/r', 88)
+    pulls.open('o/r', 89)
+    f.workers[0]!.report!({ state: 'ready', summary: 'kit and app',
+      pullRequests: ['https://github.com/o/r/pull/88', 'https://github.com/o/r/pull/89'] })
+    await f.running.tick()
+    pulls.end('o/r', 88, true, undefined, 'octocat')
+    await f.running.tick()
+    await until(() => f.workers.length === 2 && f.workers[1]!.prompts.some(p => p.includes('was merged')), 2000)
+    expect(f.workers, 'the released worker\'s ticket wakes on the merge').toHaveLength(2)
+    expect(f.workers[1]!.prompts.join('\n')).toContain(
+      'https://github.com/o/r/pull/88 was merged by octocat. Still open on this ticket: https://github.com/o/r/pull/89.')
+  })
+
+  it('the status keeps the latest report\'s order, not the order the pull requests were first seen', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    await working(f, '500')
+    pulls.open('o/r', 92)
+    pulls.open('o/r', 93)
+    f.workers[0]!.report!({ state: 'blocked', summary: 'app first?', question: 'Ship the app change alone?', pullRequests: ['https://github.com/o/r/pull/92'] })
+    await f.running.tick()
+    expect(f.trackers, 'one pull request is its own status').toEqual([])
+    f.addComment('500', 'octocat', 'no, the kit goes first', '2026-11-05T09:30:00Z')
+    await f.running.tick()
+    await until(() => f.workers.length === 2)
+    f.workers[1]!.report!({ state: 'ready', summary: 'kit first',
+      pullRequests: ['https://github.com/o/r/pull/93', 'https://github.com/o/r/pull/92'] })
+    await until(() => f.trackers.length > 0)
+    expect(f.trackers.at(-1)!.body).toMatch(/\| 1 \| \[r#93\][\s\S]*\| 2 \| \[r#92\]/)
+  })
+
+  it('the fleet\'s own merge wakes nobody: the run that merged it already knows', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    await working(f, '499')
+    pulls.open('o/r', 90)
+    pulls.open('o/r', 91)
+    f.workers[0]!.report!({ state: 'ready', summary: 'kit and app',
+      pullRequests: ['https://github.com/o/r/pull/90', 'https://github.com/o/r/pull/91'] })
+    await f.running.tick()
+    pulls.end('o/r', 90, true, undefined, 'pi-superagent')
+    await f.running.tick()
+    await until(() => f.workers.length > 1, 300)
+    expect(f.workers).toHaveLength(1)
+  })
+
   it('a pull request closed without merging ends the ticket, and the issue says how to start again', async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
@@ -1284,6 +1369,10 @@ describe('a pull request per ticket', () => {
     pulls.end('o/r', 81, true, '2026-11-07T01:00:00Z')
     await f.running.tick()
     expect(ticket().ended, 'the second pull request is still open, so the ticket stays open').toBeUndefined()
+    // The merge wakes the worker for any follow-on change; it finds none, and says what is left.
+    await until(() => f.workers.length === 2 && f.workers[1]!.prompts.some(p => p.includes('was merged')))
+    f.workers[1]!.events.forEach(l => l({ type: 'agent_start' }))
+    f.workers[1]!.report!({ state: 'ready', summary: 'nothing to change: 82 waits for review', pullRequests: ['https://github.com/o/r/pull/82'] })
     pulls.end('o/r', 82, false, '2026-11-07T02:00:00Z')
     await f.running.tick()
     expect(ticket().ended).toMatchObject({ outcome: 'closed', by: 'executor' })
@@ -1315,6 +1404,9 @@ describe('a pull request per ticket', () => {
     pulls.end('o/r', 91, true, '2026-11-09T01:00:00Z')
     await f.running.tick()
     expect(ticket().ended, 'the second pull request is still open').toBeUndefined()
+    await until(() => f.workers.length === 2 && f.workers[1]!.prompts.some(p => p.includes('was merged')))
+    f.workers[1]!.events.forEach(l => l({ type: 'agent_start' }))
+    f.workers[1]!.report!({ state: 'ready', summary: 'nothing to change: 92 waits for review', pullRequests: ['https://github.com/o/r/pull/92'] })
     pulls.end('o/r', 92, true, '2026-11-09T02:00:00Z')
     f.feed.issues.splice(f.feed.issues.findIndex(i => i.issue === 505), 1)
     await f.running.tick()
