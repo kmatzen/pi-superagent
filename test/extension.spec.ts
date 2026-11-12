@@ -85,7 +85,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
                    workerQuietMinutes?: number; pullApi?: PullApi; blocked?: string[];
                    judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
                    maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number;
-                   workerStartMs?: number; closeRecheckMs?: number; scopesWork?: boolean } = {}) {
+                   workerStartMs?: number; closeRecheckMs?: number; scopesWork?: boolean; groupCap?: boolean } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [], closedIssues: [] }
   const closes: number[] = []
@@ -163,7 +163,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   before?.(dir)
   const running = createRouterExtension(pi, { config, sdk, ...(herdr ? { herdr } : {}), githubApi: api, now: () => new Date().toISOString(),
     ...(options.workerTiming ? { workerTiming: options.workerTiming } : {}), ...(options.pullApi ? { pullApi: options.pullApi } : {}),
-    scopesWork: () => options.scopesWork ?? false })
+    scopesWork: () => options.scopesWork ?? false, capWorkerGroup: () => options.groupCap ?? true })
   live.push(running)
   // A deterministic stand-in for the model: the tests bind the wiring, not the judgement.
   const decide = (kind: 'accept' | 'ignore') => {
@@ -598,9 +598,28 @@ describe('the router extension', () => {
     expect(statSync(join(bin, 'pi')).mode & 0o111, 'the shim is executable').not.toBe(0)
     expect(readFileSync(join(bin, 'pi'), 'utf8')).toMatch(/systemd-run --user --scope .*--slice=pi-superagent\.slice/)
     expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/worker\.limits memoryMaxBytes=\d+ cpuPercent=\d+ tasksMax=2048/)
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8'), 'and every worker together under one cap')
+      .toMatch(/worker\.group_limits memoryMaxBytes=\d+ cpuPercent=\d+/)
     const brief = readdirSync(join(f.dir, 'workers')).map(d => join(f.dir, 'workers', d, 'inbox'))
       .flatMap(i => readdirSync(i).map(n => readFileSync(join(i, n), 'utf8'))).join('\n')
     expect(brief, 'the worker is told its limits').toContain('Hard limits: your processes share')
+    expect(brief, 'including the one it shares').toContain('that all workers share')
+  })
+
+  it('a host that refuses the shared cap still caps each worker, and the log says which cap is missing', async () => {
+    const h = memoryHerdr()
+    const f = fixture(true, undefined, undefined, h.herdr, { scopesWork: true, groupCap: false })
+    f.addComment('517', 'octocat', 'bump the base image')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await until(() => h.envs.length === 1)
+    const log = readFileSync(join(f.dir, 'engine.log'), 'utf8')
+    expect(log).toMatch(/worker\.limits memoryMaxBytes=/)
+    expect(log.match(/worker\.group_limits_unavailable/g)).toHaveLength(1)
+    const brief = readdirSync(join(f.dir, 'workers')).map(d => join(f.dir, 'workers', d, 'inbox'))
+      .flatMap(i => readdirSync(i).map(n => readFileSync(join(i, n), 'utf8'))).join('\n')
+    expect(brief, 'no promise of a cap that is not there').not.toContain('that all workers share')
   })
 
   it('a worker on a host without user scopes runs unconfined, and the log says so once', async () => {
@@ -613,6 +632,7 @@ describe('the router extension', () => {
     await until(() => h.envs.length === 1)
     expect(h.envs[0]!.PATH, 'no shim, no PATH override').toBeUndefined()
     expect(readFileSync(join(f.dir, 'engine.log'), 'utf8').match(/worker\.limits_unavailable/g)).toHaveLength(1)
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8'), 'no shared cap without scopes either').not.toMatch(/worker\.group_limits/)
   })
 
   it('the bot\'s token reaches a worker by its file, never on herdr\'s command line', async () => {
