@@ -139,6 +139,8 @@ export class PiExecutor {
         let sessionRef: WorkerSession | undefined
         const session = await this.launcher.launch({ ticket: current, assignment, brief, report: this.reporter(current, () => sessionRef) })
         sessionRef = session
+        // A stop during boot finds no worker to stop (2026-11-12: one ran 2 min on a closed issue), so ask again here.
+        if (this.options.stillWanted && !this.options.stillWanted(current, assignment)) { session.dispose(); return }
         this.bind(current, assignment, session)
         this.startedAt = Date.now()
         this.engine.assignmentStarted(ticket.id, assignment.id)
