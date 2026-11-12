@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stopWorkerScope } from './worker-limits.ts'
+import { PERSON_FILE } from './worker-role.ts'
 import { fileURLToPath } from 'node:url'
 import type { Ticket } from '../core/index.ts'
 import type { WorkerEvent, WorkerSession } from './executor.ts'
@@ -40,6 +41,8 @@ export interface HerdrWorkersOptions {
   lingerMs?: number
   /** How long a retired worker's agent gets to wind down before its tab closes at a busy agent. */
   retireGraceMs?: number
+  /** How long a freed tab a person typed in stays open once it falls quiet. */
+  personLingerMs?: number
   /** Ends a worker's processes, background tasks included; defaults to stopping its systemd scope. */
   stopScope?: (sessionId: string) => void
   startTimeoutMs?: number
@@ -73,11 +76,15 @@ export class HerdrWorkers {
     const { herdr, log } = this.options
     // One live worker per ticket. A released worker kept its tab while a background task kept it busy, woke on its
     // own, and worked the same checkout as the worker launched after it (2026-11-12, ticket 340).
+    let resumable: WorkerRecord | undefined
     for (const old of [...this.records(), ...this.records(true)].filter(r => r.ticketId === input.ticket.id)) {
       if (!(await this.inTab(old))) continue
+      // Ending it would end the person's session too: the ticket's next work goes to it instead.
+      if (!resumable && old.endedAt && !old.tabSettledAt && this.held(old)) { resumable = old; continue }
       log.line('warn', 'worker.superseded', { ticket: input.ticket.id, agent: old.agent, tab: old.tabId })
       await this.end(old)
     }
+    if (resumable) return this.resume(resumable, input.report)
     const sessionId = randomUUID()
     const dir = join(this.root, sessionId)
     mkdirSync(join(dir, 'inbox'), { recursive: true })
@@ -362,9 +369,48 @@ export class HerdrWorkers {
   }
 
   private async endIfStill(record: WorkerRecord): Promise<void> {
-    if (record.tabSettledAt || !(await this.inTab(record))) return
+    if (record.tabSettledAt || !this.stillReleased(record) || this.held(record) || !(await this.inTab(record))) return
     this.options.log.line('info', 'worker.tab_closed_busy', { agent: record.agent, tab: record.tabId, ticket: record.ticketId, after: 'release deadline' })
     await this.end(record)
+  }
+
+  /** A freed tab a person typed in, shortly before its release or since, is theirs: the release deadline ended two
+   *  mid-task on 2026-11-12 (ticket 340), each running an instruction typed in its tab. */
+  private held(record: WorkerRecord): boolean {
+    if (!record.endedAt) return false
+    const at = this.personAt(record)
+    return at !== undefined && at > Date.parse(record.endedAt) - (this.options.lingerMs ?? 600_000)
+  }
+
+  private personAt(record: WorkerRecord): number | undefined {
+    try {
+      const at = Date.parse((JSON.parse(readFileSync(join(record.dir, PERSON_FILE), 'utf8')) as { at?: string }).at ?? '')
+      return Number.isNaN(at) ? undefined : at
+    } catch { return undefined }
+  }
+
+  private lastTouch(record: WorkerRecord): number {
+    let events = 0
+    try { events = statSync(join(record.dir, 'events.jsonl')).mtimeMs } catch { /* no events yet */ }
+    return Math.max(this.personAt(record) ?? 0, events, Date.parse(record.endedAt ?? '') || 0)
+  }
+
+  /** A timer set at one release must not act on the record once a launch has given it work again, or freed it anew. */
+  private stillReleased(record: WorkerRecord): boolean {
+    try {
+      return (JSON.parse(readFileSync(join(record.dir, 'worker.json'), 'utf8')) as WorkerRecord).endedAt === record.endedAt
+    } catch { return true }
+  }
+
+  /** What the worker said while no router listened stays unread: a stale report would settle the new assignment at once. */
+  private resume(record: WorkerRecord, report: Reporter): WorkerSession {
+    delete record.endedAt
+    delete record.tabSettledAt
+    writeFileSync(join(record.dir, 'worker.json'), JSON.stringify(record, null, 2))
+    const size = (file: string): number => { try { return statSync(join(record.dir, file)).size } catch { return 0 } }
+    writeFileSync(join(record.dir, 'cursor.json'), JSON.stringify({ events: size('events.jsonl'), reports: size('reports.jsonl') }))
+    this.options.log.line('info', 'worker.resumed', { ticket: record.ticketId, agent: record.agent, tab: record.tabId })
+    return this.attach(record, report)
   }
 
   /** Ends a worker now: its scope (pi and background tasks), then its tab. */
@@ -384,10 +430,21 @@ export class HerdrWorkers {
     forceAfter?: number,
     tries = (forceAfter === undefined ? 0 : RETIRE_CLOSE_TRIES),
   ): Promise<void> {
+    if (!this.stillReleased(record)) return
     const agent = await this.options.herdr.agentGet(record.agent).catch(() => undefined)
     const settle = (): void => {
       record.tabSettledAt = new Date().toISOString()
       writeFileSync(join(record.dir, 'worker.json'), JSON.stringify(record, null, 2))
+    }
+    if (agent?.pane_id === record.paneId && this.held(record)) {
+      const busy = !['idle', 'done'].includes(agent.agent_status)
+      const linger = this.options.personLingerMs ?? 3_600_000
+      const quiet = Date.now() - this.lastTouch(record)
+      if (busy || quiet < linger) {
+        this.options.log.line('info', 'worker.tab_kept', { agent: record.agent, tab: record.tabId, status: agent.agent_status, for: 'person' })
+        setTimeout(() => { void this.closeIfIdle(record) }, busy ? this.options.lingerMs ?? 600_000 : linger - quiet).unref()
+        return
+      }
     }
     if (agent?.pane_id === record.paneId && !['idle', 'done'].includes(agent.agent_status)) {
       if (forceAfter !== undefined && tries > 0) {

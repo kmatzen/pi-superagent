@@ -10,6 +10,8 @@
     - a finished worker's tab lingers for follow-up. This model closes it once its
       agent is gone; the code also closes it once the agent sits idle, a stronger
       cleanup that none of the claims below depend on;
+    - a launch resumes a finished worker whose agent still runs in its open tab (a
+      person kept it) instead of starting a second worker beside it;
     - a record's slot is reused only after its tab is closed.
 
   Leaves out: herdr's own failures, the inbox and cursor files, the window in which a
@@ -50,6 +52,19 @@ Launch(w) ==
   /\ rec' = [rec EXCEPT ![w].state = live]
   /\ tabs' = tabs \cup {TabOf(w)}
   /\ agent' = [agent EXCEPT ![w] = TRUE]
+
+(* Resume (HerdrWorkers.launch on a freed tab a person kept): the launch goes to the
+   ended record whose own agent still runs in its open tab. Any such record may resume
+   here, a superset of the held ones, so the claims cover the person rule whatever it is. *)
+Resume(w) ==
+  /\ launches < 3
+  /\ launches' = launches + 1
+  /\ rec[w].state = ended
+  /\ agent[w]
+  /\ TabOf(w) \in tabs
+  /\ \A j \in Workers : rec[j].state # live
+  /\ rec' = [rec EXCEPT ![w].state = live]
+  /\ UNCHANGED <<tabs, agent>>
 
 (* The agent process dies (crash, kill, herdr restart). The record and its tab
    survive — this is the zombie state the sweep exists for. *)
@@ -100,6 +115,7 @@ Terminate == UNCHANGED vars
 Next ==
   \/ Terminate
   \/ \E w \in Workers : Launch(w)
+  \/ \E w \in Workers : Resume(w)
   \/ \E w \in Workers : AgentDies(w)
   \/ \E w \in Workers : Report(w)
   \/ \E w \in Workers : StopByHuman(w)
@@ -131,10 +147,11 @@ W1_OneLive == \A j \in Workers : \A k \in Workers :
 W2_SweepKeepsLiveAgents ==
   [][\A w \in Workers : (rec[w].state = live /\ agent[w]) => TabOf(w) \in tabs]_vars
 
-(* W3. A record never resurrects: ended goes only to free (retire), free only to
-   live (launch), live only to ended. No live -> free skip, no ended -> live. *)
+(* W3. A record never resurrects a dead session: ended goes to free (retire), or back
+   to live only into its own agent still running in its open tab (resume); free only to
+   live (launch), live only to ended. No live -> free skip. *)
 W3_NoResurrect == [][\A w \in Workers :
-  /\ rec[w].state = ended  => rec'[w].state \in {ended, free}
+  /\ rec[w].state = ended  => (rec'[w].state \in {ended, free} \/ (agent[w] /\ TabOf(w) \in tabs))
   /\ rec[w].state = live => rec'[w].state \in {live, ended}
   /\ rec[w].state = free => rec'[w].state \in {free, live}]_vars
 
