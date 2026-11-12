@@ -7,7 +7,7 @@ the model closest to the code you’re changing.
 
 | Specification | Code it models | Distinct states |
 | --- | --- | ---: |
-| [Ticket.tla](Ticket.tla) | Ticket lifecycle in `src/core/` | 1,398,882 |
+| [Ticket.tla](Ticket.tla) | Ticket lifecycle in `src/core/` | 924,784 |
 | [Intake.tla](Intake.tla) | GitHub polling in `src/pi/source-github.ts` | 113,281 |
 | [Workers.tla](Workers.tla) | Worker records and herdr tabs in `src/pi/herdr-workers.ts` | 94 |
 

@@ -63,6 +63,8 @@ export interface ExecutorOptions {
   /** Runs before the engine reads the report, because a ready report completes a ticket that follows no open pull
    *  request yet. Returns the pull requests the ticket now follows. */
   follow?(ticket: Ticket, pullRequests: readonly string[]): readonly string[]
+  /** The ticket as it stands when a queued launch gets its slot, or undefined when `assignment` no longer wants a worker. */
+  stillWanted?(ticket: Ticket, assignment: Assignment): Ticket | undefined
 }
 
 interface Live {
@@ -131,11 +133,13 @@ export class PiExecutor {
     this.launching.add(key)
     this.enqueue(async () => {
       try {
-        const brief = this.options.briefFor(ticket, assignment)
+        const current = this.options.stillWanted ? this.options.stillWanted(ticket, assignment) : ticket
+        if (!current) return
+        const brief = this.options.briefFor(current, assignment)
         let sessionRef: WorkerSession | undefined
-        const session = await this.launcher.launch({ ticket, assignment, brief, report: this.reporter(ticket, () => sessionRef) })
+        const session = await this.launcher.launch({ ticket: current, assignment, brief, report: this.reporter(current, () => sessionRef) })
         sessionRef = session
-        this.bind(ticket, assignment, session)
+        this.bind(current, assignment, session)
         this.startedAt = Date.now()
         this.engine.assignmentStarted(ticket.id, assignment.id)
         session.prompt(brief, 'followUp')

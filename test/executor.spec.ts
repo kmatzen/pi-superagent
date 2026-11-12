@@ -24,7 +24,8 @@ class FakeSession implements WorkerSession {
 interface Call { fn: string; args: unknown[] }
 
 function fixture(extra: { maxConcurrent?: number; slotPollMs?: number; follow?: (t: Ticket, urls: readonly string[]) => readonly string[];
-                          reportDropped?: (fields: Record<string, unknown>) => void } = {},
+                          reportDropped?: (fields: Record<string, unknown>) => void;
+                          stillWanted?: (t: Ticket, a: Assignment) => Ticket | undefined } = {},
                  fail: { launch?: string; report?: string } = {}) {
   const calls: Call[] = []
   const sessions: FakeSession[] = []
@@ -104,6 +105,20 @@ describe('PiExecutor', () => {
     f.executor.stop(ticket({ id: 'T1' }), assignment('A1'), 'done')
     await f.executor.idle()
     expect(f.sessions.map(s => s.sessionId)).toEqual(['s0', 's1'])
+  })
+
+  it('a launch whose assignment ended while it waited for a slot starts nobody', async () => {
+    // 2026-11-11: such a worker opened two pull requests, and the engine refused every report it made about them.
+    const over = new Set<string>()
+    const f = fixture({ maxConcurrent: 1, slotPollMs: 5, stillWanted: (t, a) => (over.has(a.id) ? undefined : t) })
+    f.executor.start(ticket({ id: 'T1' }), assignment('A1'))
+    await f.executor.idle()
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    over.add('A2')
+    f.executor.stop(ticket({ id: 'T1' }), assignment('A1'), 'done')
+    await f.executor.idle()
+    expect(f.sessions.map(s => s.sessionId), 'the slot freed, and the ended assignment got no worker').toEqual(['s0'])
+    expect(f.calls_of('assignmentStarted').map(c => c.args[1])).toEqual(['A1'])
   })
 
   it('a delayed stop for a crashed assignment leaves its replacement running', async () => {

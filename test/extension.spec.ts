@@ -238,6 +238,29 @@ describe('the router extension', () => {
     expect(notices[0]!.body).toContain('tries again on every poll')
   })
 
+  it('a ticket stopped while its launch waits for a slot gets no worker when the slot frees', async () => {
+    // 2026-11-11: a launch that waited behind the cap started a worker for work already over, and its reports went nowhere.
+    const f = fixture(true, undefined, undefined, undefined, { maxConcurrent: 1 })
+    f.addComment('497', 'octocat', 'rotate the staging keys')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    f.addComment('498', 'octocat', 'bump the base image')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers, 'the cap holds the second launch').toHaveLength(1)
+    const waiting = new SqliteRepositories(`${f.dir}/tickets.db`).tickets.open().find(t => t.channels[0]?.thread === '#498')!
+    f.running.engine.stopTicket(waiting.id, 'withdrawn while it waited')
+    f.workers[0]!.report!({ state: 'ready', summary: 'keys rotated' })
+    await f.running.tick()
+    await until(() => f.workers.length > 1, 500)
+    expect(f.workers, 'the freed slot starts nobody for the withdrawn ticket').toHaveLength(1)
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/worker\.launch_skipped .*why="ticket ended"/)
+  })
+
   it('a reply GitHub kept while the answer was lost on the way back is not posted twice', async () => {
     const issues: IssueState[] = []
     const posted: Array<{ issue: number; body: string }> = []
@@ -935,8 +958,9 @@ describe('startup and recovery', () => {
     })
     await new Promise(r => setTimeout(r, 400))
     const saved = new SqliteRepositories(`${f.dir}/tickets.db`).tickets.open().find(t => t.id === 'ghost2')
-    expect(saved?.assignments.at(-1)?.report?.summary, 'the ticket must say nothing is running')
+    expect(saved?.assignments.find(a => a.id === 'a1')?.report?.summary, 'the ticket must say nothing was running')
       .toMatch(/did not survive the router restart/)
+    expect(saved?.assignments.at(-1)?.id, 'and the fresh worker runs a fresh assignment').not.toBe('a1')
     expect(f.workers.length, 'the mandate stands, so a ghost gets a fresh worker').toBeGreaterThan(0)
     f.running.stop()
   })
@@ -1182,6 +1206,58 @@ describe('a pull request per ticket', () => {
     const ticket = new SqliteRepositories(`${f.dir}/tickets.db`).tickets.list().find(t => t.channels[0]?.thread === '#494')!
     expect(ticket.undelivered).toEqual([])
     expect(ticket.inputs.filter(i => i.kind === 'trigger' && i.deliveredTo).map(i => i.kind === 'trigger' && !!i.readAt)).toEqual([true])
+  })
+
+  it('a restart that finds a reported worker gone relaunches on a fresh assignment, which no stale sweep mistakes for the corpse', async () => {
+    // 2026-11-11: the relaunch reused the dead assignment's start time, waited for a slot, read as stale, and was released.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '495')
+    f.workers[0]!.report!({ state: 'failed', summary: 'the test harness would not start' })
+    await f.running.tick()
+    const dead = ticket().assignments.at(-1)!
+    expect(dead.state, 'a failed report keeps its worker bound').toBe('running')
+    f.running.stop()
+    const g = fixture(true, undefined, f.dir, undefined, { pullApi: pulls.api, issues: f.feed.issues })
+    await g.running.tick()
+    await until(() => g.workers.length === 1, 2000)
+    expect(g.workers, 'the restart starts a worker').toHaveLength(1)
+    expect(ticket().assignments.find(a => a.id === dead.id)?.state, 'the dead worker\'s assignment ends').toBe('ended')
+    expect(ticket().assignments.at(-1)!.id, 'and the fresh worker runs a fresh one').not.toBe(dead.id)
+  })
+
+  it('a ticket the fleet lost with its pull request still open gets a worker back without anyone asking', async () => {
+    // 2026-11-12: four such tickets sat six hours with no worker and no notice, until the operator counted the board.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '496')
+    pulls.open('o/r', 83)
+    f.workers[0]!.report!({ state: 'failed', summary: 'interrupted mid-change', pullRequests: ['https://github.com/o/r/pull/83'] })
+    await f.running.tick()
+    f.running.stop()
+    const lost = ticket()
+    const last = lost.assignments.at(-1)!
+    expect(lost.follows?.some(follow => !follow.closed), 'the draft is open and followed').toBe(true)
+    new SqliteRepositories(`${f.dir}/tickets.db`).tickets.save({ ...lost, assignments: [...lost.assignments.slice(0, -1),
+      { ...last, state: 'ended', endedReason: 'released', endedAt: new Date().toISOString() }] })
+    const g = fixture(true, undefined, f.dir, undefined, { pullApi: pulls.api, issues: f.feed.issues })
+    await g.running.tick()
+    await until(() => g.workers.length === 1, 2000)
+    expect(g.workers, 'the orphan has a worker again').toHaveLength(1)
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8'), 'and the trail says why').toMatch(/regrant\.granted thread=#496/)
+    // Lost again the same day with nothing new on the issue: this grant must not read as a copy of the first.
+    await until(() => ticket().undelivered.length === 0, 2000)
+    g.workers[0]!.report!({ state: 'failed', summary: 'interrupted again' })
+    await g.running.tick()
+    g.running.stop()
+    const again = ticket()
+    const latest = again.assignments.at(-1)!
+    new SqliteRepositories(`${f.dir}/tickets.db`).tickets.save({ ...again, assignments: [...again.assignments.slice(0, -1),
+      { ...latest, state: 'ended', endedReason: 'released', endedAt: new Date().toISOString() }] })
+    const h = fixture(true, undefined, f.dir, undefined, { pullApi: pulls.api, issues: f.feed.issues })
+    await h.running.tick()
+    await until(() => h.workers.length === 1, 2000)
+    expect(h.workers, 'a second loss gets a second worker').toHaveLength(1)
   })
 
   it('a pull request closed without merging ends the ticket, and the issue says how to start again', async () => {
@@ -1964,8 +2040,18 @@ describe('who may re-earn the launch', () => {
       .toBe(false)
     expect(standingAskEntitled(undefined, []), 'an issue with no ticket is intake\'s to answer').toBe(false)
   })
+  it('a run the fleet lost comes back though it follows an open pull request; delivered work under review does not', () => {
+    // 2026-11-12: restarts orphaned four tickets with draft pull requests open, and this rule kept all four off the queue.
+    const follows = [{ thread: 'github:o/r#12' }]
+    const after = (report?: string) => ticket({ follows, assignments: [{ ...ended, ...(report ? { report: { state: report } } : {}) }] })
+    expect(standingAskEntitled(after('failed') as never, []), 'an interrupted run is work in progress').toBe(true)
+    expect(standingAskEntitled(after() as never, []), 'so is one that never reported').toBe(true)
+    expect(standingAskEntitled(after('ready') as never, []), 'delivered work waits for its review').toBe(false)
+    expect(standingAskEntitled(after('blocked') as never, []), 'and a question waits for its answer').toBe(false)
+  })
   it('re-grants an issue that never had a ticket, never one whose tickets all ended', () => {
     expect(regrantable(undefined, () => false, []), 'never ticketed: starved work the first look filed as history').toBe(true)
+    expect(regrantable(undefined, () => false, [], () => true), 'its request with the judge is not starved: granting it then spent the cap').toBe(false)
     expect(regrantable(undefined, () => true, []),
       'every ticket ended: finished work waiting on its pull requests, or stopped, is not a second worker').toBe(false)
     expect(regrantable(ticket() as never, () => true, []), 'an open, released ticket follows standingAskEntitled').toBe(true)
