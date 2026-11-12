@@ -276,6 +276,28 @@ describe('following a ticket\'s pull requests', () => {
     expect(t.calls).toEqual([])
   })
 
+  it('reads a comment once: an edit that brings it back is no new message, and a tool\'s marked comment is not the person', async () => {
+    // 2026-11-12: a CI dashboard posted with the operator's token, edited on every CI run, reached the worker as a
+    // fresh operator message each time.
+    let body = '<!-- caramel-ci-dashboard:v1 -->\nCI: 3 passing'
+    let extra: IssueComment[] = []
+    const t = follower({
+      pull: async () => openPull,
+      comments: async () => [comment({ author: 'operator', body }), ...extra],
+      reviews: async () => [],
+    })
+    await t.f.reconcile(t.following('other/lib#5'))
+    expect(t.received.map(r => [r.text, r.human]), 'once, and as automation').toEqual([[body, false]])
+    // CI edits it in place: GitHub returns it again (updated after the cursor) though it was created before it.
+    body = '<!-- caramel-ci-dashboard:v1 -->\nCI: 4 passing'
+    extra = [comment({ author: 'operator', at: new Date().toISOString(), body: 'please also fix the flake' })]
+    t.tick(10 * 60_000)
+    await t.f.reconcile(t.following('other/lib#5'))
+    expect(t.received.map(r => r.text), 'the edit is no second message; a new comment is one').toEqual([
+      '<!-- caramel-ci-dashboard:v1 -->\nCI: 3 passing', 'please also fix the flake'])
+    expect(t.received[1]!.human, 'a person still is one').toBe(true)
+  })
+
   it("turns a person's comment and review on another repository's pull request into triggers on its thread, once", async () => {
     const t = follower({
       pull: async () => openPull,
