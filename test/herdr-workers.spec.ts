@@ -6,6 +6,7 @@ import type { WorkerEvent } from '../src/pi/executor.ts'
 import { HerdrError, type AgentInfo, type Herdr } from '../src/pi/herdr.ts'
 import { agentName, HerdrWorkers, roleModule } from '../src/pi/herdr-workers.ts'
 import { openLog } from '../src/pi/log.ts'
+import { PERSON_FILE } from '../src/pi/worker-role.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'hworkers-')); dirs.push(d); return d }
@@ -105,6 +106,77 @@ describe('herdr workers', () => {
     await until(() => stopped.length === 1)
     expect(stopped).toEqual([s.sessionId])
     expect(m.calls, 'and its tab closed, busy or not').toContain('tabClose w1:t1')
+  })
+
+  it('a freed worker a person typed in is theirs: no release deadline while it works, and its tab closes once quiet', async () => {
+    // 2026-11-12, ticket 340: the release deadline ended two freed workers mid-task, each running an instruction typed in its tab.
+    const m = memoryHerdr()
+    const stopped: string[] = []
+    const stateDir = tmp()
+    const workers = new HerdrWorkers({ ...options(stateDir, m.herdr), lingerMs: 10, retireGraceMs: 10, personLingerMs: 200, stopScope: id => { stopped.push(id) } })
+    const s = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    for (const a of m.agents.values()) a.agent_status = 'working'
+    s.dispose()
+    writeFileSync(join(stateDir, 'workers', s.sessionId, PERSON_FILE), JSON.stringify({ at: new Date().toISOString() }))
+    await new Promise(resolve => setTimeout(resolve, 120))
+    expect(stopped, 'working on the person\'s request, past the release deadline').toEqual([])
+    expect(m.calls).not.toContain('tabClose w1:t1')
+    for (const a of m.agents.values()) a.agent_status = 'idle'
+    await until(() => stopped.length === 1)
+    expect(stopped, 'quiet past its linger: closed').toEqual([s.sessionId])
+    expect(m.calls).toContain('tabClose w1:t1')
+  })
+
+  it('a router restart leaves a freed tab its person is using, and closes one a person left long before its release', async () => {
+    const dir = tmp()
+    const m = memoryHerdr()
+    const endedAt = Date.now() - 60_000
+    const record = (id: string, tab: number, personAt: number) => {
+      const at = join(dir, 'workers', id)
+      mkdirSync(at, { recursive: true })
+      writeFileSync(join(at, 'worker.json'), JSON.stringify({
+        dir: at, sessionId: id, ticketId: `t-${id}`, agent: `sa-${id}`, tabId: `w1:t${tab}`, paneId: `w1:p${tab}`,
+        workspace: `/w/${id}`, startedAt: new Date(endedAt - 7_200_000).toISOString(), endedAt: new Date(endedAt).toISOString(),
+      }))
+      writeFileSync(join(at, PERSON_FILE), JSON.stringify({ at: new Date(personAt).toISOString() }))
+      m.agents.set(`sa-${id}`, { name: `sa-${id}`, pane_id: `w1:p${tab}`, agent: 'pi', agent_status: 'working' })
+    }
+    record('steered', 9, endedAt - 5)
+    record('stale', 8, endedAt - 3_600_000)
+    const workers = new HerdrWorkers({ ...options(dir, m.herdr), retireGraceMs: 10, lingerMs: 10 })
+    await workers.retireOrphans(new Set())
+    await until(() => m.calls.includes('tabClose w1:t8'))
+    expect(m.calls, 'typed in an hour before its release: closed at a busy agent').toContain('tabClose w1:t8')
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(m.calls, 'typed in just before its release, still working on it: kept').not.toContain('tabClose w1:t9')
+  })
+
+  it('the ticket\'s next work goes to the freed tab its person is using, and nothing said meanwhile is read', async () => {
+    const m = memoryHerdr()
+    const stopped: string[] = []
+    const stateDir = tmp()
+    const workers = new HerdrWorkers({ ...options(stateDir, m.herdr), lingerMs: 10, retireGraceMs: 10, personLingerMs: 30, stopScope: id => { stopped.push(id) } })
+    const first = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    const dir = join(stateDir, 'workers', first.sessionId)
+    first.dispose()
+    for (const a of m.agents.values()) a.agent_status = 'working'
+    writeFileSync(join(dir, PERSON_FILE), JSON.stringify({ at: new Date().toISOString() }))
+    appendFileSync(join(dir, 'reports.jsonl'), `${JSON.stringify({ state: 'ready', summary: 'said in the tab while freed' })}\n`)
+    const reports: string[] = []
+    const second = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: (state, summary) => { reports.push(`${state}: ${summary}`) } })
+    expect(second.sessionId, 'the same session takes the work').toBe(first.sessionId)
+    expect(m.calls.filter(c => c.startsWith('agentStart')), 'no second worker on the checkout').toHaveLength(1)
+    expect(stopped, 'and the person\'s session is not ended').toEqual([])
+    second.subscribe(() => {})
+    second.prompt('the brief', 'followUp')
+    expect(readdirSync(join(dir, 'inbox')), 'the work lands in its inbox').toHaveLength(1)
+    appendFileSync(join(dir, 'reports.jsonl'), `${JSON.stringify({ state: 'ready', summary: 'the new work' })}\n`)
+    await until(() => reports.length > 0)
+    expect(reports, 'only what it says after the resume is read').toEqual(['ready: the new work'])
+    for (const a of m.agents.values()) a.agent_status = 'idle'
+    await new Promise(resolve => setTimeout(resolve, 150))
+    expect(stopped, 'the first release\'s timers leave the resumed worker alone').toEqual([])
+    expect(m.calls).not.toContain('tabClose w1:t1')
   })
 
   it('names a worker the way herdr requires, uniquely per launch', () => {

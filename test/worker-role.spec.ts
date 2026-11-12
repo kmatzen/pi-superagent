@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { AFTER_HANDOVER, SILENT_FINISH, SILENT_NUDGE_FILE, workerRole, type WorkerPi } from '../src/pi/worker-role.ts'
+import { AFTER_HANDOVER, PERSON_FILE, SILENT_FINISH, SILENT_NUDGE_FILE, workerRole, type WorkerPi } from '../src/pi/worker-role.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'wrole-')); dirs.push(d); return d }
@@ -120,7 +120,7 @@ describe('the worker role', () => {
   })
 
   it('a report that hands the ticket over is the last act: every tool after it is refused, with the reason', () => {
-    // 2026-11-12: a worker reported ready, kept refactoring unasked in its freed session, and was ended mid-change, unpushed.
+    // 2026-11-12: background-task wakes kept a worker running tools in its freed session after its ready report.
     const f = fakePi()
     workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp(), PI_SUPERAGENT_WORKSPACE: '/w' })
     const report = f.tools.find(t => t.name === 'ticket_report')!
@@ -138,6 +138,43 @@ describe('the worker role', () => {
     workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp(), PI_SUPERAGENT_WORKSPACE: '/w' })
     f.emit('tool_call', { toolName: 'ask_user_question', input: { questions: [{ question: 'Make it uniform?' }] } })
     expect(f.emit('tool_call', { toolName: 'bash', input: { command: 'git push' } }).find(v => v)).toMatchObject({ block: true, reason: AFTER_HANDOVER })
+  })
+
+  it('a person typing in the tab lifts the handover, and leaves word for the router that a person is there', () => {
+    // 2026-11-12, ticket 340: the operator drove a freed worker from its tab, and after the handover every tool was refused.
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir, PI_SUPERAGENT_WORKSPACE: '/w' })
+    const report = f.tools.find(t => t.name === 'ticket_report')!
+    const refused = () => f.emit('tool_call', { toolName: 'bash', input: { command: 'make test' } }).find(v => v)
+    report.execute('c1', { state: 'ready', summary: 'all six answered' })
+    f.emit('input', { type: 'input', text: 'Background task bg-3 finished.', source: 'extension' })
+    expect(refused(), 'a wake that is not a person stays handed over').toMatchObject({ block: true, reason: AFTER_HANDOVER })
+    expect(existsSync(join(dir, PERSON_FILE))).toBe(false)
+    f.emit('input', { type: 'input', text: 'i dont care, just make it uniform', source: 'interactive' })
+    expect(refused(), 'the person\'s request runs').toBeUndefined()
+    expect(JSON.parse(readFileSync(join(dir, PERSON_FILE), 'utf8'))).toMatchObject({ at: expect.any(String) })
+    report.execute('c2', { state: 'ready', summary: 'made it uniform' })
+    expect(refused(), 'the next handover holds again').toMatchObject({ block: true })
+  })
+
+  it('new work from the router lifts the handover, and the worker\'s own nudge does not', async () => {
+    const dir = tmp()
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir, PI_SUPERAGENT_WORKSPACE: '/w' }, 10)
+    const refused = () => f.emit('tool_call', { toolName: 'bash', input: { command: 'make test' } }).find(v => v)
+    f.emit('session_start')
+    f.tools.find(t => t.name === 'ticket_report')!.execute('c1', { state: 'ready', summary: 'done' })
+    writeFileSync(join(dir, 'inbox', SILENT_NUDGE_FILE), JSON.stringify({ text: 'report your outcome', mode: 'followUp' }))
+    await until(() => f.sent.length === 1)
+    expect(refused(), 'the nudge is not new work').toMatchObject({ block: true })
+    f.emit('agent_start')
+    f.emit('agent_settled', { aborted: false })
+    writeFileSync(join(dir, 'inbox', '1-0000.json'), JSON.stringify({ text: 'octocat: changes requested', mode: 'followUp' }))
+    await until(() => f.sent.length === 2)
+    expect(f.sent[1]!.text).toBe('octocat: changes requested')
+    expect(refused(), 'a new message from the router is new work').toBeUndefined()
+    f.emit('session_shutdown')
   })
 
   it('the guard refuses delegation inside the worker, where it now runs', () => {
