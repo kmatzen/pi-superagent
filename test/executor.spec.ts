@@ -11,7 +11,7 @@ class FakeSession implements WorkerSession {
   report!: Reporter
   private listeners: Array<(e: WorkerEvent) => void> = []
   constructor(readonly sessionId: string) {}
-  prompt(text: string, mode: 'steer' | 'followUp'): void { this.prompts.push({ text, mode }) }
+  prompt(text: string, mode: 'steer' | 'followUp'): string { this.prompts.push({ text, mode }); return `p${this.prompts.length}` }
   subscribe(l: (e: WorkerEvent) => void): () => void {
     this.listeners.push(l)
     return () => { this.listeners = this.listeners.filter(x => x !== l) }
@@ -168,6 +168,22 @@ describe('PiExecutor', () => {
     expect(session.prompts.at(-1)?.mode, 'a person is heard at the next tool boundary').toBe('steer')
     f.executor.deliver(ticket({ inputs: [input('i2', 'trigger')], undelivered: ['i2'] }), assignment())
     expect(session.prompts.at(-1)?.mode, 'CI and bots still wait for the run to end').toBe('followUp')
+  })
+
+  it('a delivery a running worker took mid-run is read then, since no run start comes to say so', () => {
+    // 2026-11-12: a steered review stayed unread, so the ready report's release handed it to a fresh worker.
+    const f = fixture()
+    const session = new FakeSession('kept')
+    f.executor.adopt(ticket(), assignment(), report => { session.report = report as never; return session })
+    session.emit({ type: 'activity' })
+    f.executor.deliver(ticket({ inputs: [input('i1', 'trigger', { human: true })], undelivered: ['i1'] }), assignment())
+    f.executor.deliver(ticket({ inputs: [input('i2', 'trigger')], undelivered: ['i2'] }), assignment())
+    session.emit({ type: 'inputRead', name: 'p9' })
+    expect(f.calls_of('inputsRead'), 'a delivery this worker never got reads nothing').toEqual([])
+    session.emit({ type: 'inputRead', name: 'p1' })
+    expect(f.calls_of('inputsRead').map(c => c.args)).toEqual([['T1', ['i1']]])
+    session.emit({ type: 'turnStarted' })
+    expect(f.calls_of('inputsRead').map(c => c.args), 'a run start reads what still waits, once').toEqual([['T1', ['i1']], ['T1', ['i2']]])
   })
 
   it('a busy worker is not quiet, and a quiet stretch is reported once', async () => {

@@ -293,6 +293,7 @@ export class HerdrWorkers {
       const before = `${cursor.events}/${cursor.reports}`
       for (const event of fresh('events.jsonl', 'events')) {
         if (event.type === 'turnStarted' || event.type === 'settled' || event.type === 'activity') listener?.({ type: event.type })
+        else if (event.type === 'input_read' && typeof event.name === 'string') listener?.({ type: 'inputRead', name: event.name })
         else if (event.type === 'inbox_error') log.line('warn', 'worker.inbox_error', { agent: record.agent, error: String(event.error) })
       }
       for (const r of fresh('reports.jsonl', 'reports')) {
@@ -328,6 +329,7 @@ export class HerdrWorkers {
         const name = `${Date.now()}-${String(seq++).padStart(4, '0')}.json`
         writeFileSync(join(record.dir, `.${name}`), JSON.stringify({ text: body, mode }))
         renameSync(join(record.dir, `.${name}`), join(record.dir, 'inbox', name))
+        return name
       },
       subscribe: next => {
         listener = next
