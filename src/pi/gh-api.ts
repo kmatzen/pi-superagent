@@ -170,6 +170,23 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       await call(['api', '-X', 'POST', `repos/${repo ?? options.repo}/issues/${issue}/comments`, '--input', '-'], payload)
     },
 
+    async upsertComment(issue, commentId, body, repo) {
+      const hits = countCredentials(body)
+      if (hits) options.onCredentialRedacted?.(hits, `${repo ?? options.repo}#${issue}`)
+      const payload = JSON.stringify({ body: `${redactCredentials(body)}\n\n${REPLY_MARKER}` })
+      const target = repo ?? options.repo
+      const written = (out: string) => { const r = JSON.parse(out) as { id: number; html_url: string }; return { id: r.id, url: r.html_url } }
+      if (commentId) {
+        try {
+          return written(await call(['api', '-X', 'PATCH', `repos/${target}/issues/comments/${commentId}`, '--input', '-'], payload))
+        } catch (error) {
+          // Someone deleted it: a new one takes its place rather than the status going quiet.
+          if (!/HTTP 404|Not Found/i.test(String(error))) throw error
+        }
+      }
+      return written(await call(['api', '-X', 'POST', `repos/${target}/issues/${issue}/comments`, '--input', '-'], payload))
+    },
+
     async pullsOpen() {
       return (await openPulls()).map(pr => pr.number)
     },
@@ -250,9 +267,12 @@ export function ghPulls(options: GhOptions = {}): PullApi {
     async pull(repo, number) {
       try {
         const r = JSON.parse(await call(['api', `repos/${repo}/pulls/${number}`])) as
-          { state: string; merged_at?: string | null; closed_at?: string | null; mergeable?: boolean | null; created_at: string }
+          { state: string; merged_at?: string | null; closed_at?: string | null; mergeable?: boolean | null; created_at: string;
+            title?: string; draft?: boolean; mergeable_state?: string; merged_by?: { login?: string } | null }
         const closedAt = r.merged_at ?? r.closed_at
-        return { open: r.state === 'open', merged: Boolean(r.merged_at), mergeable: r.mergeable ?? null, createdAt: r.created_at, ...(closedAt ? { closedAt } : {}) }
+        return { open: r.state === 'open', merged: Boolean(r.merged_at), mergeable: r.mergeable ?? null, createdAt: r.created_at, ...(closedAt ? { closedAt } : {}),
+          ...(r.title ? { title: r.title } : {}), ...(r.draft !== undefined ? { draft: r.draft } : {}),
+          ...(r.mergeable_state ? { mergeableState: r.mergeable_state } : {}), ...(r.merged_by?.login ? { mergedBy: r.merged_by.login } : {}) }
       } catch (error) {
         if (!/HTTP 404|Not Found/i.test(String(error))) throw error
         if (await repoReadable(repo)) return undefined

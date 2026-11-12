@@ -144,7 +144,9 @@ export const pullBrief = (closes?: string, canPush = true): string => canPush ? 
   `why${closes ? `, and ends with \`Closes ${closes}\` when merging it completes the request` : ''}. Report ready with pullRequests`,
   'set to its URL: the ticket then waits for the pull request, comments and reviews on it come to you, and the ticket ends when',
   'it is merged or closed. Do not comment on the pull request yourself. A request that changes no repository, such as a',
-  'question, an investigation or an operation, reports ready without one.',
+  'question, an investigation or an operation, reports ready without one. When the work needs several pull requests,',
+  'in one repository or across several, list every one in pullRequests in the order a person should merge them: the issue',
+  'shows that order with each one\'s state, and when one merges you hear about it to make the follow-on change the rest need.',
 ].join('\n') : [
   'If the request changes code or files, work in the git checkout inside your workspace on a new branch and commit it',
   'there. This worker has no GitHub access, so do not try to push or open a pull request: report ready with `branch` set',
@@ -185,7 +187,8 @@ export function scopeOf(config: RouterConfig): SourceScope {
       // ticket a fact about its own pull request. Its actor is the router and its association is None, so
       // the write-access rule below would filter the notice before the ticket that waits on the pull
       // request ever hears it (it did, on every deployment, from the day the notice shipped).
-      if (meta.via === 'conflict') return { listened: true, observed: false }
+      // A merge of one of the ticket's pull requests is the same kind of fact, and only someone with write access merges.
+      if (meta.via === 'conflict' || meta.via === 'merge') return { listened: true, observed: false }
       const heard = config.allowed
         ? isListed(typeof meta.author === 'string' ? meta.author : '', config.allowed)
         : WRITERS.has(String(meta.association))

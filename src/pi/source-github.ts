@@ -28,6 +28,8 @@ export interface GithubApi {
   issues(state: 'open' | 'closed'): Promise<IssueState[]>
   /** `repo` names a repository other than the watched one, for a conversation on a pull request there. */
   postComment(issue: number, body: string, repo?: string): Promise<void>
+  /** Writes one comment the router keeps editing: posted when `commentId` is unset, edited in place after. */
+  upsertComment?(issue: number, commentId: number | undefined, body: string, repo?: string): Promise<{ id: number; url: string }>
   /** Newest-first page of one issue's comments; a retried post looks here before speaking twice. */
   commentsFor?(issue: number, repo?: string): Promise<IssueComment[]>
   /** Open pull-request numbers: their conversations are threads a ticket can own, so closing them counts. */
