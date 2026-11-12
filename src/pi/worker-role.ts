@@ -92,7 +92,7 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   // One nudge per WORKER, not per run: a counter reset on agent_start lets a worker that finishes
   // silently be nudged forever, which is worse than parking it. Proved by test on the first attempt.
   let silentStreak = 0
-  const inflight = new Map<string, string>()
+  const inflight = new Map<string, { file: string; text: string }>()
   // pi 1.5 marks a session busy only after its input handlers ran: a second send in one idle burst starts a
   // second run that pi kills on screen, never through this file, and the next settle deleted it unread (24
   // multi-input deliveries on 2026-11-11). Idle, one input goes and the rest wait for agent_start.
@@ -117,7 +117,7 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
     }
     reported = false
     const aborted = Boolean((event as { aborted?: boolean } | undefined)?.aborted)
-    for (const [name, file] of inflight) {
+    for (const [name, { file }] of inflight) {
       // Aborted: the run gave the message back, so the next drain sends it to the idle session as its own turn.
       if (aborted) continue
       rmSync(file, { force: true })
@@ -139,6 +139,21 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   // A command streaming output is a worker at work: without this a long build read as 15 minutes of silence.
   pi.on('tool_execution_update', activity)
   pi.on('message_update', activity)
+  // A steer or follow-up joins the run without an agent_start, the router's only other sign of a read.
+  pi.on('message_end', (event?: unknown) => {
+    const message = (event as { message?: { role?: string; content?: unknown } } | undefined)?.message
+    if (message?.role !== 'user') return
+    const content = message.content
+    const text = typeof content === 'string' ? content : Array.isArray(content)
+      ? content.map(part => (part as { type?: string; text?: string }).type === 'text' ? (part as { text?: string }).text ?? '' : '').join('\n') : ''
+    for (const [name, sent] of inflight) {
+      if (!text.includes(sent.text)) continue
+      inflight.delete(name)
+      rmSync(sent.file, { force: true })
+      append('events.jsonl', { type: 'input_read', name })
+      return
+    }
+  })
 
   // Not awaited: sendUserMessage can resolve only when the run ends, and a steer must land mid-run.
   const drain = (): void => {
@@ -161,7 +176,7 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
       }
       if (inflight.has(name)) continue // sent, waiting for the run that reads it
       if (starting && !running) return // the run the last idle send starts takes the rest as queued input
-      inflight.set(name, file)
+      inflight.set(name, { file, text: input.text })
       if (!running) starting = { name, at: Date.now() }
       Promise.resolve(pi.sendUserMessage(input.text, { deliverAs: input.mode ?? 'followUp' }))
         .catch((error: unknown) => {
