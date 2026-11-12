@@ -145,7 +145,9 @@ Two numbers, because one number answered two questions silently and disagreed wi
 2026-11-10: PR 56 counted a spent grant label, PR 58 counted an open ticket as a worker.
 
 - **`starved`** — open issues (labels obsolete, see the amendment) the engine has never put anyone on: no ticket, or a ticket whose only assignment
-  is a queued launch. Answers *what would a free slot unblock?* Age is `oldestStarvedH`.
+  is a queued launch. Answers *what would a free slot unblock?* Age is `oldestStarvedH`. An issue whose tickets have all
+  ended is not starved: its work finished and waits on a person (until 2026-11-12 the count missed this, and a merged
+  ask left open read as waiting for a slot).
   Measured 2026-11-10, that sentence overpromises for part of the queue: the mandate to launch comes from the
   one-shot `agent-requested` grant, and a standing `agent-ready` label whose grant was spent by earlier workers
   entitles the ask to nothing. Issue 274 sat 49.4 hours with 6 of 8 launch slots free for exactly that reason

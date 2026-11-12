@@ -561,6 +561,25 @@ describe('the router extension', () => {
     expect(f.running.load().unanswered, 'a delivered run awaiting review is not board debt either').toBe(0)
   })
 
+  it('an ask whose ticket finished is not waiting for a slot, though its open issue still waits on a person', async () => {
+    // 2026-11-12: a merged ask and a completed one, both left open, read as "waiting for a slot" with every slot free.
+    const at = new Date(Date.now() - 3.6e6).toISOString()
+    const issues: IssueState[] = [{ issue: 467, title: 'Bump the base image', body: 'Bump it to the new one.',
+      author: 'octocat', association: 'OWNER', createdAt: at, updatedAt: at }]
+    const githubApi: GithubApi = { comments: async () => [] as IssueComment[], issues: async () => [...issues], postComment: async () => {} }
+    const f = fixture(true, undefined, undefined, undefined, { githubApi })
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    await until(() => f.workers.length === 1)
+    f.workers[0]!.report!({ state: 'ready', summary: 'Bumped the base image; nothing left to merge.' })
+    await settle()
+    await f.running.tick()
+    expect(f.running.load().starved, 'its work is done: a free slot unblocks nothing here').toBe(0)
+    expect(f.running.load().unanswered, 'the open issue still waits for a person to read it').toBe(1)
+  })
+
   it('a quiet worker gets a question and keeps its session, so a report it files later still reaches the issue', async () => {
     // Measured 2026-11-11: the sweep used to release a quiet worker, and a released worker's reports are never read.
     // Of 10 traced releases, 6 later wrote a report nobody read, 4 of them `ready`: silence is a long build as often
