@@ -42,6 +42,8 @@ export function limitsFor(settings: WorkerLimitSettings, totalBytes: number, cor
 
 /** herdr starts `pi` by name, so a PATH entry ahead of the real pi is the only seam; `--scope` keeps the pid, so
  *  herdr still sees pi in the pane. XDG_RUNTIME_DIR is for systemd-run only: herdr's socket path assumes none. */
+// No MemoryHigh: with no swap it stalls a runaway at the threshold instead of killing it (measured on the fleet
+// box: a hog sat throttled for 120 s), and the brief promises a kill the agent can see.
 export function shimScript(limits: WorkerLimits): string {
   return [
     '#!/bin/sh',
@@ -50,7 +52,7 @@ export function shimScript(limits: WorkerLimits): string {
     '  || { echo "pi-superagent: no pi on PATH outside $self" >&2; exit 127; }',
     'unit="pi-superagent-worker-$(basename "${PI_SUPERAGENT_WORKER_DIR:-$$}")"',
     `exec env XDG_RUNTIME_DIR="/run/user/$(id -u)" systemd-run --user --scope --quiet --collect --slice=${SCOPE_SLICE} --unit="$unit" \\`,
-    `  -p MemoryMax=${limits.memoryMaxBytes} -p MemoryHigh=${Math.floor(limits.memoryMaxBytes * 0.9)} -p MemorySwapMax=0 \\`,
+    `  -p MemoryMax=${limits.memoryMaxBytes} -p MemorySwapMax=0 \\`,
     `  -p TasksMax=${limits.tasksMax} -p CPUQuota=${limits.cpuPercent}% \\`,
     '  -- env -u XDG_RUNTIME_DIR "$real" "$@"',
     '',
