@@ -22,6 +22,8 @@ import { openLog } from './log.ts'
 import { openWorkerView } from './worker-view.ts'
 import { herdrCli, type Herdr } from './herdr.ts'
 import { HerdrWorkers } from './herdr-workers.ts'
+import { cpus, totalmem } from 'node:os'
+import { installShim, limitsBrief, limitsFor, scopesWork } from './worker-limits.ts'
 import { reportTool, type ReportOrigin } from './report-tool.ts'
 import { pullEndText, receiptText, type ReportedRun } from './receipts.ts'
 import { isListed } from './authors.ts'
@@ -126,6 +128,8 @@ export interface ExtensionDeps {
   pullApi?: PullApi
   /** Tests read worker files and check worker liveness in milliseconds, not seconds. */
   workerTiming?: { pollMs?: number; livenessMs?: number }
+  /** Tests: whether systemd user scopes work here (the default probes the host). */
+  scopesWork?: () => boolean
 }
 
 export interface RunningRouter {
@@ -593,6 +597,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     }
     return followed
   }
+  // Scope limits only where the host can enforce them; anywhere else workers run unconfined, and the log says so.
+  const limits = cfg.workers === 'herdr' ? limitsFor(cfg.workerLimits ?? {}, totalmem(), cpus().length, cfg.maxConcurrent ?? 4) : null
+  const limitBin = limits && (deps.scopesWork ?? scopesWork)() ? installShim(cfg.dataDir, limits) : undefined
+  if (limits && limitBin) log.line('info', 'worker.limits', { memoryMaxBytes: limits.memoryMaxBytes, cpuPercent: limits.cpuPercent, tasksMax: limits.tasksMax })
+  else if (limits) log.line('warn', 'worker.limits_unavailable', { reason: 'no systemd user scopes on this host; workers run unconfined' })
   const herdrWorkers = cfg.workers === 'herdr'
     ? new HerdrWorkers({ herdr: deps.herdr ?? herdrCli(cfg.herdrBin), stateDir: cfg.dataDir, log,
       ...(cfg.herdrWorkspace ? { workspaceLabel: cfg.herdrWorkspace } : {}), ...deps.workerTiming, ...(cfg.workerStartMs ? { startTimeoutMs: cfg.workerStartMs } : {}) })
@@ -620,6 +629,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
             ...(token && cfg.workerTokenFile ? { PI_SUPERAGENT_WORKER_TOKEN_FILE: cfg.workerTokenFile } : {}),
             ...(cfg.blockedCommands?.length ? { PI_SUPERAGENT_BLOCKED: cfg.blockedCommands.join(',') } : {}),
             ...(cfg.allowDelegation ? { PI_SUPERAGENT_ALLOW_DELEGATION: '1' } : {}),
+            ...(limitBin ? { PATH: `${limitBin}:${process.env.PATH ?? ''}` } : {}),
           },
         })
       }
@@ -671,6 +681,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const brief = briefFor(ticket, `${cfg.worktreeRoot}/${ticket.id}`) + (before
         ? `\nA previous worker on this ticket stopped (${before.summary}); anything it changed is still in the workspace, so check it before starting over.`
         : '')
+        + (limits && limitBin ? `\n${limitsBrief(limits)}` : '')
       const address = ticket.channels[0]?.source === 'github' ? ticket.channels[0].address as { issue?: string; repo?: string } : undefined
       const issue = address?.issue
       const repo = address?.repo ?? cfg.githubRepo
@@ -1482,6 +1493,9 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const workerQuietMinutes = positiveNumber('PI_SUPERAGENT_WORKER_QUIET_MINUTES', env.PI_SUPERAGENT_WORKER_QUIET_MINUTES)
   const deadlineHours = positiveNumber('PI_SUPERAGENT_WORKER_DEADLINE_HOURS', env.PI_SUPERAGENT_WORKER_DEADLINE_HOURS)
   const reportCap = positiveNumber('PI_SUPERAGENT_REPORT_CAP', env.PI_SUPERAGENT_REPORT_CAP)
+  const workerMemoryGb = positiveNumber('PI_SUPERAGENT_WORKER_MEMORY_GB', env.PI_SUPERAGENT_WORKER_MEMORY_GB)
+  const workerCpus = positiveNumber('PI_SUPERAGENT_WORKER_CPUS', env.PI_SUPERAGENT_WORKER_CPUS)
+  const workerTasks = positiveNumber('PI_SUPERAGENT_WORKER_TASKS', env.PI_SUPERAGENT_WORKER_TASKS)
   return {
     dataDir, worktreeRoot: env.PI_SUPERAGENT_WORKTREES ?? `${dataDir}/work`,
     self: env.PI_SUPERAGENT_SELF ?? 'pi-superagent',
@@ -1501,6 +1515,12 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(workerQuietMinutes === undefined ? {} : { workerQuietMinutes }),
     ...(deadlineHours === undefined ? {} : { workerDeadlineHours: deadlineHours }),
     ...(reportCap === undefined ? {} : { reportCap: Math.floor(reportCap) }),
+    workerLimits: {
+      ...(env.PI_SUPERAGENT_WORKER_LIMITS === 'off' ? { off: true } : {}),
+      ...(workerMemoryGb === undefined ? {} : { memoryGb: workerMemoryGb }),
+      ...(workerCpus === undefined ? {} : { cpus: workerCpus }),
+      ...(workerTasks === undefined ? {} : { tasks: workerTasks }),
+    },
     ...(env.PI_SUPERAGENT_KEEP_ISSUES_OPEN === '1' ? { keepIssuesOpen: true } : {}),
     ...(env.PI_SUPERAGENT_WATCH_REPO_ASKS === '1' ? { watchRepoIsAsks: true } : {}),
     bots: new Set((env.PI_SUPERAGENT_BOTS ?? 'pi-*,fleet-*').split(',').map(s => s.trim()).filter(Boolean)),
