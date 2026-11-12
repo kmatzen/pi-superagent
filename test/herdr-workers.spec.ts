@@ -277,6 +277,19 @@ describe('herdr workers', () => {
     expect(JSON.parse(readFileSync(join(inbox, file!), 'utf8'))).toEqual({ text: 'the brief', mode: 'followUp' })
   })
 
+  it('a wake-up the worker set crosses the file bridge to the router', async () => {
+    const dir = tmp()
+    const wakes: Array<number | undefined> = []
+    const session = await new HerdrWorkers(options(dir, memoryHerdr().herdr))
+      .launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: (_s, _m, _q, _o, _p, wake) => { wakes.push(wake) } })
+    const off = session.subscribe(() => {})
+    appendFileSync(join(dir, 'workers', session.sessionId, 'reports.jsonl'),
+      '{"state":"waiting","summary":"run 31 trains","wakeInMinutes":60}\n{"state":"ready","summary":"done"}\n')
+    await until(() => wakes.length === 2)
+    expect(wakes).toEqual([60, undefined])
+    off()
+  })
+
   it("a run the worker filed as a silent finish reaches the router as one, not as the worker's own report", async () => {
     const dir = tmp()
     const origins: string[] = []

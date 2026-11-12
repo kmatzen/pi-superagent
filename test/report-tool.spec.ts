@@ -8,6 +8,21 @@ const answer = (outcome: ReportOutcome | void): string => {
 }
 
 describe('ticket_report', () => {
+  it('a waiting report needs a wake-up in range, a ready one cannot carry it, and the wake-up reaches the reporter', () => {
+    // Operator, 2026-11-12: someone always watches what a worker leaves running.
+    const calls: Array<number | undefined> = []
+    const tool = reportTool((_s, _m, _q, _o, _p, wake) => { calls.push(wake) })
+    const said = (args: Record<string, unknown>) => tool.execute('r', { summary: 'run 31 trains', ...args })
+    expect(said({ state: 'waiting' }).isError, 'waiting without a wake-up').toBe(true)
+    expect(said({ state: 'waiting', wakeInMinutes: 2 }).isError, 'too soon').toBe(true)
+    expect(said({ state: 'waiting', wakeInMinutes: 1000 }).isError, 'too late: nobody looks for 16 hours').toBe(true)
+    expect(said({ state: 'ready', wakeInMinutes: 60 }).isError, 'ready is finished work').toBe(true)
+    expect(calls, 'none of those reached the router').toEqual([])
+    expect(said({ state: 'waiting', wakeInMinutes: 60 }).isError).toBeUndefined()
+    expect(said({ state: 'blocked', question: 'Stop the idle pod?', wakeInMinutes: 30 }).isError, 'a question can keep a watch too').toBeUndefined()
+    expect(calls).toEqual([60, 30])
+  })
+
   it('says the work is reported when the router took the report', () => {
     expect(answer('recorded')).toBe('reported')
   })

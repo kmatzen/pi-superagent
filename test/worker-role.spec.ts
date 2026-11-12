@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { AFTER_HANDOVER, PERSON_FILE, SILENT_FINISH, SILENT_NUDGE_FILE, workerRole, type WorkerPi } from '../src/pi/worker-role.ts'
 import { NOT_ENGLISH } from '../src/pi/english.ts'
@@ -152,6 +152,28 @@ describe('the worker role', () => {
     expect(verdict('bash', { command: `gh pr create --title Split --body "${chinese}"` })).toMatchObject({ block: true, reason: NOT_ENGLISH })
     expect(verdict('bash', { command: 'gh pr create --title Split --body "Five stacked pull requests."' })).toBeUndefined()
     expect(verdict('bash', { command: `grep -rn "${chinese}" docs/` }), 'searching is not publishing').toBeUndefined()
+  })
+
+  it('a worker that still holds a Pluto claim cannot hand over or ask without a wake-up, and its wake-up reaches the router', () => {
+    // Operator, 2026-11-12: there should always be someone watching. A worker reported ready with run 31 training.
+    const dir = tmp()
+    const ledger = join(tmp(), 'pluto-jobs.json')
+    const today = new Date().toISOString().slice(0, 10)
+    const claim = (session: string, expiresAt: string) => ({ ref: `job-${session}`, session, authorizedBy: 'agent-self', reason: 'run 31', claimedAt: today, expiresAt })
+    writeFileSync(ledger, JSON.stringify({ entries: [claim(basename(dir), '2999-01-01'), claim('another-session', '2999-01-01')] }))
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir, PI_SUPERAGENT_WORKSPACE: '/w', PI_SUPERAGENT_CLAIMS_FILE: ledger })
+    const verdict = (toolName: string, input: Record<string, unknown>) => f.emit('tool_call', { toolName, input }).find(v => v)
+    expect(verdict('ticket_report', { state: 'ready', summary: 'shipped' }), 'ready, with a job still held')
+      .toMatchObject({ block: true, reason: expect.stringContaining(`job-${basename(dir)}`) })
+    expect(verdict('ask_user_question', { questions: [{ question: 'Stop the pod?' }] }), 'an ask hands over too').toMatchObject({ block: true })
+    expect(lines(join(dir, 'reports.jsonl')), 'the refused ask filed nothing').toEqual([])
+    expect(verdict('ticket_report', { state: 'waiting', summary: 'run 31 trains', wakeInMinutes: 60 }), 'a wake-up keeps the watch').toBeUndefined()
+    expect(verdict('ticket_report', { state: 'failed', summary: 'the pod died' }), 'failing hands nothing over').toBeUndefined()
+    f.tools.find(t => t.name === 'ticket_report')!.execute('c1', { state: 'waiting', summary: 'run 31 trains', wakeInMinutes: 60 })
+    expect(lines(join(dir, 'reports.jsonl'))).toMatchObject([{ state: 'waiting', wakeInMinutes: 60 }])
+    writeFileSync(ledger, JSON.stringify({ entries: [claim(basename(dir), '2000-01-01')] }))
+    expect(verdict('ticket_report', { state: 'ready', summary: 'shipped' }), 'an expired claim holds nothing').toBeUndefined()
   })
 
   it('a person typing in the tab lifts the handover, and leaves word for the router that a person is there', () => {

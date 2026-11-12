@@ -135,6 +135,10 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   'Do not edit the ticket and do not post reply comments: the router writes receipts, you report.',
   'Write in English: every pull request title and body, issue comment, commit message, code comment and ticket_report,',
   'whatever language you think in. Text in another language is refused before it is sent.',
+  'Someone always watches what you start. If you leave something running (a training job, CI, a deploy), report waiting',
+  'with wakeInMinutes, when it should next be checked, and say in the summary what to check: a fresh worker is called',
+  'back then. Report ready only when nothing you started still runs. While you hold a Pluto claim, a report or a question',
+  'without a wake-up is refused: schedule one, or stop the job and release the claim.',
   'This machine is shared: budget CPU and memory. Run builds and tests sequentially, cap parallel jobs',
   '(make -j4, pytest -n4, not an unbounded fan-out), avoid pulling huge caches, and stop every process',
   'you started before you report.',
@@ -195,7 +199,8 @@ export function scopeOf(config: RouterConfig): SourceScope {
       // the write-access rule below would filter the notice before the ticket that waits on the pull
       // request ever hears it (it did, on every deployment, from the day the notice shipped).
       // A merge of one of the ticket's pull requests is the same kind of fact, and only someone with write access merges.
-      if (meta.via === 'conflict' || meta.via === 'merge') return { listened: true, observed: false }
+      // A wake-up is the router keeping an appointment a worker made: its own notice, like the two above.
+      if (meta.via === 'conflict' || meta.via === 'merge' || meta.via === 'wake') return { listened: true, observed: false }
       const heard = config.allowed
         ? isListed(typeof meta.author === 'string' ? meta.author : '', config.allowed)
         : WRITERS.has(String(meta.association))
