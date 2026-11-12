@@ -57,6 +57,10 @@ export function trackerRows(ticket: Ticket, order: readonly string[], state: (th
     seen.add(id)
     refs.push(pull)
   }
+  // With no plan a report declared, a pull request closed unmerged is one the work dropped: a worker that folded nine
+  // into one left eight rows of noise (2026-11-12). A declared plan keeps it: someone said no to a step of it.
+  const kept = refs.filter(pull => sequence || follows.get(`github:${threadOfPull(pull, home).id}`)?.closed?.outcome !== 'closed')
+  refs.splice(0, refs.length, ...kept)
   const verdicts = refs.map(pull => {
     const id = threadOfPull(pull, home).id
     return verdict(state(id), follows.get(`github:${id}`)?.closed?.outcome)
@@ -129,7 +133,7 @@ export class PullTracker {
       // No report has ordered them yet: the set the comment first showed is the plan, so a merge stays on it as merged.
       const order = kept.order.length ? {} : { order: rows.map(r => r.url) }
       this.o.kv.set(key(ticket.id), { ...(this.o.kv.get<Kept>(key(ticket.id)) ?? kept), ...order, comment: written.id, url: written.url, hash })
-      this.o.log('tracker.written', { ticket: ticket.id, thread: channel.thread, comment: written.id, pulls: rows.length, merged: rows.filter(r => r.done).length })
+      this.o.log('tracker.written', { ticket: ticket.id, thread: channel.thread, comment: written.id, pulls: rows.length, merged: rows.filter(r => r.status === 'merged').length })
     } catch (error) {
       this.o.log('tracker.write_failed', { ticket: ticket.id, thread: channel.thread, error: String(error).slice(0, 200) })
     } finally {
