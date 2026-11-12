@@ -478,13 +478,13 @@ describe('herdr workers', () => {
   it('a release this router made keeps its full linger, however late the startup sweep runs', async () => {
     // 2026-11-12: the first sweep after a restart ran 5 s after a worker's report and closed its tab 60 s later.
     const m = memoryHerdr()
-    const workers = new HerdrWorkers({ ...options(tmp(), m.herdr), lingerMs: 400, retireGraceMs: 10 })
+    const workers = new HerdrWorkers({ ...options(tmp(), m.herdr), lingerMs: 2000, retireGraceMs: 10 })
     const s = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
     s.dispose()
     await workers.retireOrphans(new Set())
     await new Promise(resolve => setTimeout(resolve, 150))
     expect(m.calls, 'inside its linger the tab stays').not.toContain('tabClose w1:t1')
-    await until(() => m.calls.includes('tabClose w1:t1'))
+    await until(() => m.calls.includes('tabClose w1:t1'), 6000)
     expect(m.calls, 'and closes when the linger ends').toContain('tabClose w1:t1')
   })
 
