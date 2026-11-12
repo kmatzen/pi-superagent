@@ -7,7 +7,8 @@ import type { Reporter, ReportOrigin, ReportOutcome } from './report-tool.ts'
 
 export interface WorkerSession {
   readonly sessionId: string
-  prompt(text: string, mode: 'steer' | 'followUp'): void
+  /** Returns a name when the session can later say that a run took this prompt (`inputRead`). */
+  prompt(text: string, mode: 'steer' | 'followUp'): string | void
   subscribe(listener: (event: WorkerEvent) => void): () => void
   abort(): void
   dispose(): void
@@ -22,6 +23,8 @@ const NO_LIVE_WORKER = 'no live worker for this ticket'
 export type WorkerEvent =
   /** The session took queued input into a step: the engine may mark those Inputs read. */
   | { type: 'turnStarted' }
+  /** A running turn took the prompt that `prompt` named `name` into a step. */
+  | { type: 'inputRead'; name: string }
   | { type: 'settled' }
   | { type: 'failed'; error: string }
   /** Any other session event: tool calls and model output are what a busy worker emits for minutes on end. */
@@ -65,7 +68,7 @@ export interface ExecutorOptions {
 interface Live {
   session: WorkerSession
   unsubscribe: () => void
-  pendingRead: string[]
+  pendingRead: Array<{ name: string | undefined; ids: string[] }>
   /** On a run. A settled worker is parked: its session stays for follow-ups, but it holds no slot. */
   busy: boolean
   startedAt: number
@@ -211,8 +214,11 @@ export class PiExecutor {
       // An adopted worker's turn began before this process subscribed, so no turnStarted ever marks it busy.
       live.busy = event.type !== 'settled'
       if (event.type === 'turnStarted') {
-        const ids = live.pendingRead.splice(0)
+        const ids = live.pendingRead.splice(0).flatMap(batch => batch.ids)
         if (ids.length) this.engine.inputsRead(ticket.id, ids)
+      } else if (event.type === 'inputRead') {
+        const at = live.pendingRead.findIndex(batch => batch.name === event.name)
+        if (at >= 0) this.engine.inputsRead(ticket.id, live.pendingRead.splice(at, 1)[0]!.ids)
       } else if (event.type === 'failed') {
         // A crash is the session dying, not the work failing. Filing `failed` over a worker's own `ready` erased
         // a finished run, and the router relaunched tickets whose pull requests were already open for review
@@ -251,10 +257,10 @@ export class PiExecutor {
     // One prompt for the whole batch. Each `prompt` call is its own steering message, and pi steers the session
     // with the first while the rest queue: a review that arrived as five comments was answered one comment at a
     // time, with the other four invisible to the worker. Operator report 2026-11-09.
-    live.session.prompt(texts.length === 1 ? texts[0]!
+    const name = live.session.prompt(texts.length === 1 ? texts[0]!
       : `${texts.length} messages arrived since your last turn. Read them together before you answer:\n\n${texts.join('\n\n')}`, mode)
     this.engine.inputsDelivered(ticket.id, assignment.id, visible.map(i => i.id))
-    live.pendingRead.push(...visible.map(i => i.id))
+    live.pendingRead.push({ name: name || undefined, ids: visible.map(i => i.id) })
   }
 
   /**
