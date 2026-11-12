@@ -125,6 +125,10 @@ export interface ReconcileReport {
   atOnce: number
 }
 
+/** A comment that opens with an HTML marker is one a tool keeps updating (a CI dashboard, a coverage bot), whoever's
+ *  token posted it: it is automation, not the person, and it must not resume a ticket the way a person can. */
+const MACHINE_WRITTEN = /^\s*<!--[\s\S]*?-->/
+
 export class PullFollower {
   private readonly polled = new Map<string, number>()
   private readonly unreadable = new Set<string>()
@@ -312,6 +316,10 @@ export class PullFollower {
       for (const c of await this.options.api.comments(pull.repo, pull.number, since)) {
         if (c.at > newest) newest = c.at
         if (this.ours(c.author, c.body)) continue
+        // GitHub's `since` is last-update time, so an edited comment comes back; one created before the cursor was
+        // already read. Its new body made a new trigger id: a CI dashboard edited in place reached a worker as a fresh
+        // message from the operator on every CI run (2026-11-12).
+        if (Date.parse(c.at) < Date.parse(since)) continue
         this.options.receive(this.trigger(id, pull, c.author, c.association, c.at, c.body, 'comment',
           `github:${id}:${createHash('sha1').update(`${c.author}\u0000${c.at}\u0000${c.body}`).digest('hex').slice(0, 16)}`))
       }
@@ -353,7 +361,7 @@ export class PullFollower {
       source: 'github',
       threads: [{ source: 'github', id }],
       actor: { source: 'github', id: author },
-      human: !isListed(author, this.options.bots),
+      human: !isListed(author, this.options.bots) && !MACHINE_WRITTEN.test(text),
       at,
       text,
       // The repository rides in the address: the outbox posts to the repository a channel names, not the watched one.
