@@ -467,12 +467,48 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     if (origin === 'worker' && (awaitsAHuman(run.state) || run.state === 'ready')) {
       releaseIfWaiting(ticket.id, assignmentId, run.state)
     }
+    // The latest report decides whether anyone is called back: a wake-up replaces the last one, and a report without one ends it.
+    if (origin === 'worker') scheduleWake(ticket.id, run)
     pullEnded(ticket.id)
     // The report the person reads has gone out; these two bound what a finished ticket can do next.
     if (origin === 'worker') capRepeats(repos.tickets.get(ticket.id) ?? ticket, run)
     finishIssue(ticket.id)
   }
   const home = cfg.githubRepo ?? ''
+  // Someone always watches what a worker leaves running (operator, 2026-11-12): a report can call a fresh worker back
+  // at a set time, and the router keeps that appointment without a session or a slot held in between.
+  const WAKES = 'router:wakes'
+  const wakes = (): Record<string, { at: string; note: string }> => repos.kv.get<Record<string, { at: string; note: string }>>(WAKES) ?? {}
+  const scheduleWake = (ticketId: string, run: ReportedRun): void => {
+    const rows = wakes()
+    if (!run.wakeAt && !rows[ticketId]) return
+    if (run.wakeAt) rows[ticketId] = { at: run.wakeAt, note: run.summary.slice(0, 1200) }
+    else delete rows[ticketId]
+    repos.kv.set(WAKES, rows)
+    log.line('info', run.wakeAt ? 'wake.scheduled' : 'wake.cleared', { ticket: ticketId, ...(run.wakeAt ? { at: run.wakeAt } : {}) })
+  }
+  const fireWakes = (): void => {
+    const rows = wakes()
+    const now = deps.now ? Date.parse(deps.now()) : Date.now()
+    const due = Object.entries(rows).filter(([, row]) => Date.parse(row.at) <= now)
+    if (!due.length) return
+    for (const [ticketId, row] of due) {
+      delete rows[ticketId]
+      const ticket = repos.tickets.get(ticketId)
+      const channel = ticket?.channels[0]
+      if (!ticket || ticket.ended || !channel) { log.line('info', 'wake.dropped', { ticket: ticketId, why: 'the ticket ended' }); continue }
+      engine.receive({
+        id: `wake:${ticketId}:${row.at}`, source: channel.source, threads: [{ source: channel.source, id: channel.thread }],
+        actor: { source: channel.source, id: 'router' }, human: true, at: new Date(now).toISOString(),
+        text: `Wake-up: the last worker on this ticket asked for a check at ${row.at.slice(11, 16)} UTC, and said:\n\n${row.note}\n\n`
+          + 'Check on what it left running now. While it still runs, report waiting with a new wakeInMinutes; when it is done, '
+          + 'report the result, and stop or release anything still held.',
+        channel, meta: { via: 'wake', author: '' },
+      })
+      log.line('info', 'wake.fired', { ticket: ticketId, thread: channel.thread, at: row.at })
+    }
+    repos.kv.set(WAKES, rows)
+  }
   const pullApi = deps.pullApi ?? ghPulls(accounts.pulls)
 
   const closer = new IssueCloser({
@@ -908,6 +944,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       pollMs = Date.now() - pollAt
     }
     for (const trigger of triggers) engine.receive(trigger)
+    fireWakes()
     // One worker per thread: the sweep runs after intake so it sees the ticket the poll just opened, and it
     // stops the younger duplicate, which releases its agent, its tab and its slot like any other stop.
     // A running assignment with no worker is the one state every worker-walking sweep cannot see, so it gets its

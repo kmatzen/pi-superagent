@@ -7,6 +7,8 @@ export interface ReportedRun {
   question?: string | null
   /** The pull requests the ticket now follows, by URL. */
   pullRequests?: readonly string[]
+  /** When a fresh worker is called back to check what this run left running. */
+  wakeAt?: string
 }
 
 const STILL_OPEN = 'The worker is still open: reply here to steer it, or close the issue to drop the ticket.'
@@ -41,9 +43,11 @@ export function receiptText(thread: string, origin: ReportOrigin, run: ReportedR
       return `${thread}: the worker stopped without reporting a result.\n\n${STILL_OPEN}`
     case 'worker': {
       const pulls = run.pullRequests?.length ? pullLines(run.pullRequests, tracker) : ''
+      const next = run.wakeAt ? `\n\nNext check: a fresh worker looks at it at ${run.wakeAt.slice(11, 16)} UTC.` : ''
       if (run.state === 'blocked') {
-        return `${head}${pulls}\n\n${run.question ? `**Question:** ${run.question}\n\n` : ''}Reply here; the worker reads every comment.`
+        return `${head}${pulls}\n\n${run.question ? `**Question:** ${run.question}\n\n` : ''}Reply here; the worker reads every comment.${next}`
       }
+      if (run.state === 'waiting') return `${head}${pulls}${next}`
       if (run.state === 'failed') return `${head}${pulls}\n\n${STILL_OPEN}`
       if (run.state === 'ready' && !pulls) return `${head}\n\n${FINISHED}`
       return run.state === 'ready' && pulls ? `${head}${pulls}\n\n${(run.pullRequests?.length ?? 0) > 1 ? IN_REVIEW_MANY : IN_REVIEW}` : `${head}${pulls}`

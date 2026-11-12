@@ -1,6 +1,7 @@
 /** The superagent inside a worker's own pi: report tool, guard, and a file bridge to the router in another process. */
 import {appendFileSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync} from 'node:fs'
-import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { basename, join } from 'node:path'
 import { reportTool } from './report-tool.ts'
 import { guardExtension } from './workspace.ts'
 import { NOT_ENGLISH, nonEnglish, publishedText } from './english.ts'
@@ -73,14 +74,35 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   // A report that hands the ticket to a person frees this session at once: whatever the worker does after it, the router
   // never reads. Background-task wakes kept a freed worker running tools after its ready report (2026-11-12).
   let handedOver = false
-  pi.registerTool(reportTool((state, summary, question, _origin, pullRequests) => {
+  pi.registerTool(reportTool((state, summary, question, _origin, pullRequests, wakeInMinutes) => {
     reported = true
     if (HANDS_OVER.includes(state)) handedOver = true
-    append('reports.jsonl', { state, summary, question: question ?? null, ...(pullRequests?.length ? { pullRequests } : {}) })
+    append('reports.jsonl', { state, summary, question: question ?? null, ...(pullRequests?.length ? { pullRequests } : {}),
+      ...(wakeInMinutes !== undefined ? { wakeInMinutes } : {}) })
   }))
   pi.on('tool_call', (event?: unknown) => {
     if (!handedOver || (event as { toolName?: string }).toolName === 'ticket_report') return
     return { block: true, reason: AFTER_HANDOVER }
+  })
+  // Someone always watches what a worker leaves running (operator, 2026-11-12, after a training run went unwatched):
+  // a worker that still holds a Pluto claim hands over only with a wake-up scheduled, or after releasing the claim.
+  const claimsFile = env.PI_SUPERAGENT_CLAIMS_FILE ?? join(homedir(), '.pi', 'pluto-jobs.json')
+  const heldClaims = (): string[] => {
+    try {
+      const today = new Date().toISOString().slice(0, 10)
+      const ledger = JSON.parse(readFileSync(claimsFile, 'utf8')) as { entries?: Array<{ ref?: string; session?: string; expiresAt?: string }> }
+      return (ledger.entries ?? []).filter(e => e.session === basename(dir) && (!e.expiresAt || e.expiresAt >= today)).map(e => String(e.ref))
+    } catch { return [] }
+  }
+  const unwatched = (held: string[]): string => `Not reported: you still hold ${held.join(', ')}, and someone must keep watching what `
+    + 'runs there. Report waiting (or blocked) with wakeInMinutes for when a fresh worker should check it, or stop it and '
+    + 'release the claim first if it is done.'
+  pi.on('tool_call', (event?: unknown) => {
+    const call = event as { toolName?: string; input?: Record<string, unknown> }
+    if (call.toolName !== 'ticket_report' || !HANDS_OVER.includes(String(call.input?.state))) return
+    if (typeof call.input?.wakeInMinutes === 'number') return
+    const held = heldClaims()
+    if (held.length) return { block: true, reason: unwatched(held) }
   })
   pi.on('tool_call', (event?: unknown) => {
     const call = event as { toolName?: string; input?: Record<string, unknown> }
@@ -111,6 +133,8 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
     if (call.toolName !== 'ask_user_question') return
     const ask = askText(call.input?.questions)
     if (!ask) return
+    const held = heldClaims()
+    if (held.length) return { block: true, reason: unwatched(held) }
     reported = true
     handedOver = true
     append('reports.jsonl', { state: 'blocked', summary: ask, question: ask, origin: 'ask' })
