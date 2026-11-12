@@ -30,6 +30,7 @@ describe('how work reaches a repository', () => {
   })
 
   it('asks for every pull request of a multi-repository change, in the order a person merges them', () => {
+    expect(pullBrief('o/r#7')).toMatch(/comments on the code numbered: answer every number[\s\S]*list each number with what you did/)
     expect(pullBrief('o/r#7')).toMatch(/several pull requests,\s+in one repository or across several, list every one in pullRequests in the order a person should merge them/)
   })
 })

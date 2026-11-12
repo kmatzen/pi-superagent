@@ -185,6 +185,7 @@ case "$*" in
   "api repos/x/y/pulls/404") echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
   "api repos/x/y/pulls/502") echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
   "api repos/x/y/issues/11/comments?"*since=*) echo '[{"user":{"login":"rev"},"author_association":"MEMBER","created_at":"2026-11-06T09:00:00Z","body":"rename it"}]' ;;
+  "api repos/x/y/pulls/11/reviews/5/comments?"*) echo '[{"path":"src/a.py","line":12,"body":"a smell","html_url":"https://github.com/x/y/pull/11#discussion_r1"},{"path":"b.yaml","line":null,"original_line":3,"body":"again","html_url":"u2"}]' ;;
   "api repos/x/y/pulls/11/reviews?"*) echo '[{"id":5,"user":{"login":"rev"},"author_association":"OWNER","state":"APPROVED","submitted_at":"2026-11-06T09:30:00Z","body":""},{"id":6,"state":"PENDING"}]' ;;
   "api -X POST repos/x/y/issues/11/comments --input -") cat - > "$(dirname "$0")/posted.json" ;;
   *) echo "unexpected: $*" >&2; exit 1 ;;
@@ -195,6 +196,12 @@ esac
 }
 
 describe('ghPulls', () => {
+  it("reads one review's comments on the code, with the line it was left on", async () => {
+    expect(await ghPulls({ bin: fakePullsGh().bin }).reviewComments!('x/y', 11, 5)).toEqual([
+      { path: 'src/a.py', line: 12, body: 'a smell', url: 'https://github.com/x/y/pull/11#discussion_r1' },
+      { path: 'b.yaml', line: 3, body: 'again', url: 'u2' }])
+  })
+
   it('reads what a status comment shows: title, draft, merge readiness and who merged', async () => {
     expect(await ghPulls({ bin: fakePullsGh().bin }).pull('x/y', 12)).toMatchObject({
       merged: true, title: 'kit: build-heap CLI', draft: false, mergeableState: 'unknown', mergedBy: 'octocat' })
