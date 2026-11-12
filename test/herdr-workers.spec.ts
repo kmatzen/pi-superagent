@@ -461,6 +461,33 @@ describe('herdr workers', () => {
     expect(m.calls).not.toContain(`sendKeys ${agentName('#7', fresh.sessionId)} esc`)
   })
 
+  it('an orphan the startup sweep retires closes within the retire grace, busy or not', async () => {
+    const dir = tmp()
+    const m = memoryHerdr()
+    const stopped: string[] = []
+    const before = new HerdrWorkers(options(dir, m.herdr))
+    const orphan = await before.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    for (const a of m.agents.values()) a.agent_status = 'working'
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const workers = new HerdrWorkers({ ...options(dir, m.herdr), lingerMs: 60_000, retireGraceMs: 10, stopScope: id => { stopped.push(id) } })
+    expect((await workers.retireOrphans(new Set())).map(r => r.sessionId)).toEqual([orphan.sessionId])
+    await until(() => stopped.length > 0, 1000)
+    expect(stopped, 'ended at the grace, not after a ten-minute linger').toEqual([orphan.sessionId])
+  })
+
+  it('a release this router made keeps its full linger, however late the startup sweep runs', async () => {
+    // 2026-11-12: the first sweep after a restart ran 5 s after a worker's report and closed its tab 60 s later.
+    const m = memoryHerdr()
+    const workers = new HerdrWorkers({ ...options(tmp(), m.herdr), lingerMs: 400, retireGraceMs: 10 })
+    const s = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    s.dispose()
+    await workers.retireOrphans(new Set())
+    await new Promise(resolve => setTimeout(resolve, 150))
+    expect(m.calls, 'inside its linger the tab stays').not.toContain('tabClose w1:t1')
+    await until(() => m.calls.includes('tabClose w1:t1'))
+    expect(m.calls, 'and closes when the linger ends').toContain('tabClose w1:t1')
+  })
+
   it('a close the previous router scheduled is not lost to a restart', async () => {
     const dir = tmp()
     const m = memoryHerdr()
