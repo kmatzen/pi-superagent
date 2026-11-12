@@ -199,7 +199,11 @@ export class HerdrWorkers {
     // agent on a ticket that had moved on. The interrupt above asks; a bounded grace then closes, even at a busy one.
     const retireGraceMs = this.options.retireGraceMs ?? 60_000
     const open = new Set((await this.options.herdr.tabList().catch(() => [])).map(tab => tab.tabId))
-    for (const record of this.records(true).filter(r => r.endedAt && open.has(r.tabId) && !retired.includes(r))) {
+    // This router's own releases keep their own linger: run after a fresh release, this sweep closed a tab 65 s after
+    // its worker's report (2026-11-12). The grace is for closes the previous router owed and the orphans retired above.
+    const retiredIds = new Set(retired.map(r => r.sessionId))
+    for (const record of this.records(true).filter(r => r.endedAt && open.has(r.tabId)
+      && (Date.parse(r.endedAt) <= this.born || retiredIds.has(r.sessionId)))) {
       // A close the previous router owed is not lost to the restart: schedule it when it is due, and never later
       // than the retire grace, which is the budget that ends a busy agent's keep.
       const due = Math.max(0, Date.parse(record.endedAt!) + (this.options.lingerMs ?? 600_000) - Date.now())
