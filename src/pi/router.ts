@@ -133,6 +133,8 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   'This machine is shared: budget CPU and memory. Run builds and tests sequentially, cap parallel jobs',
   '(make -j4, pytest -n4, not an unbounded fan-out), avoid pulling huge caches, and stop every process',
   'you started before you report.',
+  'Waiting on CI: poll it one step per command (`gh pr checks`, then `sleep 60` at most, and again), never one long',
+  'wait: a person\'s review reaches you only between commands, and the guard refuses longer waits.',
 ].join('\n')
 
 /** How work reaches a repository: a pull request the ticket then waits on. Work that changes no repository ends as before. */

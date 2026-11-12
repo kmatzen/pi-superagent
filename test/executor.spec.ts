@@ -158,6 +158,18 @@ describe('PiExecutor', () => {
     expect(session.prompts.at(-1), 'a running worker must not be interrupted mid-step').toEqual({ text: 'input i2', mode: 'followUp' })
   })
 
+  it('a person\'s review steers a running worker at its next step, and a bot\'s still waits its turn', () => {
+    // 2026-11-12: workers polling CI ran for an hour, and the operator's review queued behind the whole run.
+    const f = fixture()
+    const session = new FakeSession('kept')
+    f.executor.adopt(ticket(), assignment(), report => { session.report = report as never; return session })
+    session.emit({ type: 'activity' })
+    f.executor.deliver(ticket({ inputs: [input('i1', 'trigger', { human: true })], undelivered: ['i1'] }), assignment())
+    expect(session.prompts.at(-1)?.mode, 'a person is heard at the next tool boundary').toBe('steer')
+    f.executor.deliver(ticket({ inputs: [input('i2', 'trigger')], undelivered: ['i2'] }), assignment())
+    expect(session.prompts.at(-1)?.mode, 'CI and bots still wait for the run to end').toBe('followUp')
+  })
+
   it('a busy worker is not quiet, and a quiet stretch is reported once', async () => {
     const f = fixture()
     f.executor.start(ticket(), assignment())
