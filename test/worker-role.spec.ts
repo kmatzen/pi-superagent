@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { SILENT_FINISH, SILENT_NUDGE_FILE, workerRole, type WorkerPi } from '../src/pi/worker-role.ts'
+import { AFTER_HANDOVER, SILENT_FINISH, SILENT_NUDGE_FILE, workerRole, type WorkerPi } from '../src/pi/worker-role.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'wrole-')); dirs.push(d); return d }
@@ -108,6 +108,7 @@ describe('the worker role', () => {
     const dir = tmp()
     const f = fakePi()
     workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir })
+    expect(f.emit('tool_call', { toolName: 'read', input: { path: '/w/a.ts' } }).every(v => v === undefined), 'every other tool is untouched').toBe(true)
     const verdicts = f.emit('tool_call', {
       toolName: 'ask_user_question',
       input: { questions: [{ question: 'Fix the shared harness too?', options: [{ label: 'Just my PR' }, { label: 'A second PR' }] }] },
@@ -116,14 +117,33 @@ describe('the worker role', () => {
     expect(lines(join(dir, 'reports.jsonl')).at(-1), 'the question, with its options, reaches the router').toMatchObject({
       state: 'blocked', question: 'Fix the shared harness too?\n1. Just my PR\n2. A second PR', origin: 'ask',
     })
-    expect(f.emit('tool_call', { toolName: 'read', input: { path: '/w/a.ts' } }).every(v => v === undefined), 'every other tool is untouched').toBe(true)
+  })
+
+  it('a report that hands the ticket over is the last act: every tool after it is refused, with the reason', () => {
+    // 2026-11-12: a worker reported ready, kept refactoring unasked in its freed session, and was ended mid-change, unpushed.
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp(), PI_SUPERAGENT_WORKSPACE: '/w' })
+    const report = f.tools.find(t => t.name === 'ticket_report')!
+    expect(f.emit('tool_call', { toolName: 'bash', input: { command: 'make test' } }).some(v => v), 'before it, tools run').toBe(false)
+    report.execute('c1', { state: 'failed', summary: 'tests red' })
+    expect(f.emit('tool_call', { toolName: 'bash', input: { command: 'make test' } }).some(v => v), 'a failure hands nothing over').toBe(false)
+    report.execute('c2', { state: 'ready', summary: 'all six answered' })
+    const [verdict] = f.emit('tool_call', { toolName: 'read', input: { path: '/w/loaders.py' } })
+    expect(verdict).toMatchObject({ block: true, reason: AFTER_HANDOVER })
+    expect(f.emit('tool_call', { toolName: 'ticket_report', input: {} }).some(v => v), 'a correction can still be filed').toBe(false)
+  })
+
+  it('asking a person hands the ticket over too', () => {
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp(), PI_SUPERAGENT_WORKSPACE: '/w' })
+    f.emit('tool_call', { toolName: 'ask_user_question', input: { questions: [{ question: 'Make it uniform?' }] } })
+    expect(f.emit('tool_call', { toolName: 'bash', input: { command: 'git push' } }).find(v => v)).toMatchObject({ block: true, reason: AFTER_HANDOVER })
   })
 
   it('the guard refuses delegation inside the worker, where it now runs', () => {
     const f = fakePi()
     workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp(), PI_SUPERAGENT_WORKSPACE: '/w' })
-    const [verdict] = f.emit('tool_call', { toolName: 'subagent', input: {} })
-    expect(verdict).toMatchObject({ block: true })
+    expect(f.emit('tool_call', { toolName: 'subagent', input: {} }).find(Boolean)).toMatchObject({ block: true })
     expect(f.emit('tool_call', { toolName: 'read', input: { path: '/w/a.ts' } })[0]).toBeUndefined()
   })
 
