@@ -96,6 +96,18 @@ describe('herdr workers', () => {
     expect([...m.agents.keys()].filter(n => n.startsWith('sa-')), 'one live worker on the ticket').toHaveLength(1)
   })
 
+  it('a released worker whose pi died has its scope stopped, so the jobs it left run on for no one', async () => {
+    // OOMPolicy=continue keeps a scope alive after its pi is the process killed, background jobs and all.
+    const m = memoryHerdr()
+    const stopped: string[] = []
+    const workers = new HerdrWorkers({ ...options(tmp(), m.herdr), lingerMs: 10, stopScope: id => { stopped.push(id) } })
+    const s = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    m.agents.clear()
+    s.dispose()
+    await until(() => stopped.length === 1)
+    expect(stopped).toEqual([s.sessionId])
+  })
+
   it('a released worker a background task keeps busy is closed after its bounded keep, scope included', async () => {
     const m = memoryHerdr()
     const stopped: string[] = []
@@ -391,7 +403,8 @@ describe('herdr workers', () => {
   it("closes its own dead workers' tabs, and never a tab it has no record of: another router's worker may live there", async () => {
     const dir = tmp()
     const m = memoryHerdr()
-    const workers = new HerdrWorkers(options(dir, m.herdr))
+    const stopped: string[] = []
+    const workers = new HerdrWorkers({ ...options(dir, m.herdr), stopScope: id => { stopped.push(id) } })
     await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
     m.agents.set('sa-old-1111', { name: 'sa-old-1111', pane_id: 'w1:p9', agent: 'pi', agent_status: 'idle' })
     m.agents.set('sa-busy-2222', { name: 'sa-busy-2222', pane_id: 'w1:p8', agent: 'pi', agent_status: 'working' })
@@ -410,6 +423,7 @@ describe('herdr workers', () => {
     }))
     m.agents.set('ghost', { name: 'ghost', pane_id: 'w1:p6', agent: 'pi', agent_status: 'unknown' })
     expect(await workers.closeStaleTabs('superagent')).toEqual(['w1:t6'])
+    expect(stopped, 'and what the dead pi left running in its scope').toEqual(['zombie'])
     expect(m.calls.some(c => c.includes('w1:t9')), 'no record here: a test router once killed every live worker this way').toBe(false)
     expect(m.calls.some(c => c.includes('w1:t8') || c.includes('w1:t7'))).toBe(false)
   })

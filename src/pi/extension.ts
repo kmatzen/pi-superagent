@@ -24,7 +24,7 @@ import { openWorkerView } from './worker-view.ts'
 import { herdrCli, type Herdr } from './herdr.ts'
 import { HerdrWorkers } from './herdr-workers.ts'
 import { cpus, totalmem } from 'node:os'
-import { installShim, limitsBrief, limitsFor, scopesWork } from './worker-limits.ts'
+import { capWorkerGroup, groupLimits, installShim, limitsBrief, limitsFor, scopesWork, type GroupLimits } from './worker-limits.ts'
 import { reportTool, type ReportOrigin } from './report-tool.ts'
 import { pullEndText, receiptText, type ReportedRun } from './receipts.ts'
 import { isListed } from './authors.ts'
@@ -131,6 +131,8 @@ export interface ExtensionDeps {
   workerTiming?: { pollMs?: number; livenessMs?: number }
   /** Tests: whether systemd user scopes work here (the default probes the host). */
   scopesWork?: () => boolean
+  /** Tests: caps every worker together (the default sets the slice's limits through systemctl). */
+  capWorkerGroup?: (group: GroupLimits) => boolean
 }
 
 export interface RunningRouter {
@@ -655,6 +657,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const limitBin = limits && (deps.scopesWork ?? scopesWork)() ? installShim(cfg.dataDir, limits) : undefined
   if (limits && limitBin) log.line('info', 'worker.limits', { memoryMaxBytes: limits.memoryMaxBytes, cpuPercent: limits.cpuPercent, tasksMax: limits.tasksMax })
   else if (limits) log.line('warn', 'worker.limits_unavailable', { reason: 'no systemd user scopes on this host; workers run unconfined' })
+  const group = limits && limitBin ? groupLimits(totalmem(), cpus().length) : undefined
+  const grouped = group ? (deps.capWorkerGroup ?? capWorkerGroup)(group) : false
+  if (group && grouped) log.line('info', 'worker.group_limits', { memoryMaxBytes: group.memoryMaxBytes, cpuPercent: group.cpuPercent })
+  else if (group) log.line('warn', 'worker.group_limits_unavailable', { reason: 'systemctl set-property failed; each worker keeps its own cap only' })
   const herdrWorkers = cfg.workers === 'herdr'
     ? new HerdrWorkers({ herdr: deps.herdr ?? herdrCli(cfg.herdrBin), stateDir: cfg.dataDir, log,
       ...(cfg.herdrWorkspace ? { workspaceLabel: cfg.herdrWorkspace } : {}), ...deps.workerTiming, ...(cfg.workerStartMs ? { startTimeoutMs: cfg.workerStartMs } : {}) })
@@ -734,7 +740,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const brief = briefFor(ticket, `${cfg.worktreeRoot}/${ticket.id}`) + (before
         ? `\nA previous worker on this ticket stopped (${before.summary}); anything it changed is still in the workspace, so check it before starting over.`
         : '')
-        + (limits && limitBin ? `\n${limitsBrief(limits)}` : '')
+        + (limits && limitBin ? `\n${limitsBrief(limits, grouped ? group : undefined)}` : '')
       const address = ticket.channels[0]?.source === 'github' ? ticket.channels[0].address as { issue?: string; repo?: string } : undefined
       const issue = address?.issue
       const repo = address?.repo ?? cfg.githubRepo
