@@ -62,8 +62,9 @@ export interface GithubSourceOptions {
    * The standing queue re-earns its launch: an open issue with no worker
    * on it, is work. The router answers yes within a cap and says no after it, and the counter lives in the
    * router's store. No label marks it: labels are gone (operator, 2026-11-10, "These labels are obsolete").
+   * A string names the grant: trigger ids are kept forever, so a second grant of an untouched issue needs a new name.
    */
-  regrant?: (issue: number, key: string) => boolean
+  regrant?: (issue: number, key: string) => boolean | string
   /** The open board on every poll: the router publishes how much open work waits for a slot, and nobody
    *  downstream may re-read GitHub to find out. */
   onOpen?: (open: readonly IssueState[]) => void
@@ -194,7 +195,8 @@ export class GithubSource {
       } else if (this.options.regrant && this.isHuman(issue.author)) {
         // A standing ask is any open issue a person or an agent filed. The ROUTER decides, because it is
         // the only party that knows whether a worker is or was on this thread; the counter there caps the loop.
-        if (this.options.regrant(issue.issue, key)) out.push(this.requestTrigger(issue, 'grant', key))
+        const grant = this.options.regrant(issue.issue, key)
+        if (grant) out.push(this.requestTrigger(issue, 'grant', key, typeof grant === 'string' ? grant : undefined))
       }
     }
     // The cap is a decision, not an accident: past 4000 open issues the oldest key is forgotten, and an issue
@@ -205,9 +207,9 @@ export class GithubSource {
 
   /** A request that comes from an issue itself. The id carries `via` and the issue's update time, so a reopen,
    *  or an edit is a new request: the engine dedups trigger ids forever. */
-  private requestTrigger(issue: IssueState, via: 'issue' | 'grant', key: string): Trigger {
+  private requestTrigger(issue: IssueState, via: 'issue' | 'grant', key: string, name?: string): Trigger {
     return {
-      id: `github:#${issue.issue}:${via}:${createHash('sha1').update(`${issue.title}\u0000${issue.updatedAt}`).digest('hex').slice(0, 8)}`,
+      id: `github:#${issue.issue}:${via}:${createHash('sha1').update(`${issue.title}\u0000${issue.updatedAt}`).digest('hex').slice(0, 8)}${name ? `:${name}` : ''}`,
       source: 'github',
       threads: [{ source: 'github', id: key }],
       actor: { source: 'github', id: issue.author },

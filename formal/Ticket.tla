@@ -129,7 +129,9 @@ Launch(k) ==
      /\ Len(asg) > 0
      /\ asg[Len(asg)] = "pend"
      /\ \A i \in 1..Len(asg) : asg[i] # "run"
-     /\ tickets' = [tickets EXCEPT ![k].asg = [asg EXCEPT ![Len(asg)] = "run"]]
+     (* Assignments.started delivers what waits (`executor.deliver`): the worker has the person's messages now. Kept
+        waiting here, they made every swept ticket look answered and hid the orphan R7 is about. *)
+     /\ tickets' = [tickets EXCEPT ![k].asg = [asg EXCEPT ![Len(asg)] = "run"], ![k].humanIn = {}]
   /\ working' = working \cup {k}
   /\ gone' = gone \ {k}
   (* `released` is the latest Assignment's end reason in code, so a worker starting clears the flag: the ticket
@@ -247,6 +249,19 @@ Resurrect(k) ==
   /\ released' = [released EXCEPT ![k] = FALSE]
   /\ UNCHANGED <<pullOpen, working, gone, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
 
+(* The router's standing re-grant (`standingAskEntitled` and the `regrant` callback in extension.ts): a live ticket
+   the fleet freed with nothing asked of a person (a dead Session swept, a draft pull request perhaps open) gets a
+   fresh Assignment with no person's message to start it. R7 is the claim this action exists to make true. *)
+Regrant(k) ==
+  /\ released[k]
+  /\ tickets[k].state = "live"
+  /\ tickets[k].humanIn = {}
+  /\ ~asksAHuman(k)
+  /\ Len(tickets[k].asg) < MaxAsg
+  /\ tickets' = [tickets EXCEPT ![k].asg = Append(tickets[k].asg, "pend"), ![k].lastReport = "none"]
+  /\ released' = [released EXCEPT ![k] = FALSE]
+  /\ UNCHANGED <<pullOpen, working, gone, batch, delivered, evalQ, evaluating, ackPend, ackSent>>
+
 (* Tickets.wake (tickets.ts): an ended ticket resumes under its unchanged Mandate on a
   person's undelivered message. A stop withdraws the Mandate, so it closes the door — with one
   exception the operator's own notices promise: the conversation stop, whose ending was GitHub
@@ -318,6 +333,7 @@ Next ==
   \/ \E k \in TicketIds : SessionDies(k)
   \/ \E k \in TicketIds : Sweep(k)
   \/ \E k \in TicketIds : Resurrect(k)
+  \/ \E k \in TicketIds : Regrant(k)
   \/ \E k \in TicketIds : Retry(k)
   \/ \E k \in TicketIds : Wake(k)
   \/ \E th \in Threads, k \in TicketIds : StopByHuman(th, k)
@@ -329,7 +345,7 @@ Fairness ==
   /\ \A th \in Threads : WF_vars(StartEval(th)) /\ WF_vars(VerdictIgnore(th))
   /\ \A th \in Threads, k \in TicketIds : WF_vars(VerdictAccept(th, k))
   /\ \A k \in TicketIds : WF_vars(Launch(k)) /\ WF_vars(Report(k, "ready")) /\ WF_vars(Wake(k))
-  /\ \A k \in TicketIds : WF_vars(Release(k)) /\ WF_vars(Resurrect(k))
+  /\ \A k \in TicketIds : WF_vars(Release(k)) /\ WF_vars(Resurrect(k)) /\ WF_vars(Regrant(k))
   /\ \A k \in TicketIds : WF_vars(Sweep(k)) /\ WF_vars(MergePull(k))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -413,6 +429,15 @@ R5_ReadyWaitsWithNoWorker ==
    message then starts a fresh worker (R2). Measured 2026-11-09: 21 assignments 4h+ on dead Sessions, oldest 34.7h. *)
 R6_DeadSessionIsFreed ==
   []<>\A k \in TicketIds : k \in gone => k \notin working
+
+(* R7. An orphan is never stranded: a live ticket the fleet freed with nothing asked of a person (no question, no
+   delivered pull request awaiting a merge) eventually runs a worker again, though no person speaks. Measured
+   2026-11-12: four tickets sat six hours that way, each behind a draft pull request the old rule read as delivered. *)
+R7_OrphanGetsAWorker ==
+  \A k \in TicketIds : (released[k] /\ tickets[k].state = "live" /\ ~asksAHuman(k)) ~>
+    ((\E i \in 1..Len(tickets[k].asg) : tickets[k].asg[i] = "run")
+      \/ tickets[k].state # "live"
+      \/ Len(tickets[k].asg) = MaxAsg)   (* the model's assignment bound; the code's is REGRANT_CAP a day *)
 
 (* W1. A worker Session belongs to a live ticket: an ended, stopped, dropped or merged ticket never holds one.
    This is what makes R5 and R6 about the agent rather than about an unused variable. *)

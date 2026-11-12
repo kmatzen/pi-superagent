@@ -4,8 +4,16 @@
 > absolutely be processed." Where a line below says *labelled asks*, read **open issues**: every one is work,
 > whoever opened it (the separate ask system, and the title verbs that kept its issues out, went on 2026-11-11). What keeps a
 > finished issue from churning is not a label: it is `standingAskEntitled` (an ended assignment whose worker
-> released, no live worker, no report awaiting a human, no open pull request on the ticket) and `REGRANT_CAP`
+> released, no live worker, no report awaiting a human, no delivered pull request still open) and `REGRANT_CAP`
 > of two launches per issue per day. Lines below keep their original wording where they record a measurement.
+>
+> **Amendment, 2026-11-12: orphans come back by themselves.** Four tickets lost their workers to router restarts
+> while each had a draft pull request open, and the rule above then read "no open pull request" for every report,
+> so none was re-granted: six hours with no worker and no notice. An open pull request now parks a ticket only when
+> its worker reported it `ready`. A restart relaunches on a fresh assignment (`retryTicket`) instead of the dead
+> one, whose start time made the queued relaunch look stale; a launch re-checks its assignment when its slot frees;
+> each grant carries its own name, because the engine keeps trigger ids forever; and an issue whose request is
+> still with the judge is not granted. `formal/Ticket.tla` R7 is the claim: an orphan eventually has a worker.
 
 Status: L2 shipped (2026-11-10); L1, L3, L4 proposed. Owner: the router's operator. Affects `src/pi` (executor,
 extension), the panel's load line, `formal/`, and one scheduled audit. No `src/core` change is required for the
