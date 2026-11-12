@@ -228,6 +228,7 @@ export class HerdrWorkers {
         .then(a => a !== undefined)
         .catch(e => !(e instanceof HerdrError && e.code === 'agent_not_found'))
       if (live) continue
+      ;(this.options.stopScope ?? stopWorkerScope)(owner.sessionId)
       await this.options.herdr.tabClose(tab.tabId).catch(() => {})
       closed.push(tab.tabId)
     }
@@ -395,10 +396,11 @@ export class HerdrWorkers {
     return Math.max(this.personAt(record) ?? 0, events, Date.parse(record.endedAt ?? '') || 0)
   }
 
-  /** A timer set at one release must not act on the record once a launch has given it work again, or freed it anew. */
+  /** A release's timers stop once the tab is settled, or a launch gave the record work again or freed it anew. */
   private stillReleased(record: WorkerRecord): boolean {
     try {
-      return (JSON.parse(readFileSync(join(record.dir, 'worker.json'), 'utf8')) as WorkerRecord).endedAt === record.endedAt
+      const disk = JSON.parse(readFileSync(join(record.dir, 'worker.json'), 'utf8')) as WorkerRecord
+      return disk.endedAt === record.endedAt && !disk.tabSettledAt
     } catch { return true }
   }
 
@@ -462,6 +464,8 @@ export class HerdrWorkers {
       return
     }
     if (agent?.pane_id !== record.paneId) {
+      // Its pi is gone, and since OOMPolicy=continue the scope outlives it: jobs it started would run on, unowned.
+      ;(this.options.stopScope ?? stopWorkerScope)(record.sessionId)
       this.options.log.line('info', 'worker.tab_kept', { agent: record.agent, tab: record.tabId, status: 'gone' })
       settle()
       return
