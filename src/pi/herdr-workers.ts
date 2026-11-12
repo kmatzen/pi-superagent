@@ -67,6 +67,9 @@ export class HerdrWorkers {
   private workspaceId: string | undefined
   private readonly root: string
   private readonly born = Date.now()
+  /** Workers this process released, whose own linger timers are running: by identity, since a clock cannot tell a
+   *  release in this router's first millisecond from one the previous router made. */
+  private readonly releasedHere = new Set<string>()
 
   constructor(private readonly options: HerdrWorkersOptions) {
     this.root = join(options.stateDir, 'workers')
@@ -203,7 +206,7 @@ export class HerdrWorkers {
     // its worker's report (2026-11-12). The grace is for closes the previous router owed and the orphans retired above.
     const retiredIds = new Set(retired.map(r => r.sessionId))
     for (const record of this.records(true).filter(r => r.endedAt && open.has(r.tabId)
-      && (Date.parse(r.endedAt) <= this.born || retiredIds.has(r.sessionId)))) {
+      && (!this.releasedHere.has(r.sessionId) || retiredIds.has(r.sessionId)))) {
       // A close the previous router owed is not lost to the restart: schedule it when it is due, and never later
       // than the retire grace, which is the budget that ends a busy agent's keep.
       const due = Math.max(0, Date.parse(record.endedAt!) + (this.options.lingerMs ?? 600_000) - Date.now())
@@ -314,7 +317,7 @@ export class HerdrWorkers {
         // killed the router, and the unsaved cursor replayed it into every restart (2026-11-12: a ready with a question).
         try {
           report(String(r.state), String(r.summary), typeof r.question === 'string' ? r.question : null, r.origin === 'silent' ? 'silent' : 'worker',
-            pulls.length ? pulls : undefined)
+            pulls.length ? pulls : undefined, typeof r.wakeInMinutes === 'number' ? r.wakeInMinutes : undefined)
         } catch (error) {
           log.line('warn', 'worker.report_refused', { agent: record.agent, error: String(error).slice(0, 200) })
         }
@@ -362,6 +365,7 @@ export class HerdrWorkers {
       abort: () => { void herdr.agentSendKeys(record.agent, ['esc']).catch(() => {}) },
       dispose: () => {
         stopTimers()
+        this.releasedHere.add(record.sessionId)
         record.endedAt = new Date().toISOString()
         writeFileSync(join(record.dir, 'worker.json'), JSON.stringify(record, null, 2))
         setTimeout(() => { void this.closeIfIdle(record) }, this.options.lingerMs ?? 600_000).unref()
