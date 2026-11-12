@@ -322,6 +322,19 @@ describe('GithubSource', () => {
     expect(f.kv.has('source:github:o/r:label-grants'), 'no grant journal is kept').toBe(false)
   })
 
+  it('a grant the router names is a request of its own, so an untouched issue granted twice fires twice', async () => {
+    // Trigger ids are kept forever: a second grant named like the first was a duplicate, and the orphan stayed one.
+    const f = fixture([], [issue({ issue: 214, title: 'Keep the panel green' })])
+    f.store.set('source:github:o/r:issues', ['#214'])
+    const names = ['assignment-1', 'assignment-2']
+    const source = new GithubSource(f.api, { repo: 'o/r', self: 'superagent[bot]', regrant: () => names.shift() ?? false }, f.store)
+    source.bootstrap()
+    const first = await source.poll()
+    const second = await source.poll()
+    expect([...first, ...second].map(tr => tr.id)).toEqual([
+      expect.stringMatching(/^github:#214:grant:\w+:assignment-1$/), expect.stringMatching(/^github:#214:grant:\w+:assignment-2$/)])
+  })
+
   it('every open issue is standing work, whatever its title or author; a bot\'s issue is not', async () => {
     // Operator, 2026-11-10: "unlabeled issues should absolutely be processed"; 2026-11-11: the ask system is gone,
     // and with it the title verbs that kept its issues out. A bot's issue is not a person's request, as on first sight.

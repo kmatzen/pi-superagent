@@ -40,9 +40,9 @@ import { briefFor, ghAccounts, loadSdk, policyOf, pullBrief, scopeOf, type Route
  */
 /**
  * The qualification for a standing ask to re-earn its launch: there is work on the thread, it is not
- * finished, its worker's assignment ended by release, and no agent is live on it. A ticket that reported
- * `ready` is delivered work, not a queue entry; a ticket with a worker is running. Written after the live
- * check 2026-11-10 proved the label journal cannot answer this question.
+ * finished, its worker's assignment ended by release, and no agent is live on it. A ticket whose worker reported
+ * `ready` on a pull request still open is delivered work, not a queue entry; a ticket with a worker is running.
+ * Written after the live check 2026-11-10 proved the label journal cannot answer this question.
  */
 export const standingAskEntitled = (
   ticket: { id?: string, ended?: unknown,
@@ -60,23 +60,23 @@ export const standingAskEntitled = (
   // labels are obsolete (operator, 2026-11-10), so the predicate has to say it on purpose. A worker that reported
   // ready and then died must not be replaced by a second worker opening a competing pull request.
   if (awaitsAHumanState(last.report?.state ?? '')) return false
-  // The same park, seen from the other side: the ticket follows a pull request that has not landed, so the
-  // change exists and a fresh worker would compete with it. Measured on the live board the day the label fence
-  // came down: an unlabelled ticket with a pull request under review became re-grantable, and the delivery
-  // test caught the second worker before the board did.
-  if ((ticket.follows ?? []).some(f => !f.closed)) return false
+  // The same park from the other side: delivered work under review, which a fresh worker would compete with (2026-11-10).
+  // Not a draft a lost run left open: four tickets sat orphaned behind theirs for six hours (2026-11-12).
+  if (last.report?.state === 'ready' && (ticket.follows ?? []).some(f => !f.closed)) return false
   return !liveWorkers.some(w => ticket.id !== undefined && w.ticketId === ticket.id)
 }
 
 export const REGRANT_CAP = 2
 
-/** May a thread be re-granted? An open ticket: by its work's state. No ticket ever: yes, it is starved work. Only
- *  ended tickets: no, the work is decided (finished, awaiting its pull requests, or stopped) and would be duplicated. */
+/** May a thread be re-granted? An open ticket: by its work's state. No ticket ever: yes, it is starved work, unless
+ *  its request is with the judge now. Only ended tickets: no, the work is decided (finished, awaiting its pull
+ *  requests, or stopped) and would be duplicated. */
 export const regrantable = (
   open: Parameters<typeof standingAskEntitled>[0],
   everTicketed: () => boolean,
   liveWorkers: readonly { ticketId?: string }[],
-): boolean => open ? standingAskEntitled(open, liveWorkers) : !everTicketed()
+  judging: () => boolean = () => false,
+): boolean => open ? standingAskEntitled(open, liveWorkers) : !everTicketed() && !judging()
 export const REGRANT_KEY = 'router:regrant'
 export interface RegrantCounters { day: string, perIssue: Record<string, number> }
 export const regrantPlan = (counters: RegrantCounters | undefined, key: string, day: string,
@@ -264,13 +264,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         regrant: (issue, key) => {
           const onThread = (t: Ticket): boolean => t.channels[0]?.thread === key
           const ask = repos.tickets.open().find(onThread)
-          if (!regrantable(ask, () => repos.tickets.list().some(onThread), executor.workers())) return false
+          // A new issue's request sits with the judge for a poll or two, and granting it then spent the day's cap.
+          const judging = (): boolean => { const thread = repos.threads.get(`github:${key}`); return !!thread?.evaluating || !!thread?.pending.length }
+          if (!regrantable(ask, () => repos.tickets.list().some(onThread), executor.workers(), judging)) return false
           const day = (deps.now ? deps.now() : new Date().toISOString()).slice(0, 10)
           const next = regrantPlan(repos.kv.get<RegrantCounters>(REGRANT_KEY), key, day)
           if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day }); return false }
           repos.kv.set(REGRANT_KEY, next)
           log.line('info', 'regrant.granted', { thread: key, issue, ticket: ask?.id, day })
-          return true
+          return ask?.assignments.at(-1)?.id ?? `${day}.${next.perIssue[key]}`
         },
       }, repos.kv)
     : undefined
@@ -706,6 +708,14 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     reported,
     follow,
     reportDropped: fields => log.line('warn', 'worker.report_dropped', fields),
+    stillWanted: (ticket, assignment) => {
+      const fresh = repos.tickets.get(ticket.id)
+      const latest = fresh?.assignments.at(-1)
+      if (fresh && !fresh.ended && latest?.id === assignment.id && latest.state !== 'ended') return fresh
+      log.line('info', 'worker.launch_skipped', { ticket: ticket.id, assignment: assignment.id,
+        why: !fresh || fresh.ended ? 'ticket ended' : latest?.id === assignment.id ? 'assignment ended' : 'assignment replaced' })
+      return undefined
+    },
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
   })
   executorRef = executor
@@ -996,9 +1006,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         engine.report(ticket.id, {
           state: 'failed', summary: 'the worker did not survive the router restart; nothing is running', question: null,
         } as never)
-        // Once per process, from the record: the mandate stands, so the work gets a fresh worker. A relaunch
-        // loop is bounded by this loop running only at startup.
-        executor.start(repos.tickets.get(ticket.id) ?? ticket, kept)
+        // A fresh Assignment, as a crash gets: the dead one's start time made a relaunch waiting for a slot read as
+        // stale, and the sweep released it into an orphan (2026-11-11). Once per process: this runs at startup.
+        engine.retryTicket(ticket.id)
       }
     } catch (error) {
       log.line('error', 'recover.failed', { ticket: ticket.id, error: String(error).slice(0, 200) })
