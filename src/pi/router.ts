@@ -16,6 +16,8 @@ export interface RouterConfig {
   keepWorktrees?: number
   /** GB cap for the work root; settled checkouts over it are swept oldest-first. Default 200. */
   workBudgetGb?: number
+  /** Per-worker scope limits (PI_SUPERAGENT_WORKER_LIMITS/MEMORY_GB/CPUS/TASKS); unset means machine-derived. */
+  workerLimits?: import('./worker-limits.ts').WorkerLimitSettings
   /**
    * A file holding a scoped GitHub token to hand a worker, so it can push a branch and open a pull request as
    * that token instead of as the operator. Unset, the brief tells the worker it cannot push.
