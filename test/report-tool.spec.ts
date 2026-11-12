@@ -25,6 +25,18 @@ describe('ticket_report', () => {
     expect(answer(undefined)).toBe('reported')
   })
 
+  it('refuses a ready result that carries a question, in the worker\'s own turn, and reports nothing', () => {
+    // The engine refuses this combination; from the router the refusal reached no one (2026-11-12).
+    const calls: string[] = []
+    const tool = reportTool(state => { calls.push(state); return 'recorded' })
+    const res = tool.execute('r1', { state: 'ready', summary: 'PR is up', question: 'approve it?' })
+    expect(res.isError).toBe(true)
+    expect(res.content[0]!.text).toContain('report blocked with the question')
+    expect(calls, 'nothing reached the router').toEqual([])
+    expect(tool.execute('r2', { state: 'blocked', summary: 'PR is up', question: 'approve it?' }).isError).toBeUndefined()
+    expect(calls).toEqual(['blocked'])
+  })
+
   it('keeps the pull requests a worker names, and drops the ones that are not strings', () => {
     const seen: Array<readonly string[] | undefined> = []
     const tool = reportTool((_s, _su, _q, _o, pulls) => { seen.push(pulls); return 'recorded' })
