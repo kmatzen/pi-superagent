@@ -400,7 +400,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     log.line('info', 'worker.released', { ticket: ticketId, assignment: assignmentId, state })
   }
 
-  const pullStates = new Map<string, PullState>()
+  // Kept across restarts: rendered from an empty map, every status comment lost its titles and states for a pass.
+  const PULL_STATES = 'router:pull-states'
+  const pullStates = new Map<string, PullState>(Object.entries(repos.kv.get<Record<string, PullState>>(PULL_STATES) ?? {}))
   const tracker = new PullTracker({
     kv: repos.kv, home: cfg.githubRepo ?? '', state: id => pullStates.get(id),
     ...(githubApi?.upsertComment ? { write: (issue: number, comment: number | undefined, body: string, repo?: string) => githubApi.upsertComment!(issue, comment, body, repo) } : {}),
@@ -598,8 +600,13 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     observed: (thread, _pull, state) => {
       // GitHub answers `unknown` while it recomputes after a push: the last known verdict stands until it answers.
       const before = pullStates.get(thread.id)
-      pullStates.set(thread.id, { ...before, ...state,
-        ...(state.mergeableState === 'unknown' && before?.mergeableState ? { mergeableState: before.mergeableState } : {}) })
+      const after: PullState = { ...before, ...state,
+        ...(state.mergeableState === 'unknown' && before?.mergeableState ? { mergeableState: before.mergeableState } : {}) }
+      if (JSON.stringify(after) === JSON.stringify(before)) return
+      pullStates.delete(thread.id)
+      pullStates.set(thread.id, after)
+      for (const stale of [...pullStates.keys()].slice(0, Math.max(0, pullStates.size - 500))) pullStates.delete(stale)
+      repos.kv.set(PULL_STATES, Object.fromEntries(pullStates))
     },
     closed: (thread, pull, outcome, at, state) => {
       const key = `github:${thread.id}`
