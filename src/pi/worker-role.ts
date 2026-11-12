@@ -35,6 +35,9 @@ export const SILENT_NUDGE = 'You ended your turn without calling ticket_report, 
   + 'blocked (you need a person, with the question), or failed (what broke). One line is enough.'
 export const SILENT_NUDGE_FILE = 'zz-self-nudge.json'
 
+/** Written when a person types in the worker's tab: the router keeps a freed tab its person is still using. */
+export const PERSON_FILE = 'person.json'
+
 const HANDS_OVER = ['ready', 'blocked', 'waiting']
 export const AFTER_HANDOVER = 'Your ticket_report handed this ticket to a person, and the router has freed this session: nothing you do '
   + 'from here is read, and the session is ended soon. End your turn now. More work belongs in a new report before you hand over, '
@@ -67,7 +70,7 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   // Counted per settle cycle, not per run: an automatic retry starts a new run after a report already filed.
   let reported = false
   // A report that hands the ticket to a person frees this session at once: whatever the worker does after it, the router
-  // never reads. A worker that kept refactoring after its ready report was ended mid-change, work unpushed (2026-11-12).
+  // never reads. Background-task wakes kept a freed worker running tools after its ready report (2026-11-12).
   let handedOver = false
   pi.registerTool(reportTool((state, summary, question, _origin, pullRequests) => {
     reported = true
@@ -77,6 +80,12 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   pi.on('tool_call', (event?: unknown) => {
     if (!handedOver || (event as { toolName?: string }).toolName === 'ticket_report') return
     return { block: true, reason: AFTER_HANDOVER }
+  })
+  // A person typing here is new work, not the worker running on alone: the handover refused the operator every tool (2026-11-12).
+  pi.on('input', (event?: unknown) => {
+    if ((event as { source?: string } | undefined)?.source !== 'interactive') return
+    handedOver = false
+    writeFileSync(join(dir, PERSON_FILE), JSON.stringify({ at: new Date().toISOString() }))
   })
   guardExtension({
     blocked: (env.PI_SUPERAGENT_BLOCKED ?? '').split(',').map(s => s.trim()).filter(Boolean),
@@ -190,6 +199,8 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
       }
       if (inflight.has(name)) continue // sent, waiting for the run that reads it
       if (starting && !running) return // the run the last idle send starts takes the rest as queued input
+      // New work from the router lifts the handover; the worker's own nudge would lift it on every silent run.
+      if (name !== SILENT_NUDGE_FILE) handedOver = false
       inflight.set(name, { file, text: input.text })
       if (!running) starting = { name, at: Date.now() }
       Promise.resolve(pi.sendUserMessage(input.text, { deliverAs: input.mode ?? 'followUp' }))
