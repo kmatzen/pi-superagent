@@ -452,7 +452,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       releaseIfWaiting(ticket.id, assignmentId, run.state)
     }
     announce(ticket, assignmentId, origin, run, fresh)
-    if (run.pullRequests?.length) { tracker.ordered(ticket.id, run.pullRequests); refreshTracker(ticket.id) }
+    if (run.pullRequests?.length) { tracker.ordered(repos.tickets.get(ticket.id) ?? ticket, run.pullRequests); refreshTracker(ticket.id) }
     // The operator's rule 2026-11-08 and its 2026-11-09 extension: a worker gives up its agent, tab and slot
     // whenever a person is the only thing it can be waiting for — it asked, it needs an answer, or it finished
     // its turn and its own pull request waits for a human merge. A ticket the report ENDED needs none of this:

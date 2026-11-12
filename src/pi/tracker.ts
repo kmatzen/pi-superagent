@@ -13,7 +13,7 @@ export interface TrackerRow {
   done: boolean
 }
 
-interface Kept { comment?: number; url?: string; hash?: string; order: string[] }
+interface Kept { comment?: number; url?: string; hash?: string; order: string[]; declared?: boolean }
 
 const key = (ticketId: string): string => `tracker:${ticketId}`
 
@@ -39,7 +39,7 @@ const cell = (text: string): string => text.replace(/[\r\n]+/g, ' ').replace(/\|
 /** Rows in the worker's merge order, then open pull requests the ticket follows that the latest report left out: an open
  *  one nobody mentions any more is what a person must see. Closed ones it left out are history. */
 export function trackerRows(ticket: Ticket, order: readonly string[], state: (threadId: string) => PullState | undefined,
-                            home: string): TrackerRow[] {
+                            home: string, sequence = true): TrackerRow[] {
   const follows = new Map((ticket.follows ?? []).map(f => [f.thread, f]))
   const seen = new Set<string>()
   const refs: PullRef[] = []
@@ -65,7 +65,7 @@ export function trackerRows(ticket: Ticket, order: readonly string[], state: (th
   return refs.map((pull, i) => {
     const v = verdicts[i]!
     const title = state(threadOfPull(pull, home).id)?.title
-    const next = v.done ? '' : v.worker ? `worker: ${v.worker}` : i === first ? `**you: ${v.you}**` : `after #${first + 1}`
+    const next = v.done ? '' : v.worker ? `worker: ${v.worker}` : i === first || !sequence ? `**you: ${v.you}**` : `after #${first + 1}`
     return { url: pullUrl(pull), label: shortName(pull), ...(title ? { title } : {}), status: v.status, next, done: v.done }
   })
 }
@@ -95,10 +95,16 @@ export class PullTracker {
   private readonly writing = new Set<string>()
   constructor(private readonly o: TrackerOptions) {}
 
-  /** The pull requests a report named, in the order it named them: the order a person merges them in. */
-  ordered(ticketId: string, urls: readonly string[]): void {
-    const kept = this.o.kv.get<Kept>(key(ticketId)) ?? { order: [] }
-    this.o.kv.set(key(ticketId), { ...kept, order: [...urls] })
+  /** The pull requests a report named, in the order it named them: the order a person merges them in. Ones that merged
+   *  since the last report stay first, so the status keeps saying how much of the plan has landed. */
+  ordered(ticket: Ticket, urls: readonly string[]): void {
+    const kept = this.o.kv.get<Kept>(key(ticket.id)) ?? { order: [] }
+    const merged = (url: string): boolean => {
+      const pull = parsePull(url)
+      return !!pull && ticket.follows?.find(f => f.thread === `github:${threadOfPull(pull, this.o.home).id}`)?.closed?.outcome === 'merged'
+    }
+    const landed = kept.order.filter(url => !urls.includes(url) && merged(url))
+    this.o.kv.set(key(ticket.id), { ...kept, order: [...landed, ...urls], declared: true })
   }
 
   url(ticketId: string): string | undefined { return this.o.kv.get<Kept>(key(ticketId))?.url }
@@ -110,7 +116,7 @@ export class PullTracker {
     const issue = Number(address?.issue)
     if (!this.o.write || channel?.source !== 'github' || !issue || this.writing.has(ticket.id)) return
     const kept = this.o.kv.get<Kept>(key(ticket.id)) ?? { order: [] }
-    const rows = trackerRows(ticket, kept.order, this.o.state, this.o.home)
+    const rows = trackerRows(ticket, kept.order, this.o.state, this.o.home, kept.declared === true)
     if (!kept.comment && rows.length < 2) return
     const text = trackerText(channel.thread, rows)
     const hash = createHash('sha1').update(text).digest('hex').slice(0, 16)
@@ -120,7 +126,9 @@ export class PullTracker {
       const at = this.o.now().toISOString().slice(11, 16)
       const body = `${text}\n\n<sub>Kept current by the fleet, last changed ${at} UTC: this comment is edited in place, and each report is a comment below.</sub>`
       const written = await this.o.write(issue, kept.comment, body, address?.repo)
-      this.o.kv.set(key(ticket.id), { ...(this.o.kv.get<Kept>(key(ticket.id)) ?? kept), comment: written.id, url: written.url, hash })
+      // No report has ordered them yet: the set the comment first showed is the plan, so a merge stays on it as merged.
+      const order = kept.order.length ? {} : { order: rows.map(r => r.url) }
+      this.o.kv.set(key(ticket.id), { ...(this.o.kv.get<Kept>(key(ticket.id)) ?? kept), ...order, comment: written.id, url: written.url, hash })
       this.o.log('tracker.written', { ticket: ticket.id, thread: channel.thread, comment: written.id, pulls: rows.length, merged: rows.filter(r => r.done).length })
     } catch (error) {
       this.o.log('tracker.write_failed', { ticket: ticket.id, thread: channel.thread, error: String(error).slice(0, 200) })
