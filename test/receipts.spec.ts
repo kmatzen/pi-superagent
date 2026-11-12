@@ -36,6 +36,16 @@ describe('what the thread reads when a run ends', () => {
       .toMatch(/ends with the report[\s\S]*no pull request is open/)
   })
 
+  it('several pull requests are numbered in merge order, point at their live status, and say they all hold the ticket', () => {
+    const run = { state: 'ready', summary: 'kit and app', pullRequests: ['https://github.com/o/kit/pull/5', 'https://github.com/o/app/pull/9'] }
+    const text = receiptText('#400', 'worker', run, false, 'https://github.com/o/r/issues/400#issuecomment-77')
+    expect(text).toContain('**Pull requests, in merge order:**\n1. https://github.com/o/kit/pull/5\n2. https://github.com/o/app/pull/9')
+    expect(text).toContain("Each one's state, kept current: https://github.com/o/r/issues/400#issuecomment-77")
+    expect(text).toContain('until its pull requests are merged or closed; comments, reviews and each merge go to the worker')
+    expect(text, 'never the singular for two').not.toContain('until the pull request is merged')
+    expect(receiptText('#400', 'worker', run), 'before the status comment exists, no link').not.toContain('kept current')
+  })
+
   it('the end of a pull request is said on the issue: done when merged, how to start again when closed', () => {
     const pr = (n: number, outcome: 'merged' | 'closed') => ({ url: `https://github.com/o/r/pull/${n}`, outcome })
     expect(pullEndText('#400', [pr(9, 'merged')])).toBe('#400 merged: https://github.com/o/r/pull/9. This ticket is done.')

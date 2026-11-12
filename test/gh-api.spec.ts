@@ -181,6 +181,7 @@ case "$*" in
   "api repos/x/y/pulls/9") echo '{"state":"closed","merged_at":"2026-11-06T10:00:00Z","closed_at":"2026-11-06T10:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/10") echo '{"state":"closed","merged_at":null,"closed_at":"2026-11-06T11:00:00Z","created_at":"2026-11-05T09:00:00Z"}' ;;
   "api repos/x/y/pulls/11") echo '{"state":"open","merged_at":null,"closed_at":null,"created_at":"2026-11-05T09:00:00Z"}' ;;
+  "api repos/x/y/pulls/12") echo '{"state":"closed","merged_at":"2026-11-06T10:00:00Z","closed_at":"2026-11-06T10:00:00Z","created_at":"2026-11-05T09:00:00Z","title":"kit: build-heap CLI","draft":false,"mergeable_state":"unknown","merged_by":{"login":"octocat"}}' ;;
   "api repos/x/y/pulls/404") echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
   "api repos/x/y/pulls/502") echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
   "api repos/x/y/issues/11/comments?"*since=*) echo '[{"user":{"login":"rev"},"author_association":"MEMBER","created_at":"2026-11-06T09:00:00Z","body":"rename it"}]' ;;
@@ -194,6 +195,11 @@ esac
 }
 
 describe('ghPulls', () => {
+  it('reads what a status comment shows: title, draft, merge readiness and who merged', async () => {
+    expect(await ghPulls({ bin: fakePullsGh().bin }).pull('x/y', 12)).toMatchObject({
+      merged: true, title: 'kit: build-heap CLI', draft: false, mergeableState: 'unknown', mergedBy: 'octocat' })
+  })
+
   it('reads a pull request as merged, closed or open, and one GitHub does not have as absent', async () => {
     const api = ghPulls({ bin: fakePullsGh().bin })
     expect(await api.pull('x/y', 9)).toEqual({ open: false, merged: true, mergeable: null, createdAt: '2026-11-05T09:00:00Z', closedAt: '2026-11-06T10:00:00Z' })
@@ -410,5 +416,42 @@ echo '{}'
   it('has no label read or write: labels are gone', () => {
     const api = ghApi({ repo: 'o/r', bin: '/nonexistent/gh', followed: () => [] }) as unknown as Record<string, unknown>
     expect(['addLabel', 'removeLabel', 'labelEvent'].filter(name => name in api)).toEqual([])
+  })
+})
+
+describe('the status comment the router keeps editing', () => {
+  function fakeEditGh(gone = false) {
+    const dir = tmp()
+    const bin = join(dir, 'gh')
+    const comment = `echo '{"id":77,"html_url":"https://github.com/o/r/issues/382#issuecomment-77"}'`
+    writeFileSync(bin, `#!/bin/bash
+printf '%s\\n' "$*" >> "$(dirname "$0")/calls.log"
+cat - > "$(dirname "$0")/body.json"
+case "$*" in
+  "api -X POST repos/o/r/issues/382/comments --input -") ${comment} ;;
+  "api -X PATCH repos/o/r/issues/comments/77 --input -") ${gone ? `echo 'gh: Not Found (HTTP 404)' >&2; exit 1` : comment} ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    return { bin, calls: () => readFileSync(join(dir, 'calls.log'), 'utf8').trim().split('\n'), body: () => JSON.parse(readFileSync(join(dir, 'body.json'), 'utf8')) }
+  }
+  const POST = 'api -X POST repos/o/r/issues/382/comments --input -'
+  const PATCH = 'api -X PATCH repos/o/r/issues/comments/77 --input -'
+
+  it("posts it once, then edits that comment in place, with the router's marker", async () => {
+    const gh = fakeEditGh()
+    const api = ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [] })
+    expect(await api.upsertComment!(382, undefined, 'status')).toEqual({ id: 77, url: 'https://github.com/o/r/issues/382#issuecomment-77' })
+    expect(await api.upsertComment!(382, 77, 'status, later')).toMatchObject({ id: 77 })
+    expect(gh.calls()).toEqual([POST, PATCH])
+    expect(gh.body().body, 'the router knows its own comment when it reads the thread back').toContain(REPLY_MARKER)
+  })
+
+  it('posts a new one when someone deleted it, so the status never goes quiet', async () => {
+    const gh = fakeEditGh(true)
+    const api = ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [] })
+    expect(await api.upsertComment!(382, 77, 'status')).toMatchObject({ id: 77 })
+    expect(gh.calls()).toEqual([PATCH, POST])
   })
 })
