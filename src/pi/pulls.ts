@@ -21,12 +21,16 @@ export interface PullState {
   mergedBy?: string
 }
 
+export interface ReviewComment { path: string; line?: number; body: string; url: string }
+
 export interface PullApi {
   /** Undefined when GitHub has no such pull request. A read this account cannot make — a private repository it
    *  cannot see, which GitHub answers with 404 — throws: the state is unknown, not absent. */
   pull(repo: string, number: number): Promise<PullState | undefined>
   comments(repo: string, number: number, since?: string): Promise<IssueComment[]>
   reviews(repo: string, number: number): Promise<PrReview[]>
+  /** One review's comments on the code. */
+  reviewComments?(repo: string, number: number, reviewId: number): Promise<ReviewComment[]>
 }
 
 // URLs only: `#5` or `owner/repo#5` may be an issue, whose thread never merges, so its ticket would wait forever.
@@ -353,6 +357,7 @@ export class PullFollower {
         if (!latest || Date.parse(r.at) > Date.parse(latest)) latest = r.at
         if (this.ours(r.author, r.body)) continue
         const said = `${pull.repo}#${pull.number}: ${r.author} ${r.state.toLowerCase().replace(/_/g, ' ')}${r.body ? `\n\n${r.body.slice(0, 4000)}` : ''}`
+          + await this.onTheCode(pull, r.id)
         this.options.receive(this.trigger(id, pull, r.author, r.association, r.at, said, 'review', `github:${id}:review:${r.id}`))
       }
       if (latest && latest !== reviewedTo) {
@@ -366,6 +371,20 @@ export class PullFollower {
         this.unreadable.add(id)
         this.options.warn('pull.listen_failed', { thread: id, error: String(error).slice(0, 200) })
       }
+    }
+  }
+
+  /** A review's comments on the code are most of what a person says in it: its summary alone read "changes requested"
+   *  with no words, and workers left points unanswered (operator, 2026-11-12). Numbered, so a report can answer each. */
+  private async onTheCode(pull: PullRef, reviewId: number): Promise<string> {
+    if (!this.options.api.reviewComments) return ''
+    try {
+      const rows = await this.options.api.reviewComments(pull.repo, pull.number, reviewId)
+      if (!rows.length) return ''
+      return `\n\n${rows.length} comment${rows.length === 1 ? '' : 's'} on the code, numbered so your report can answer each:\n`
+        + rows.map((c, i) => `${i + 1}. ${c.path}${c.line ? `:${c.line}` : ''}: ${c.body.slice(0, 1500)}${c.url ? `\n   ${c.url}` : ''}`).join('\n')
+    } catch {
+      return `\n\nIts comments on the code could not be read here; read every one with \`gh api repos/${pull.repo}/pulls/${pull.number}/reviews/${reviewId}/comments\`.`
     }
   }
 

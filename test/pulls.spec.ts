@@ -147,6 +147,7 @@ function follower(api: Partial<PullApi>, open: string[] | null = [],
     pull: async (repo, n) => { calls.push(`pull ${repo}#${n}`); return api.pull?.(repo, n) },
     comments: async (repo, n, since) => { calls.push(`comments ${repo}#${n} since ${since === created ? 'created' : since}`); return api.comments?.(repo, n, since) ?? [] },
     reviews: async (repo, n) => { calls.push(`reviews ${repo}#${n}`); return api.reviews?.(repo, n) ?? [] },
+    ...(api.reviewComments ? { reviewComments: async (repo: string, n: number, id: number) => { calls.push(`review comments ${repo}#${n} ${id}`); return api.reviewComments!(repo, n, id) } } : {}),
   }
   const f = new PullFollower({
     home: 'o/r', api: full, openThreads: () => open === null ? undefined : new Set(open),
@@ -356,6 +357,22 @@ describe('following a ticket\'s pull requests', () => {
     t.kv.set('pulls:other/lib#5:review', 950)
     await t.f.reconcile(t.following('other/lib#5'))
     expect(t.received.map(r => r.text)).toEqual(['other/lib#5: reviewer changes requested\n\nmissed this morning'])
+  })
+
+  it('delivers a review with its comments on the code, numbered, and says how to read them when it cannot', async () => {
+    // 2026-11-12: two reviews with 5 and 6 comments on the code reached the worker as "changes requested" and nothing more.
+    const t = follower({ pull: async () => openPull, reviews: async () => [review({ body: '' })],
+      reviewComments: async () => [
+        { path: 'src/a.py', line: 12, body: 'This try looks like a smell.', url: 'https://github.com/other/lib/pull/5#discussion_r1' },
+        { path: 'cfg/b.yaml', body: 'You did not address this in the last turn.', url: 'https://github.com/other/lib/pull/5#discussion_r2' }] })
+    await t.f.reconcile(t.following('other/lib#5'))
+    expect(t.received.at(-1)!.text).toBe('other/lib#5: reviewer changes requested\n\n2 comments on the code, numbered so your report can answer each:\n'
+      + '1. src/a.py:12: This try looks like a smell.\n   https://github.com/other/lib/pull/5#discussion_r1\n'
+      + '2. cfg/b.yaml: You did not address this in the last turn.\n   https://github.com/other/lib/pull/5#discussion_r2')
+    const blind = follower({ pull: async () => openPull, reviews: async () => [review()], reviewComments: async () => { throw new Error('HTTP 502') } })
+    await blind.f.reconcile(blind.following('other/lib#5'))
+    expect(blind.received.at(-1)!.text, 'a failed read still tells the worker the comments exist')
+      .toContain('read every one with `gh api repos/other/lib/pulls/5/reviews/900/comments`')
   })
 
   it("another repository's closed pull request is reported, and its talk is not read", async () => {

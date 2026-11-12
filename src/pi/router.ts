@@ -147,6 +147,8 @@ export const pullBrief = (closes?: string, canPush = true): string => canPush ? 
   'question, an investigation or an operation, reports ready without one. When the work needs several pull requests,',
   'in one repository or across several, list every one in pullRequests in the order a person should merge them: the issue',
   'shows that order with each one\'s state, and when one merges you hear about it to make the follow-on change the rest need.',
+  'A review reaches you with its comments on the code numbered: answer every number, by changing the code or by saying',
+  'why not, and in ticket_report list each number with what you did. A comment left unanswered is the review not done.',
 ].join('\n') : [
   'If the request changes code or files, work in the git checkout inside your workspace on a new branch and commit it',
   'there. This worker has no GitHub access, so do not try to push or open a pull request: report ready with `branch` set',
