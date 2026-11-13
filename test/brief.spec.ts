@@ -13,6 +13,8 @@ describe('the worker brief', () => {
 
   it('still briefs a ticket whose mandate is missing', () => {
     expect(briefFor({ id: 'T2', title: 'no mandate', channels: [] } as unknown as Ticket, '/wt/T2')).toContain('Mandate: (the ticket text)')
+    expect(briefFor({ id: 'T2', title: 'x', channels: [] } as unknown as Ticket, '/wt/T2'), 'reports in plain words')
+      .toMatch(/Write ticket_report for the person who asked, in the words they use: no function, file, branch or variable names/)
     expect(briefFor({ id: 'T2', title: 'x', channels: [] } as unknown as Ticket, '/wt/T2'), 'a handover report is the last act')
       .toMatch(/A ready or blocked report is your last act[\s\S]*finish every\s+change first, then report, then end your turn/)
     expect(briefFor({ id: 'T2', title: 'ci', channels: [] } as unknown as Ticket, '/wt/T2'), 'how to wait on CI without going deaf')

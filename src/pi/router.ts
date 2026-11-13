@@ -132,6 +132,8 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   'A ready or blocked report is your last act: it hands the ticket to a person and frees this session, so finish every',
   'change first, then report, then end your turn. Tools stop working after it until a new message arrives, and nothing',
   'you do on your own afterwards is read.',
+  'Write ticket_report for the person who asked, in the words they use: no function, file, branch or variable names and no',
+  'metric jargon in its first lines. Give a number only when they asked for one, saying what it measures, which way is better, and its baseline.',
   'Do not edit the ticket and do not post reply comments: the router writes receipts, you report.',
   'Write in English: every pull request title and body, issue comment, commit message, code comment and ticket_report,',
   'whatever language you think in. Text in another language is refused before it is sent.',
