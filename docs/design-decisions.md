@@ -134,6 +134,14 @@ the link to a PR. A *blocked* report carries the question the requester needs to
 outcomes are *failed* and *cancelled*. Only the engine writes the result to the ticket.
 See `Ticket.tla` I2.
 
+The summary is posted for the person who asked, so the report tool checks it in the worker's own turn,
+by the rules the operator's replies follow: line 1 is the news or the ask in at most 23 plain words,
+with no file paths, code or commit ids; at most 160 words come before a `Details (skippable):` line,
+and at most six bullets after it. A report that fails is refused with the reasons, and the worker
+rewrites it. Working detail goes in `notes` instead. The router keeps each ticket's latest notes and
+puts them in the next worker's brief, never on the issue. A writing rule in the brief alone was only
+advice: on 2026-11-13 a worker posted its own to-do list, file paths first, as a ticket's update.
+
 If a run ends without a report, the router posts a failure on the thread. Launch errors and crashes
 also get a reply there, so the person who asked knows what happened. The outbox recognizes repeat
 failures. One broken setup command deserves one notice, even if the router tries it on every poll.

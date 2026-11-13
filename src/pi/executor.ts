@@ -165,7 +165,7 @@ export class PiExecutor {
   // Bound to the session that owns the ticket: a report from a worker the domain has already replaced or
   // stopped is not a ticket write.
   private reporter(ticket: Ticket, own: () => WorkerSession | undefined): Reporter {
-    return (state, summary, question, origin = 'worker', pullRequests, wakeInMinutes): ReportOutcome => {
+    return (state, summary, question, origin = 'worker', pullRequests, wakeInMinutes, notes): ReportOutcome => {
       const live = this.live.get(ticket.id)
       if (!live || live.session.sessionId !== own()?.sessionId) {
         const reason = live ? 'its worker was replaced' : 'the ticket has no live worker'
@@ -177,13 +177,13 @@ export class PiExecutor {
         })
         return 'dropped'
       }
-      this.file(ticket, live.assignmentId, origin, report(state, summary, question), pullRequests, wakeInMinutes)
+      this.file(ticket, live.assignmentId, origin, report(state, summary, question), pullRequests, wakeInMinutes, notes)
       return 'recorded'
     }
   }
 
   private file(ticket: Ticket, assignmentId: string, origin: ReportOrigin, filed: Filed, pullRequests?: readonly string[],
-               wakeInMinutes?: number): void {
+               wakeInMinutes?: number, notes?: string): void {
     const followed = pullRequests?.length ? this.options.follow?.(ticket, pullRequests) ?? [] : []
     try {
       this.engine.report(ticket.id, filed)
@@ -203,7 +203,7 @@ export class PiExecutor {
     }
     const wakeAt = wakeInMinutes ? new Date(Date.now() + wakeInMinutes * 60_000).toISOString() : undefined
     this.options.reported?.(ticket, assignmentId, origin,
-      { ...filed, ...(followed.length ? { pullRequests: followed } : {}), ...(wakeAt ? { wakeAt } : {}) })
+      { ...filed, ...(followed.length ? { pullRequests: followed } : {}), ...(wakeAt ? { wakeAt } : {}), ...(notes ? { notes } : {}) })
   }
 
   private bind(ticket: Ticket, assignment: Assignment, session: WorkerSession, busy = true): void {
