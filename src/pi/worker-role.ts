@@ -75,11 +75,11 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   // A report that hands the ticket to a person frees this session at once: whatever the worker does after it, the router
   // never reads. Background-task wakes kept a freed worker running tools after its ready report (2026-11-12).
   let handedOver = false
-  pi.registerTool(reportTool((state, summary, question, _origin, pullRequests, wakeInMinutes) => {
+  pi.registerTool(reportTool((state, summary, question, _origin, pullRequests, wakeInMinutes, notes) => {
     reported = true
     if (HANDS_OVER.includes(state)) handedOver = true
     append('reports.jsonl', { state, summary, question: question ?? null, ...(pullRequests?.length ? { pullRequests } : {}),
-      ...(wakeInMinutes !== undefined ? { wakeInMinutes } : {}) })
+      ...(wakeInMinutes !== undefined ? { wakeInMinutes } : {}), ...(notes ? { notes } : {}) })
   }))
   pi.on('tool_call', (event?: unknown) => {
     if (!handedOver || (event as { toolName?: string }).toolName === 'ticket_report') return

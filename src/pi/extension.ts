@@ -471,13 +471,24 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       releaseIfWaiting(ticket.id, assignmentId, run.state)
     }
     // The latest report decides whether anyone is called back: a wake-up replaces the last one, and a report without one ends it.
-    if (origin === 'worker') scheduleWake(ticket.id, run)
+    if (origin === 'worker') { scheduleWake(ticket.id, run); keepNotes(ticket.id, run.notes) }
     pullEnded(ticket.id)
     // The report the person reads has gone out; these two bound what a finished ticket can do next.
     if (origin === 'worker') capRepeats(repos.tickets.get(ticket.id) ?? ticket, run)
     finishIssue(ticket.id)
   }
   const home = cfg.githubRepo ?? ''
+  // A worker's working notes go to the next worker on its ticket and never to the issue: told to put what to check next in
+  // the summary, a worker posted its to-do list as the ticket's update (2026-11-13).
+  const NOTES = 'router:notes'
+  const notesLeft = (): Record<string, { at: string; notes: string }> => repos.kv.get<Record<string, { at: string; notes: string }>>(NOTES) ?? {}
+  const keepNotes = (ticketId: string, notes: string | undefined): void => {
+    const rows = notesLeft()
+    if (!notes && !rows[ticketId]) return
+    if (notes) rows[ticketId] = { at: new Date().toISOString(), notes }
+    else delete rows[ticketId]
+    repos.kv.set(NOTES, rows)
+  }
   // Someone always watches what a worker leaves running (operator, 2026-11-12): a report can call a fresh worker back
   // at a set time, and the router keeps that appointment without a session or a slot held in between.
   const WAKES = 'router:wakes'
@@ -799,7 +810,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }, {
     worktreeFor: ticket => `${cfg.worktreeRoot}/${ticket.id}`,
     briefFor: ticket => {
-      const words = personWords(ticket)
+      const left = notesLeft()[ticket.id]
+      const words = personWords(ticket) + (left
+        ? `\n\nNotes the last worker on this ticket left for whoever continues it (private, never posted):\n${left.notes}` : '')
       // A worker started after a failed attempt shares that attempt's workspace, and must look before redoing it.
       const before = ticket.assignments.filter(a => a.report?.state === 'failed').at(-1)?.report
       const brief = briefFor(ticket, `${cfg.worktreeRoot}/${ticket.id}`) + (before
