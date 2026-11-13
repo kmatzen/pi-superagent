@@ -63,4 +63,12 @@ describe('what the thread reads when a run ends', () => {
     expect(mixed).toMatch(/pull\/9 merged and https:\/\/github.com\/o\/r\/pull\/12 closed without merging/)
     expect(mixed).toMatch(/ends with the work that landed/)
   })
+
+  it('a pull request end that leaves a check owed says the check still happens and the issue stays open', () => {
+    const pr = (n: number, outcome: 'merged' | 'closed') => ({ url: `https://github.com/o/r/pull/${n}`, outcome })
+    expect(pullEndText('#387', [pr(9, 'merged')], '2026-11-13T03:56:17.558Z')).toBe('#387: https://github.com/o/r/pull/9 merged. '
+      + 'A fresh worker still makes the check the last one asked for at 03:56 UTC, and this issue stays open until it reports.')
+    expect(pullEndText('#387', [pr(9, 'merged'), pr(12, 'closed')], '2026-11-13T03:56:17.558Z'))
+      .toMatch(/^#387: https:\/\/github.com\/o\/r\/pull\/9 merged and https:\/\/github.com\/o\/r\/pull\/12 closed without merging\. A fresh worker/)
+  })
 })
