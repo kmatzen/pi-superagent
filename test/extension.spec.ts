@@ -257,6 +257,35 @@ describe('the router extension', () => {
     expect(brief, 'nor a dashboard under their name').not.toContain('dashboard table')
   })
 
+  it("a worker's notes reach the next worker on its ticket and never the issue, and the next report replaces them", async () => {
+    // 2026-11-13: told to put what to check next in the summary, a worker posted its to-do list as the ticket's update.
+    const f = fixture()
+    f.addComment('531', 'octocat', 'fix the flaky upload')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    f.workers[0]!.report!({ state: 'blocked', summary: 'The upload fails only on large files.', question: 'Should large files go up in parts?',
+      notes: 'check /var/log/upload.log near line 4100; retry with UPLOAD_PARTS=8' })
+    await f.running.tick()
+    await settle()
+    expect(f.receipts('531'), 'notes are private').not.toContain('UPLOAD_PARTS')
+    f.addComment('531', 'octocat', 'yes, in parts')
+    await f.running.tick()
+    await settle()
+    await until(() => f.workers.length === 2)
+    expect(f.workers[1]!.prompts[0]).toContain('Notes the last worker on this ticket left for whoever continues it (private, never posted):\n'
+      + 'check /var/log/upload.log near line 4100; retry with UPLOAD_PARTS=8')
+    f.workers[1]!.report!({ state: 'blocked', summary: 'Uploads in parts work up to 5 GB.', question: 'Is 5 GB enough?' })
+    await f.running.tick()
+    await settle()
+    f.addComment('531', 'octocat', 'yes')
+    await f.running.tick()
+    await settle()
+    await until(() => f.workers.length === 3)
+    expect(f.workers[2]!.prompts[0], 'a report without notes leaves none behind').not.toContain('Notes the last worker')
+  })
+
   it('a launch that fails on every poll says so on the issue once', async () => {
     // Polls are driven by hand: a launch retries on every poll, and a 5 ms timer would spawn shells nonstop.
     const f = fixture(true, undefined, undefined, undefined, { prepare: 'echo "no space left on device" >&2; exit 3', tickMs: 3_600_000 })

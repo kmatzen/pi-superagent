@@ -1,4 +1,5 @@
 import { parsePull } from './pulls.ts'
+import { VOICE_REFUSED, voiceProblems } from './voice.ts'
 
 export interface ReportTool {
   name: string
@@ -21,7 +22,7 @@ export type ReportOrigin = 'worker' | 'crash' | 'silent' | 'launch'
 export type ReportOutcome = 'recorded' | 'dropped'
 
 export type Reporter = (state: string, summary: string, question?: string | null, origin?: ReportOrigin,
-                        pullRequests?: readonly string[], wakeInMinutes?: number) => ReportOutcome | void
+                        pullRequests?: readonly string[], wakeInMinutes?: number, notes?: string) => ReportOutcome | void
 
 /** How soon a fresh worker may be called back to check what a worker left running, in minutes. */
 export const WAKE_MIN = 5
@@ -43,7 +44,10 @@ export function reportTool(report: Reporter): ReportTool {
     name: 'ticket_report', label: 'Report the ticket result',
     description: 'Report the result of this ticket. Call it once, at the end. state=blocked requires one yes/no question for the operator. '
       + 'state=waiting means something you started still runs (training, CI, a deploy): set wakeInMinutes to when a fresh worker '
-      + `should check on it (${WAKE_MIN}-${WAKE_MAX}), and say in the summary what to check. `
+      + `should check on it (${WAKE_MIN}-${WAKE_MAX}), and say in notes what to check. `
+      + 'summary is posted on the issue for the person who asked, and is refused unless it reads plainly: line 1 is the news or the ask in '
+      + 'plain words, then at most three short lines, then "Details (skippable):" and at most six bullets. notes is private: what the next '
+      + 'worker on this ticket needs (where things are, commands, what to check). It is never posted. '
       + 'pullRequests lists the URLs of the pull requests this work opened; leave it out when the work changed no repository. '
       + 'Every entry must be the URL gh pr create printed, on github.com — an entry the router cannot follow refuses the report.',
     parameters: {
@@ -51,12 +55,12 @@ export function reportTool(report: Reporter): ReportTool {
       properties: {
         state: { type: 'string', enum: ['ready', 'waiting', 'blocked', 'failed', 'cancelled'] }, summary: { type: 'string' }, question: { type: 'string' },
         pullRequests: { type: 'array', items: { type: 'string' } },
-        wakeInMinutes: { type: 'number' },
+        wakeInMinutes: { type: 'number' }, notes: { type: 'string' },
       },
       required: ['state', 'summary'],
     },
     execute: (_id, args) => {
-      const a = args as unknown as { state: string; summary: string; question?: string; pullRequests?: unknown; wakeInMinutes?: unknown }
+      const a = args as unknown as { state: string; summary: string; question?: string; pullRequests?: unknown; wakeInMinutes?: unknown; notes?: unknown }
       const pulls = Array.isArray(a.pullRequests) ? a.pullRequests.filter((p): p is string => typeof p === 'string') : []
       const unreadable = pulls.filter(url => !parsePull(url))
       if (unreadable.length) {
@@ -82,7 +86,10 @@ export function reportTool(report: Reporter): ReportTool {
       if (wake !== undefined && a.state !== 'waiting' && a.state !== 'blocked') {
         return refuse('only a waiting or blocked report schedules a wake-up: if something you started still runs, report waiting.')
       }
-      const outcome = report(a.state, a.summary, a.question ?? null, undefined, pulls.length ? pulls : undefined, wake)
+      const problems = voiceProblems(String(a.summary ?? ''), a.question)
+      if (problems.length) return { isError: true, content: [{ type: 'text', text: VOICE_REFUSED(problems) }] }
+      const notes = typeof a.notes === 'string' && a.notes.trim() ? a.notes.trim().slice(0, 8000) : undefined
+      const outcome = report(a.state, a.summary, a.question ?? null, undefined, pulls.length ? pulls : undefined, wake, notes)
       // A reporter that answers nothing (the worker pane's file bridge) cannot know the verdict; say the plain
       // thing. The router process says `dropped` loudly in its own log, which is where the operator reads it.
       return { content: [{ type: 'text', text: outcome === 'dropped' ? NOT_RECORDED : 'reported' }] }

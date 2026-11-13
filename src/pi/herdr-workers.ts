@@ -317,7 +317,8 @@ export class HerdrWorkers {
         // killed the router, and the unsaved cursor replayed it into every restart (2026-11-12: a ready with a question).
         try {
           report(String(r.state), String(r.summary), typeof r.question === 'string' ? r.question : null, r.origin === 'silent' ? 'silent' : 'worker',
-            pulls.length ? pulls : undefined, typeof r.wakeInMinutes === 'number' ? r.wakeInMinutes : undefined)
+            pulls.length ? pulls : undefined, typeof r.wakeInMinutes === 'number' ? r.wakeInMinutes : undefined,
+            typeof r.notes === 'string' ? r.notes : undefined)
         } catch (error) {
           log.line('warn', 'worker.report_refused', { agent: record.agent, error: String(error).slice(0, 200) })
         }
