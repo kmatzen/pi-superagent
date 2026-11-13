@@ -651,6 +651,7 @@ describe('the router extension', () => {
     await until(() => h.envs.length === 1)
     const bin = join(f.dir, 'bin')
     expect(h.envs[0]!.PATH?.startsWith(`${bin}:`), 'the shim comes first on the worker tab PATH').toBe(true)
+    expect(h.envs[0]!.PI_SUPERAGENT_HOME_REPO, 'and the worker knows whose issues only the router closes').toBe('o/r')
     expect(statSync(join(bin, 'pi')).mode & 0o111, 'the shim is executable').not.toBe(0)
     expect(readFileSync(join(bin, 'pi'), 'utf8')).toMatch(/systemd-run --user --scope .*--slice=pi-superagent\.slice/)
     expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/worker\.limits memoryMaxBytes=\d+ cpuPercent=\d+ tasksMax=2048/)
