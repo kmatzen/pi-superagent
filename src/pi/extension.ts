@@ -510,7 +510,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       delete rows[ticketId]
       const ticket = repos.tickets.get(ticketId)
       const channel = ticket?.channels[0]
-      if (!ticket || ticket.ended || !channel) { log.line('info', 'wake.dropped', { ticket: ticketId, why: 'the ticket ended' }); continue }
+      // A merge that ends the ticket leaves what its worker started still running, and the issue was promised the check;
+      // only a stop by a person or the router cancels it (2026-11-13: #387's check of a prod deploy was dropped).
+      const byItsPulls = ticket?.ended?.by === 'executor' && (ticket.ended.outcome === 'merged' || ticket.ended.outcome === 'closed')
+      if (!ticket || !channel || (ticket.ended && !byItsPulls)) { log.line('info', 'wake.dropped', { ticket: ticketId, why: 'the ticket was stopped' }); continue }
       engine.receive({
         id: `wake:${ticketId}:${row.at}`, source: channel.source, threads: [{ source: channel.source, id: channel.thread }],
         actor: { source: channel.source, id: 'router' }, human: true, at: new Date(now).toISOString(),
@@ -526,7 +529,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const pullApi = deps.pullApi ?? ghPulls(accounts.pulls)
 
   const closer = new IssueCloser({
-    tickets: repos.tickets, kv: repos.kv, pullApi, home, log,
+    tickets: repos.tickets, kv: repos.kv, pullApi, home, log, pendingCheck: ticketId => !!wakes()[ticketId],
     ...(githubApi?.closeIssue ? { closeIssue: (issue: number) => githubApi.closeIssue!(issue) } : {}),
     flushReplies: async () => { outbox.flush(); await outbox.drained() },
     ...(cfg.keepIssuesOpen ? { keepIssuesOpen: true } : {}),
@@ -618,7 +621,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const pulls = (ticket.follows ?? []).filter(f => f.own && f.closed)
       .flatMap(f => { const pull = parseThread(f.thread.replace(/^github:/, ''), home)
         return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome }] : [] })
-    outbox.send({ id: `pull-end:${ticket.id}`, channel, kind: 'notice', ticketId: ticket.id, text: pullEndText(channel.thread, pulls) })
+    // One note per end: a ticket resumed on a reopened issue ends again, and its first end's note id silenced the second (2026-11-13, #387).
+    outbox.send({ id: `pull-end:${ticket.id}:${ticket.ended.at}`, channel, kind: 'notice', ticketId: ticket.id,
+      text: pullEndText(channel.thread, pulls, wakes()[ticket.id]?.at) })
     // The merge was the work landing: with the pull request done, the ticket has nothing left to wait on.
     finishIssue(ticket.id)
   }

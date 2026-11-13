@@ -62,10 +62,15 @@ export function receiptText(thread: string, origin: ReportOrigin, run: ReportedR
  * carries its own outcome, because a ticket can open several: the engine ends it on the LAST close, and
  * naming every pull by that one outcome told the person that a merged pull request had been closed.
  */
-export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; outcome: 'merged' | 'closed' }>): string {
+export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; outcome: 'merged' | 'closed' }>, checkAt?: string): string {
   const urls = (list: string[]): string => list.join(', ') || 'its pull request'
   const merged = pulls.filter(p => p.outcome === 'merged').map(p => p.url)
   const closed = pulls.filter(p => p.outcome === 'closed').map(p => p.url)
+  if (checkAt) {
+    const what = [merged.length ? `${urls(merged)} merged` : '', closed.length ? `${urls(closed)} closed without merging` : ''].filter(Boolean).join(' and ')
+    return `${thread}: ${what || `${urls([])} ended`}. A fresh worker still makes the check the last one asked for at ${checkAt.slice(11, 16)} UTC, `
+      + 'and this issue stays open until it reports.'
+  }
   if (!closed.length) return `${thread} merged: ${urls(merged)}. This ticket is done.`
   if (!merged.length) return `${thread}: ${urls(closed)} closed without merging, so this ticket ends. A comment here starts the work again.`
   return `${thread}: ${urls(merged)} merged and ${urls(closed)} closed without merging, so this ticket ends with the work that landed. A comment here starts the work again.`
