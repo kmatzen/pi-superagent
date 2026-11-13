@@ -176,6 +176,19 @@ describe('the worker role', () => {
     expect(verdict('ticket_report', { state: 'ready', summary: 'shipped' }), 'an expired claim holds nothing').toBeUndefined()
   })
 
+  it('refuses a pull request or commit that would close a board issue on merge, and lets a plain reference through', () => {
+    // 2026-11-13: merging the first of five pull requests closed issue 340 through its "Closes" line.
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp(), PI_SUPERAGENT_WORKSPACE: '/w', PI_SUPERAGENT_HOME_REPO: 'acme/board' })
+    const verdict = (toolName: string, input: Record<string, unknown>) => f.emit('tool_call', { toolName, input }).find(v => v)
+    expect(verdict('bash', { command: 'gh pr create --title Layer --body "Closes acme/board#340"' }))
+      .toMatchObject({ block: true, reason: expect.stringContaining('Part of') })
+    expect(verdict('bash', { command: 'git commit -m "fix acme/board#340"' }), 'a commit message closes it too').toMatchObject({ block: true })
+    expect(verdict('bash', { command: 'gh pr create --title Layer --body "Part of acme/board#340"' })).toBeUndefined()
+    expect(verdict('ticket_report', { state: 'ready', summary: 'This closes acme/board#340 once all five merge.' }),
+      'a report is not a pull request').toBeUndefined()
+  })
+
   it('a person typing in the tab lifts the handover, and leaves word for the router that a person is there', () => {
     // 2026-11-12, ticket 340: the operator drove a freed worker from its tab, and after the handover every tool was refused.
     const dir = tmp()
