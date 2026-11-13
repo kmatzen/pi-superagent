@@ -2,7 +2,8 @@
  *  worker, and inert everywhere else. */
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { execFile, execFileSync } from 'node:child_process'
+import { rm } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 const runGit = promisify(execFile)
@@ -131,6 +132,8 @@ export interface ExtensionDeps {
   workerTiming?: { pollMs?: number; livenessMs?: number }
   /** Tests: whether systemd user scopes work here (the default probes the host). */
   scopesWork?: () => boolean
+  /** Size of a settled workspace for the sweep's budget; tests slow it down. */
+  sizeOf?: (dir: string) => Promise<number>
   /** Tests: caps every worker together (the default sets the slice's limits through systemctl). */
   capWorkerGroup?: (group: GroupLimits) => boolean
 }
@@ -1117,21 +1120,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
   const recovered = (async () => {
     for (const ticket of repos.tickets.open()) await recover(ticket)
-    const openIds = new Set(repos.tickets.open().map(t => t.id))
-    const beganSweep = Date.now()
     // Ninety days: the ticket row is the engine's working set, and the issue on GitHub is the record.
     const pruned = repos.pruneClosedTickets(new Date(Date.now() - 90 * 86_400_000).toISOString())
     if (pruned) log.line('info', 'tickets.pruned', { removed: pruned, olderThanDays: 90 })
-    const swept = await sweepWorktrees(cfg.worktreeRoot, openIds, cfg.keepWorktrees ?? 20, (cfg.workBudgetGb ?? 200) * 1024 ** 3)
     // The per-worker HOMEs are gone from the code; their directory, with a copy of the bot token in each, goes too.
     rmSync(join(cfg.dataDir, 'worker-homes'), { recursive: true, force: true })
-    if (swept.removed || swept.keptWork) {
-    if (swept.strays) log.line('warn', 'worktree.strays', { strays: swept.strays, root: cfg.worktreeRoot })
-      log.line('info', 'worktree.swept', {
-        ...swept, keptWorkIds: swept.keptWorkIds.slice(0, 8), seconds: Math.round((Date.now() - beganSweep) / 1000),
-        kept: cfg.keepWorktrees ?? 20,
-        note: swept.keptWork ? 'settled checkouts with commits on no remote are never deleted' : undefined })
-    }
     if (!herdrWorkers) return
     const adopted = new Set(executor.workers().map(w => w.sessionId))
     // Every tick waits on this: a herdr hiccup during the sweep must not wedge the router for its whole life.
@@ -1142,6 +1135,20 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       log.line('error', 'recover.sweep_failed', { error: String(error).slice(0, 200) })
     }
   })()
+  // Beside the passes, not in front of them: after a reboot each `du` took up to 30 s on a cold disk, and the router ran
+  // no pass and answered no panel for four minutes (2026-11-13).
+  void recovered.then(async () => {
+    const beganSweep = Date.now()
+    const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)), cfg.keepWorktrees ?? 20,
+      (cfg.workBudgetGb ?? 200) * 1024 ** 3, deps.sizeOf)
+    if (swept.strays) log.line('warn', 'worktree.strays', { strays: swept.strays, root: cfg.worktreeRoot })
+    if (swept.removed || swept.keptWork) {
+      log.line('info', 'worktree.swept', {
+        ...swept, keptWorkIds: swept.keptWorkIds.slice(0, 8), seconds: Math.round((Date.now() - beganSweep) / 1000),
+        kept: cfg.keepWorktrees ?? 20,
+        note: swept.keptWork ? 'settled checkouts with commits on no remote are never deleted' : undefined })
+    }
+  }).catch((error: unknown) => log.line('error', 'worktree.sweep_failed', { error: String(error).slice(0, 200) }))
 
   let pollFailures = 0
   /** The GitHub source's own state, published into health.json next to the tick's. */
@@ -1426,14 +1433,17 @@ function isDirectory(path: string): boolean {
   try { return statSync(path).isDirectory() } catch { return false }
 }
 
-export async function sweepWorktrees(root: string, open: ReadonlySet<string>, keep: number, maxBytes = 200 * 1024 ** 3): Promise<SweepReport> {
+export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (() => ReadonlySet<string>), keep: number,
+                                     maxBytes = 200 * 1024 ** 3, sizeOf: (dir: string) => Promise<number> = dirBytes): Promise<SweepReport> {
+  // Asked at each delete: the sweep runs beside the passes, and a ticket can reopen while it runs.
+  const isOpen = (name: string): boolean => (typeof open === 'function' ? open() : open).has(name)
   const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [] }
   let names: string[]
   try { names = readdirSync(root) } catch { return report }
   const dirs = names.filter(name => isDirectory(join(root, name)))
   report.strays = names.length - dirs.length
   const settled = dirs
-    .filter(name => !open.has(name))
+    .filter(name => !isOpen(name))
     .map(name => ({ name, at: statSync(join(root, name)).mtimeMs }))
     .sort((a, b) => b.at - a.at)
   for (const [index, entry] of settled.entries()) {
@@ -1444,19 +1454,22 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string>, ke
       if (readdirSync(dir).length === 0) report.empty++; else report.bare++
     }
     if (checkout && await unpushedCommits(checkout) > 0) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
-    try { rmSync(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
+    if (isOpen(entry.name)) continue
+    try { await rm(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
   }
   // The count is not the cost: measured 2026-11-11, the kept set was 58 GB because one build tree is 15 GB.
   // Settled checkouts, oldest first, go over the count as well until the root fits the budget.
   const kept = names.filter(name => isDirectory(join(root, name))).map(name => ({ name, at: safeMtime(join(root, name)) }))
-  let bytes = kept.reduce((sum, e) => sum + dirBytes(join(root, e.name)), 0)
-  for (const e of kept.filter(e => !open.has(e.name)).sort((a, b) => a.at - b.at)) {
+  let bytes = 0
+  for (const e of kept) bytes += await sizeOf(join(root, e.name))
+  for (const e of kept.filter(e => !isOpen(e.name)).sort((a, b) => a.at - b.at)) {
     if (bytes <= maxBytes) break
     const dir = join(root, e.name)
     const checkout = checkoutOf(dir)
     if (checkout && await unpushedCommits(checkout) > 0) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
-    const size = dirBytes(dir)
-    try { rmSync(dir, { recursive: true, force: true }); report.removed++; bytes -= size } catch { /* next sweep's problem */ }
+    const size = await sizeOf(dir)
+    if (isOpen(e.name)) continue
+    try { await rm(dir, { recursive: true, force: true }); report.removed++; bytes -= size } catch { /* next sweep's problem */ }
   }
   return report
 }
@@ -1466,8 +1479,8 @@ function safeMtime(path: string): number {
 }
 
 /** `du -sk`: a 30 GB tree in milliseconds; a vanished or unreadable dir counts as free, so it is never the reason to delete a neighbour. */
-function dirBytes(dir: string): number {
-  try { return Number(execFileSync('du', ['-sk', dir], { encoding: 'utf8', timeout: 30_000 }).split('\t')[0]) * 1024 } catch { return 0 }
+async function dirBytes(dir: string): Promise<number> {
+  try { return Number((await runGit('du', ['-sk', dir], { encoding: 'utf8', timeout: 30_000 })).stdout.split('\t')[0]) * 1024 } catch { return 0 }
 }
 
 /** Read at every launch, so a rotated token lands on the next worker without a router restart. */
