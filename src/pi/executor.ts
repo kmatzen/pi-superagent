@@ -216,6 +216,9 @@ export class PiExecutor {
       // restart the router's memory of what a worker finished lives in that record, not in this map.
       lastState: assignment.report?.state ?? '', assignmentId: assignment.id,
     }
+    // Registered before it subscribes: subscribing reads the worker's file at once, and a report it filed while no router
+    // ran found no live worker and was dropped (2026-11-13: a waiting report, read 5 ms before its worker was adopted).
+    this.live.set(ticket.id, live)
     live.unsubscribe = session.subscribe(event => {
       live.lastEventAt = Date.now()
       live.events += 1
@@ -239,7 +242,6 @@ export class PiExecutor {
         if (this.live.get(ticket.id) === live) { live.unsubscribe(); this.live.delete(ticket.id); live.session.dispose() }
       }
     })
-    this.live.set(ticket.id, live)
   }
 
   deliver(ticket: Ticket, assignment: Assignment): void {
