@@ -85,7 +85,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
                    workerQuietMinutes?: number; pullApi?: PullApi; blocked?: string[];
                    judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
                    maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number;
-                   workerStartMs?: number; closeRecheckMs?: number; scopesWork?: boolean; groupCap?: boolean; clock?: () => number } = {}) {
+                   workerStartMs?: number; closeRecheckMs?: number; scopesWork?: boolean; groupCap?: boolean; clock?: () => number; sizeOf?: (dir: string) => Promise<number> } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [], closedIssues: [] }
   const closes: number[] = []
@@ -163,7 +163,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
   before?.(dir)
   const running = createRouterExtension(pi, { config, sdk, ...(herdr ? { herdr } : {}), githubApi: api, now: () => new Date(options.clock?.() ?? Date.now()).toISOString(),
     ...(options.workerTiming ? { workerTiming: options.workerTiming } : {}), ...(options.pullApi ? { pullApi: options.pullApi } : {}),
-    scopesWork: () => options.scopesWork ?? false, capWorkerGroup: () => options.groupCap ?? true })
+    scopesWork: () => options.scopesWork ?? false, capWorkerGroup: () => options.groupCap ?? true, ...(options.sizeOf ? { sizeOf: options.sizeOf } : {}) })
   live.push(running)
   // A deterministic stand-in for the model: the tests bind the wiring, not the judgement.
   const decide = (kind: 'accept' | 'ignore') => {
@@ -1837,6 +1837,28 @@ describe('a pull request per ticket', () => {
 })
 
 describe('the state a router start leaves behind', () => {
+  it('a slow workspace sweep holds up no pass: it runs beside them', async () => {
+    // 2026-11-13: after a reboot each `du` took up to 30 s on a cold disk, and the router ran no pass for four minutes.
+    let free!: () => void
+    const stuck = new Promise<number>(resolve => { free = () => resolve(0) })
+    const f = fixture(true, dir => { mkdirSync(join(dir, 'work', 'settled-1'), { recursive: true }) }, undefined, undefined,
+      { sizeOf: () => stuck, tickMs: 3_600_000 })
+    const pass = await Promise.race([f.running.tick().then(() => 'passed'), new Promise(resolve => setTimeout(() => resolve('held'), 1000))])
+    free()
+    expect(pass, 'the pass does not wait for the sweep').toBe('passed')
+  })
+
+  it('a workspace whose ticket reopens while the sweep runs is kept', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-live-'))
+    for (const name of ['old-a', 'old-b']) mkdirSync(join(root, name))
+    const open = new Set<string>()
+    const report = await sweepWorktrees(root, () => open, 20, 0, async dir => { if (dir.endsWith('old-a')) open.add('old-a'); return 1024 })
+    expect(existsSync(join(root, 'old-a')), 'reopened mid-sweep').toBe(true)
+    expect(existsSync(join(root, 'old-b'))).toBe(false)
+    expect(report.removed).toBe(1)
+    rmSync(root, { recursive: true, force: true })
+  })
+
   it('the byte budget sweeps settled checkouts oldest-first, and open tickets never pay for it', async () => {
     // The count is not the cost: the kept set measured 58 GB on 2026-11-11 because one build tree is 15 GB.
     const root = mkdtempSync(join(tmpdir(), 'sa-budget-'))
