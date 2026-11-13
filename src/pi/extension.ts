@@ -708,6 +708,26 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       ...(cfg.herdrWorkspace ? { workspaceLabel: cfg.herdrWorkspace } : {}), ...deps.workerTiming, ...(cfg.workerStartMs ? { startTimeoutMs: cfg.workerStartMs } : {}) })
     : undefined
 
+  // The person's own words, verbatim and in order: fresh workers rebuilt the plan from the original request and a skim
+  // of the thread, and kept missing the later instructions that replaced it (operator, 2026-11-13).
+  const personWords = (ticket: Ticket): string => {
+    const machine = new Set([cfg.githubSelf ?? cfg.self, ...(cfg.bots ?? [])])
+    // The request it was accepted from, then everything that reached it since.
+    const ids = new Set([...(ticket.origin?.triggerIds ?? []), ...ticket.inputs.flatMap(input => input.kind === 'trigger' ? [input.triggerId] : [])])
+    const said = [...ids].flatMap(id => {
+      const trigger = repos.triggers.get(id)
+      const author = String(trigger?.meta?.author ?? trigger?.actor?.id ?? '')
+      if (!trigger?.human || !['issue', 'comment', 'review'].includes(String(trigger.meta?.via ?? 'comment')) || isListed(author, machine)) return []
+      return [{ at: trigger.at, author, text: trigger.text.trim().slice(0, 2000) }]
+    }).sort((a, b) => a.at.localeCompare(b.at))
+    const kept: typeof said = []
+    for (let i = said.length - 1, room = 12_000; i >= 0 && room >= said[i]!.text.length; room -= said[i]!.text.length, i--) kept.unshift(said[i]!)
+    if (!kept.length) return ''
+    return '\n\nWhat people have said on this ticket, word for word and oldest first. Where an instruction differs from an earlier one '
+      + 'or from the original request, the newest wins:\n'
+      + kept.map(w => `- ${w.at.slice(0, 16).replace('T', ' ')} UTC, ${w.author}: ${w.text.replace(/\s*\n\s*/g, ' ')}`).join('\n')
+  }
+
   const executor = new PiExecutor(engine, {
     launch: async ({ ticket, report }) => {
       const channel = ticket.channels[0]
@@ -779,6 +799,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }, {
     worktreeFor: ticket => `${cfg.worktreeRoot}/${ticket.id}`,
     briefFor: ticket => {
+      const words = personWords(ticket)
       // A worker started after a failed attempt shares that attempt's workspace, and must look before redoing it.
       const before = ticket.assignments.filter(a => a.report?.state === 'failed').at(-1)?.report
       const brief = briefFor(ticket, `${cfg.worktreeRoot}/${ticket.id}`) + (before
@@ -794,7 +815,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         : `\n${cfg.workerTokenFile
           ? pullBrief(issue && repo ? `${repo}#${issue}` : undefined)
           : pullBrief(undefined, false)}`
-      if (!issue || !repo) return brief + pulls
+      if (!issue || !repo) return brief + pulls + words
       // A comment the worker posts itself carries no reply footer, so the router would read it as the
       // operator asking again on this thread.
       const clone = cfg.watchRepoIsAsks
@@ -803,7 +824,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
           + 'and if it names none, report blocked and say what you need. '
         : ''
       return `${brief}\nThe request is GitHub issue ${repo}#${issue}: read it with \`gh issue view ${issue} --repo ${repo} --comments\`. `
-        + clone + 'Do not comment on the issue yourself; ticket_report is how your result reaches it.' + pulls
+        + clone + 'Do not comment on the issue yourself; ticket_report is how your result reaches it.' + pulls + words
     },
     renderInput,
     reported,
