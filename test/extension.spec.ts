@@ -231,6 +231,32 @@ describe('the router extension', () => {
     expect(trail, 'the trail says the worker was told').toMatch(/input\.delivered/)
   })
 
+  it("a fresh worker's brief carries what the person said on the ticket, word for word and in order, and no bot's words", async () => {
+    // 2026-11-13: fresh workers rebuilt the plan from the original request and kept missing the later instructions.
+    const f = fixture()
+    f.addComment('530', 'octocat', 'compare the trackers', '2026-11-05T09:00:00Z')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    f.workers[0]!.report!({ state: 'blocked', summary: 'two options', question: 'Real footage or synthetic?' })
+    await f.running.tick()
+    f.addComment('530', 'fleet-answer-loop', 'automated status noise', '2026-11-05T09:20:00Z')
+    // A dashboard a tool keeps under the person's own account is not the person speaking.
+    f.running.engine.receive({ id: 'github:#530:dash', source: 'github', threads: [{ source: 'github', id: '#530' }],
+      actor: { source: 'github', id: 'octocat' }, human: false, at: '2026-11-05T09:25:00Z', text: '<!-- ci --> dashboard table',
+      meta: { via: 'comment', author: 'octocat', association: 'OWNER' } } as never)
+    f.addComment('530', 'octocat', 'only before and after videos\non real footage', '2026-11-05T09:30:00Z')
+    await f.running.tick()
+    await settle()
+    await until(() => f.workers.length === 2)
+    const brief = f.workers[1]!.prompts[0]!
+    expect(brief).toContain('What people have said on this ticket, word for word and oldest first')
+    expect(brief).toMatch(/octocat: compare the trackers[\s\S]*2026-11-05 09:30 UTC, octocat: only before and after videos on real footage/)
+    expect(brief, 'a bot is not the person').not.toContain('automated status noise')
+    expect(brief, 'nor a dashboard under their name').not.toContain('dashboard table')
+  })
+
   it('a launch that fails on every poll says so on the issue once', async () => {
     // Polls are driven by hand: a launch retries on every poll, and a 5 ms timer would spawn shells nonstop.
     const f = fixture(true, undefined, undefined, undefined, { prepare: 'echo "no space left on device" >&2; exit 3', tickMs: 3_600_000 })
