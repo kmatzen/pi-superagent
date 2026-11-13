@@ -154,6 +154,16 @@ describe('PiExecutor', () => {
     expect(f.calls_of('report'), 'and this router no longer acts on it').toEqual([])
   })
 
+  it('a report the worker filed while no router ran is read when it is adopted, not dropped', () => {
+    // 2026-11-13: subscribing read the worker's file before the worker was registered, and its waiting report was dropped.
+    const f = fixture()
+    const session = new FakeSession('kept')
+    session.subscribe = () => { session.report('waiting', 'filed while the router was down'); return () => {} }
+    f.executor.adopt(ticket(), assignment(), report => { session.report = report as never; return session })
+    expect(f.calls_of('reportDropped'), 'nothing dropped').toEqual([])
+    expect(f.calls_of('report').map(c => (c.args[1] as { summary: string }).summary)).toEqual(['filed while the router was down'])
+  })
+
   it('adopts a running worker without prompting its brief again', () => {
     const f = fixture()
     const session = new FakeSession('kept')
