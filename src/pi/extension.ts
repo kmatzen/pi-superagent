@@ -727,6 +727,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
             ...(token && cfg.workerTokenFile ? { PI_SUPERAGENT_WORKER_TOKEN_FILE: cfg.workerTokenFile } : {}),
             ...(cfg.blockedCommands?.length ? { PI_SUPERAGENT_BLOCKED: cfg.blockedCommands.join(',') } : {}),
             ...(cfg.allowDelegation ? { PI_SUPERAGENT_ALLOW_DELEGATION: '1' } : {}),
+            // The board's repository, whose issues only the router closes: the worker role refuses a closing keyword for one.
+            ...(cfg.githubRepo ? { PI_SUPERAGENT_HOME_REPO: cfg.githubRepo } : {}),
             ...(limitBin ? { PATH: `${limitBin}:${process.env.PATH ?? ''}` } : {}),
           },
         })
