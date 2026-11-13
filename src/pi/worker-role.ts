@@ -5,6 +5,7 @@ import { basename, join } from 'node:path'
 import { reportTool } from './report-tool.ts'
 import { guardExtension } from './workspace.ts'
 import { NOT_ENGLISH, nonEnglish, publishedText } from './english.ts'
+import { closesBoardIssue, closingRefused } from './closing.ts'
 
 export interface WorkerPi {
   registerTool(tool: ReturnType<typeof reportTool>): void
@@ -110,6 +111,8 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
       : call.toolName === 'bash' && typeof call.input?.command === 'string'
         ? publishedText(call.input.command, env.PI_SUPERAGENT_WORKSPACE ?? process.cwd()) : undefined
     if (text && nonEnglish(text)) return { block: true, reason: NOT_ENGLISH }
+    const closing = call.toolName === 'bash' && text ? closesBoardIssue(text, env.PI_SUPERAGENT_HOME_REPO ?? '') : undefined
+    if (closing) return { block: true, reason: closingRefused(closing) }
   })
   // A person typing here is new work, not the worker running on alone: the handover refused the operator every tool (2026-11-12).
   pi.on('input', (event?: unknown) => {
