@@ -9,6 +9,8 @@ export interface ReportedRun {
   pullRequests?: readonly string[]
   /** When a fresh worker is called back to check what this run left running. */
   wakeAt?: string
+  /** For the next worker on the ticket only: never part of a receipt. */
+  notes?: string
 }
 
 const STILL_OPEN = 'The worker is still open: reply here to steer it, or close the issue to drop the ticket.'

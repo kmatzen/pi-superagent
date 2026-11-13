@@ -23,6 +23,26 @@ describe('ticket_report', () => {
     expect(calls).toEqual([60, 30])
   })
 
+  it('refuses a summary that fails the plain-language check in the worker\'s own turn, says what to fix, and reports nothing', () => {
+    const calls: string[] = []
+    const tool = reportTool((_s, summary) => { calls.push(summary) })
+    const wall = `Fixed \`launcher.py\` token precedence in caramel/pluto/launcher.py; CI run mid-flight, check back in 50 min to confirm the pod clone.`
+    const refused = tool.execute('r', { state: 'ready', summary: wall })
+    expect(refused.isError).toBe(true)
+    expect(refused.content[0]!.text).toMatch(/^Not reported: the summary is posted on the issue for the person who asked/)
+    expect(refused.content[0]!.text).toMatch(/line 1 contains a file path/)
+    expect(refused.content[0]!.text, 'and where the detail belongs').toMatch(/what to check next go in notes/)
+    expect(calls, 'nothing reached the router').toEqual([])
+  })
+
+  it('hands private notes to the reporter beside a summary that reads plainly', () => {
+    const calls: Array<[string, string | undefined]> = []
+    const tool = reportTool((_s, summary, _q, _o, _p, _w, notes) => { calls.push([summary, notes]) })
+    expect(tool.execute('r', { state: 'ready', summary: 'The upload fix is in review.', notes: '  check caramel/pluto/launcher.py first  ' }).isError).toBeUndefined()
+    expect(tool.execute('r', { state: 'ready', summary: 'The upload fix is in review.', notes: '   ' }).isError).toBeUndefined()
+    expect(calls).toEqual([['The upload fix is in review.', 'check caramel/pluto/launcher.py first'], ['The upload fix is in review.', undefined]])
+  })
+
   it('says the work is reported when the router took the report', () => {
     expect(answer('recorded')).toBe('reported')
   })
