@@ -1279,6 +1279,57 @@ describe('a pull request per ticket', () => {
     expect(f.receipts('490')).not.toContain('Stopped: this conversation closed')
   })
 
+  it('a ticket that ends a second time says so and closes its issue again', async () => {
+    // 2026-11-13, #387: the closing note and the close were once per ticket, so its end after a reopen left the issue open in silence.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    const ticket = await working(f, '494')
+    pulls.open('o/r', 85)
+    f.workers[0]!.report!({ state: 'ready', summary: 'Renamed it.', pullRequests: ['https://github.com/o/r/pull/85'] })
+    await f.running.tick()
+    pulls.end('o/r', 85, true)
+    await f.running.tick()
+    await f.running.tick()
+    expect(callsOf(f, '494').filter(c => c === 'close:494')).toHaveLength(1)
+    f.addComment('494', 'octocat', 'one more: rename Import too', new Date().toISOString())
+    await f.running.tick()
+    await settle()
+    await until(() => f.workers.length === 2)
+    expect(ticket().ended, 'the comment resumed it').toBeUndefined()
+    pulls.open('o/r', 86)
+    f.workers[1]!.report!({ state: 'ready', summary: 'Renamed Import too.', pullRequests: ['https://github.com/o/r/pull/86'] })
+    await f.running.tick()
+    pulls.end('o/r', 86, true)
+    await f.running.tick()
+    await f.running.tick()
+    expect(f.receipts('494')).toContain('#494 merged: https://github.com/o/r/pull/85, https://github.com/o/r/pull/86. This ticket is done.')
+    expect(callsOf(f, '494').filter(c => c === 'close:494'), 'closed again').toHaveLength(2)
+  })
+
+  it('a check the last worker asked for outlives the merge that ends its ticket, and the issue closes after it reports', async () => {
+    // 2026-11-13, #387: the merge ended the ticket 14 minutes before its check of a prod deploy, and the router dropped the check.
+    let now = Date.now()
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api, clock: () => now })
+    const ticket = await working(f, '495')
+    pulls.open('o/r', 87)
+    f.workers[0]!.report!({ state: 'waiting', summary: 'The deploy is rolling out.', pullRequests: ['https://github.com/o/r/pull/87'], wakeInMinutes: 30 })
+    await f.running.tick()
+    pulls.end('o/r', 87, true)
+    await f.running.tick()
+    await f.running.tick()
+    expect(ticket().ended).toMatchObject({ outcome: 'merged' })
+    expect(f.receipts('495')).toMatch(/#495: https:\/\/github.com\/o\/r\/pull\/87 merged\. A fresh worker still makes the check the last one asked for at \d\d:\d\d UTC, and this issue stays open until it reports\./)
+    expect(callsOf(f, '495'), 'the check still owes a report').not.toContain('close:495')
+    now += 31 * 60_000
+    await f.running.tick()
+    await until(() => f.workers.length === 2)
+    f.workers[1]!.report!({ state: 'ready', summary: 'The deploy held: two nodes, no new ones.' })
+    await f.running.tick()
+    await f.running.tick()
+    expect(callsOf(f, '495'), 'closed once the check reported').toContain('close:495')
+  })
+
   it('the issue stays open while a pull request it is waiting on is open, and a read that answers nothing holds it open', async () => {
     // The operator's rule, 2026-11-10, after issues closed with a pull request still open: the ticket ends when
     // its last recorded follow closes, and a recorded close can come from a read that never succeeded. The

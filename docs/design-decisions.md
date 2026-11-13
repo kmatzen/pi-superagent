@@ -180,6 +180,13 @@ observe the closure even if it cannot distinguish deletion, manual closure and c
 It stops the ticket and queues a notice. For a ticket awaiting its own PR, the PR’s merge or close
 determines the outcome. Reopening an issue lets its author ask again.
 
+**Every end closes the issue, and a promised check survives a merge.** A ticket resumed on a reopened
+issue can end again, and each end posts its own note and closes the issue again; both were once per
+ticket, so on 2026-11-13 #387's second end left it open in silence. A merge that ends a ticket whose
+worker asked to be called back to check on something still running does not cancel the call: the
+note says the check still happens, the issue stays open, and the check's report ends the ticket. Only
+a stop by a person or the router cancels it.
+
 **Bind the PR before processing a ready report.** A worker that changes a repository opens a PR and
 includes its URL in its report. A number such as `#5` could also name an issue. Binding the URL
 first lets the engine hold the ticket open for review. Merging or closing the PR ends the ticket,

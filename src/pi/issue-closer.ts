@@ -16,6 +16,8 @@ export interface IssueCloserOptions {
   log: EngineLog
   keepIssuesOpen?: boolean
   now: () => string
+  /** A check the ticket's last worker asked for, still to run: the issue stays open until it reports. */
+  pendingCheck?: (ticketId: string) => boolean
   /** How long a close that waits on an open pull request waits before GitHub is asked again. Default 10 min. */
   recheckMs?: number
 }
@@ -88,7 +90,10 @@ export class IssueCloser {
     const address = channel.address as { issue?: string; repo?: string }
     // Only the watched repository's issues: an issue in another repository belongs to that repository's board.
     if (!address.issue || address.repo) return undefined
-    if (this.closedHere()[ticket.id]) return undefined
+    // Closed for this end only: a ticket resumed on a reopened issue that ends again closes it again (2026-11-13, #387).
+    const closedAt = this.closedHere()[ticket.id]
+    if (closedAt && closedAt >= ticket.ended.at) return undefined
+    if (this.o.pendingCheck?.(ticket.id)) return undefined
     // A newer ticket owns the issue now; closing it would stop that ticket's work.
     if (this.o.tickets.open().some(t => t.channels[0]?.thread === channel.thread)) return undefined
     return Number(address.issue) || undefined
