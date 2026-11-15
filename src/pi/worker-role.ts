@@ -1,6 +1,5 @@
 /** The superagent inside a worker's own pi: report tool, guard, and a file bridge to the router in another process. */
 import {appendFileSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync} from 'node:fs'
-import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { reportTool } from './report-tool.ts'
 import { guardExtension } from './workspace.ts'
@@ -86,9 +85,11 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
     return { block: true, reason: AFTER_HANDOVER }
   })
   // Someone always watches what a worker leaves running (operator, 2026-11-12, after a training run went unwatched):
-  // a worker that still holds a Pluto claim hands over only with a wake-up scheduled, or after releasing the claim.
-  const claimsFile = env.PI_SUPERAGENT_CLAIMS_FILE ?? join(homedir(), '.pi', 'pluto-jobs.json')
+  // a worker that still holds a GPU job claim hands over only with a wake-up scheduled, or after releasing the claim.
+  // The ledger is the deployment's to name (PI_SUPERAGENT_CLAIMS_FILE); with none, there is no claim to hold.
+  const claimsFile = env.PI_SUPERAGENT_CLAIMS_FILE?.trim()
   const heldClaims = (): string[] => {
+    if (!claimsFile) return []
     try {
       const today = new Date().toISOString().slice(0, 10)
       const ledger = JSON.parse(readFileSync(claimsFile, 'utf8')) as { entries?: Array<{ ref?: string; session?: string; expiresAt?: string }> }
