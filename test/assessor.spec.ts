@@ -129,7 +129,7 @@ describe('SessionAssessor', () => {
       evalId: 'e1', key: 'github:#191', id: '#191', strength: 'explicit', policyVersion: 'v1',
       thread: { key: 'github:#191' } as never,
       triggers: [{
-        id: 't1', actor: { source: 'github', id: 'kblackburn' }, human: true, at: '2026-11-07T01:09:00Z',
+        id: 't1', actor: { source: 'github', id: 'octocat' }, human: true, at: '2026-11-07T01:09:00Z',
         text: 'https://example.sentry.io/issues/7829822666/?project=4511909839699968',
       } as never],
       tickets: [],

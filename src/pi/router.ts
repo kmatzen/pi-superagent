@@ -23,6 +23,9 @@ export interface RouterConfig {
    * that token instead of as the operator. Unset, the brief tells the worker it cannot push.
    */
   workerTokenFile?: string
+  /** A JSON ledger of GPU job claims (`{ entries: [{ ref, session, expiresAt }] }`), handed to workers: a worker that
+   *  still holds a claim must schedule a wake-up before it hands over. Unset, nothing is checked. */
+  claimsFile?: string
   /** Milliseconds a worker session gets to reach its prompt (PI_SUPERAGENT_WORKER_START_MS); the default is 2 minutes. */
   workerStartMs?: number
   /** How long a close that waits on an open pull request waits before GitHub is asked again; default 10 min. */
@@ -142,7 +145,7 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   'whatever language you think in. Text in another language is refused before it is sent.',
   'Someone always watches what you start. If you leave something running (a training job, CI, a deploy), report waiting',
   'with wakeInMinutes, when it should next be checked, and say in notes what to check: a fresh worker is called',
-  'back then. Report ready only when nothing you started still runs. While you hold a Pluto claim, a report or a question',
+  'back then. Report ready only when nothing you started still runs. While you hold a GPU job claim, a report or a question',
   'without a wake-up is refused: schedule one, or stop the job and release the claim.',
   'Never write a closing keyword for this ticket\'s issue (Closes, Fixes or Resolves with its reference) in a pull request or',
   'commit: the first merge would close the issue while the other pull requests are open. Write "Part of" with the',
