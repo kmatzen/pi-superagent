@@ -768,6 +768,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
             ...(cfg.allowDelegation ? { PI_SUPERAGENT_ALLOW_DELEGATION: '1' } : {}),
             // The board's repository, whose issues only the router closes: the worker role refuses a closing keyword for one.
             ...(cfg.githubRepo ? { PI_SUPERAGENT_HOME_REPO: cfg.githubRepo } : {}),
+            ...(cfg.claimsFile ? { PI_SUPERAGENT_CLAIMS_FILE: cfg.claimsFile } : {}),
             ...(limitBin ? { PATH: `${limitBin}:${process.env.PATH ?? ''}` } : {}),
           },
         })
@@ -1651,6 +1652,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const panelPort = positiveNumber('PI_SUPERAGENT_PANEL_PORT', env.PI_SUPERAGENT_PANEL_PORT)
   const keepWorktrees = positiveNumber('PI_SUPERAGENT_KEEP_WORKTREES', env.PI_SUPERAGENT_KEEP_WORKTREES)
   const workerTokenFile = env.PI_SUPERAGENT_WORKER_TOKEN_FILE?.trim()
+  const claimsFile = env.PI_SUPERAGENT_CLAIMS_FILE?.trim()
   const workerStartMs = positiveNumber('PI_SUPERAGENT_WORKER_START_MS', env.PI_SUPERAGENT_WORKER_START_MS)
   const workerQuietMinutes = positiveNumber('PI_SUPERAGENT_WORKER_QUIET_MINUTES', env.PI_SUPERAGENT_WORKER_QUIET_MINUTES)
   const deadlineHours = positiveNumber('PI_SUPERAGENT_WORKER_DEADLINE_HOURS', env.PI_SUPERAGENT_WORKER_DEADLINE_HOURS)
@@ -1673,6 +1675,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(keepWorktrees === undefined ? {} : { keepWorktrees: Math.floor(keepWorktrees) }),
     ...(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB) === undefined ? {} : { workBudgetGb: Math.floor(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB)!) }),
     ...(workerTokenFile ? { workerTokenFile } : {}),
+    ...(claimsFile ? { claimsFile } : {}),
     ...(workerStartMs ? { workerStartMs } : {}),
     ...(workerQuietMinutes === undefined ? {} : { workerQuietMinutes }),
     ...(deadlineHours === undefined ? {} : { workerDeadlineHours: deadlineHours }),

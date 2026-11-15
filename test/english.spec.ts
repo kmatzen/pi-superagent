@@ -20,12 +20,12 @@ describe('english', () => {
 
   it('reads what a command publishes, files included, and nothing from commands that publish nothing', () => {
     const ws = tmp()
-    mkdirSync(join(ws, 'caramel'))
-    writeFileSync(join(ws, 'caramel', 'body.md'), CHINESE)
+    mkdirSync(join(ws, 'app'))
+    writeFileSync(join(ws, 'app', 'body.md'), CHINESE)
     writeFileSync(join(ws, 'msg.txt'), 'fix: 修复了注意力层的权重加载顺序问题')
     writeFileSync(join(ws, 'comment.md'), CHINESE)
     expect(publishedText(`gh pr create --title "Split" --body "${CHINESE}"`, ws)).toContain('这个')
-    expect(publishedText('cd caramel && gh pr edit 2031 --body-file body.md', ws), 'a body file next to a cd').toContain('这个')
+    expect(publishedText('cd app && gh pr edit 2031 --body-file body.md', ws), 'a body file next to a cd').toContain('这个')
     expect(publishedText('git commit -F msg.txt', ws)).toContain('修复')
     expect(publishedText('gh api repos/o/r/issues/1/comments -f body=@comment.md', ws)).toContain('这个')
     expect(publishedText(`gh pr comment 7 --body-file ${join(ws, 'comment.md')}`, '/elsewhere'), 'an absolute path').toContain('这个')

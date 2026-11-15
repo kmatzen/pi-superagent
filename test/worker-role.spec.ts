@@ -154,10 +154,27 @@ describe('the worker role', () => {
     expect(verdict('bash', { command: `grep -rn "${chinese}" docs/` }), 'searching is not publishing').toBeUndefined()
   })
 
-  it('a worker that still holds a Pluto claim cannot hand over or ask without a wake-up, and its wake-up reaches the router', () => {
+  it('with no claims ledger configured, no claim holds a report back: the engine names no ledger of its own', () => {
+    const dir = tmp()
+    const home = tmp()
+    mkdirSync(join(home, '.pi'), { recursive: true })
+    // The name config.example.env suggests: an engine that defaulted to it would read this live claim.
+    writeFileSync(join(home, '.pi', 'job-claims.json'), JSON.stringify({ entries: [{ ref: 'job-1', session: basename(dir), expiresAt: '2999-01-01' }] }))
+    const before = process.env.HOME
+    process.env.HOME = home
+    try {
+      const f = fakePi()
+      workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir, PI_SUPERAGENT_WORKSPACE: '/w' })
+      expect(f.emit('tool_call', { toolName: 'ticket_report', input: { state: 'ready', summary: 'shipped' } }).find(v => v)).toBeUndefined()
+    } finally {
+      process.env.HOME = before
+    }
+  })
+
+  it('a worker that still holds a GPU job claim cannot hand over or ask without a wake-up, and its wake-up reaches the router', () => {
     // Operator, 2026-11-12: there should always be someone watching. A worker reported ready with run 31 training.
     const dir = tmp()
-    const ledger = join(tmp(), 'pluto-jobs.json')
+    const ledger = join(tmp(), 'job-claims.json')
     const today = new Date().toISOString().slice(0, 10)
     const claim = (session: string, expiresAt: string) => ({ ref: `job-${session}`, session, authorizedBy: 'agent-self', reason: 'run 31', claimedAt: today, expiresAt })
     writeFileSync(ledger, JSON.stringify({ entries: [claim(basename(dir), '2999-01-01'), claim('another-session', '2999-01-01')] }))

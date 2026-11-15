@@ -83,7 +83,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
                  options: { githubApi?: GithubApi; issues?: IssueState[]; prepare?: string; tickMs?: number;
                    workerTiming?: { pollMs?: number; livenessMs?: number }; panelPort?: number | string;
                    workerQuietMinutes?: number; pullApi?: PullApi; blocked?: string[];
-                   judgeFails?: boolean; workerTokenFile?: string; watchRepoIsAsks?: boolean;
+                   judgeFails?: boolean; workerTokenFile?: string; claimsFile?: string; watchRepoIsAsks?: boolean;
                    maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number;
                    workerStartMs?: number; closeRecheckMs?: number; scopesWork?: boolean; groupCap?: boolean; clock?: () => number; sizeOf?: (dir: string) => Promise<number> } = {}) {
   const dir = reuse ?? tmp()
@@ -132,6 +132,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     ...(options.tickAbandonMs === undefined ? {} : { tickAbandonMs: options.tickAbandonMs }),
     ...(options.watchRepoIsAsks ? { watchRepoIsAsks: true } : {}),
     ...(options.workerTokenFile ? { workerTokenFile: options.workerTokenFile } : {}),
+    ...(options.claimsFile ? { claimsFile: options.claimsFile } : {}),
     ...(options.workerStartMs ? { workerStartMs: options.workerStartMs } : {}),
     ...(options.closeRecheckMs === undefined ? {} : { closeRecheckMs: options.closeRecheckMs }),
   }
@@ -760,6 +761,25 @@ describe('the router extension', () => {
     await until(() => h.envs.length === 1)
     expect(h.envs[0]).toMatchObject({ PI_SUPERAGENT_WORKER_TOKEN_FILE: tokenFile })
     expect(JSON.stringify(h.envs[0]), 'the token itself is nowhere in the tab environment').not.toContain('ghp_bot')
+  })
+
+  it('the claims ledger the deployment names reaches every worker, and none is named when it names none', async () => {
+    const h = memoryHerdr()
+    const f = fixture(true, undefined, undefined, h.herdr, { claimsFile: '/s/claims.json' })
+    f.addComment('514', 'octocat', 'retrain the small model')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await until(() => h.envs.length === 1)
+    expect(h.envs[0]).toMatchObject({ PI_SUPERAGENT_CLAIMS_FILE: '/s/claims.json' })
+    const g = memoryHerdr()
+    const plain = fixture(true, undefined, undefined, g.herdr)
+    plain.addComment('515', 'octocat', 'retrain the small model')
+    await plain.running.tick()
+    await settle()
+    plain.decide('accept')
+    await until(() => g.envs.length === 1)
+    expect(g.envs[0]!.PI_SUPERAGENT_CLAIMS_FILE).toBeUndefined()
   })
 
   it('a launch queue that waits with free slots and starts nobody fails the health check, and says why', async () => {
@@ -2027,6 +2047,7 @@ describe('the state a router start leaves behind', () => {
     // A setting with no name in configFrom is a setting the operator cannot set: workerQuietMinutes had none.
     expect(configFrom({ ...base, PI_SUPERAGENT_WORKER_QUIET_MINUTES: '45' })?.workerQuietMinutes).toBe(45)
     expect(configFrom({ ...base, PI_SUPERAGENT_WORKER_TOKEN_FILE: '/s/worker-token' })?.workerTokenFile).toBe('/s/worker-token')
+    expect(configFrom({ ...base, PI_SUPERAGENT_CLAIMS_FILE: '/s/claims.json' })?.claimsFile).toBe('/s/claims.json')
   })
 })
 
