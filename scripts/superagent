@@ -149,7 +149,8 @@ place() { [ -f "$ROUTER_PLACE" ] && sed -n "s/^$1=//p" "$ROUTER_PLACE"; }
 # --list`, failed push or verbose `ls-remote` a worker prints carries it into a transcript, a board row, an
 # issue body. Measured on the deployment box (issue #314): the watched checkout held a 40-character `ghp_`
 # classic token with `repo` scope — read/write on every repository the account reaches — in `-rw-r--r--
-# .git/config`, with ~20 worker sessions per run able to print it. The deploy refuses to start on one.
+# .git/config`, with ~20 worker sessions per run able to print it. The router's own checkout and the operator's
+# watched ones refuse the start; a ticket checkout under the state dir is cleaned instead (clean_credential).
 # Findings are masked here on purpose: a guard that prints the token to find the token has published it.
 CREDENTIAL_IN_URL='://[^/[:space:]]*:[^/[:space:]]*@|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}'
 mask_credential() { sed -E 's#(://[^/@[:space:]]*:)[^/@[:space:]]*(@)#\1***\2#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}#\1***#g'; }
@@ -182,14 +183,14 @@ checkout_config_files() {
 # clone into its workspace and the clone lands at <worktrees>/<ticket>/repo/ — measured: 26 of the 29 live
 # checkouts are that shape. Stopping at <worktrees>/<ticket>/.git reports a leaking deployment clean.
 watched_checkouts() {
-  printf '%s\n' "$REPO_ROOT"
-  printf '%s\n' "${PI_SUPERAGENT_WATCHED_CHECKOUTS:-}" | tr ':,' '\n\n' | sed '/^$/d'
+  printf 'own %s\n' "$REPO_ROOT"
+  printf '%s\n' "${PI_SUPERAGENT_WATCHED_CHECKOUTS:-}" | tr ':,' '\n\n' | sed '/^$/d; s/^/own /'
   local dir sub
   for dir in "$WORKTREES"/*/; do
     [ -d "$dir" ] || continue
-    if [ -e "${dir}.git" ]; then printf '%s\n' "${dir%/}"; continue; fi
+    if [ -e "${dir}.git" ]; then printf 'ticket %s\n' "${dir%/}"; continue; fi
     for sub in "$dir"*/; do
-      [ -d "$sub" ] && [ -e "${sub}.git" ] && printf '%s\n' "${sub%/}"
+      [ -d "$sub" ] && [ -e "${sub}.git" ] && printf 'ticket %s\n' "${sub%/}"
     done
   done
   return 0
@@ -209,9 +210,27 @@ code_guard() {
   return 1
 }
 
+# A worker pushes with the box's GitHub login, so a token one wrote into its own clone is removed rather than kept as a
+# reason to stay down: one leaked worker folder kept the router down 15 hours after a reboot (operator, 2026-11-15).
+# Only files under the state dir are the fleet's to edit; a ticket worktree linked to a repository elsewhere refuses.
+under_state() {
+  local dir state
+  dir="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || return 1
+  state="$(cd "$STATE" 2>/dev/null && pwd -P)" || return 1
+  case "$dir/" in "$state"/*) return 0 ;; *) return 1 ;; esac
+}
+clean_credential() {
+  local file="$1" tmp
+  tmp="$(mktemp)" || return 1
+  sed -E 's#://[^/@:[:space:]]*:[^/@[:space:]]*@#://#g; s#://(gh[pousr]_|github_pat_)[A-Za-z0-9_]+@#://#g' "$file" \
+    | { grep -vE 'gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}' || true; } > "$tmp"
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+  ! grep -qE "$CREDENTIAL_IN_URL" "$file"
+}
 git_credential_guard() {
-  local dir file hit bad=0 line seen=' '
-  while IFS= read -r dir; do
+  local kind dir file hit bad=0 line seen=' '
+  while read -r kind dir; do
     [ -n "$dir" ] || continue
     while IFS= read -r file; do
       case "$seen" in *" $file "*) continue ;; esac
@@ -219,6 +238,10 @@ git_credential_guard() {
       hit="$(grep -m1 -nE "$CREDENTIAL_IN_URL" "$file" 2>/dev/null | mask_credential | cut -c1-200)"
       [ -n "$hit" ] || continue
       line="${hit%%:*}"
+      if [ "$kind" = ticket ] && under_state "$file" && clean_credential "$file"; then
+        printf 'superagent: removed a git credential from %s line %s (%s); workers push with the box'"'"'s GitHub login\n' "$file" "$line" "${hit#*:}" >&2
+        continue
+      fi
       printf 'superagent: %s line %s carries a git credential in the clear, mode %s: %s\n' "$file" "$line" "$(file_mode "$file")" "${hit#*:}" >&2
       printf '  every user on this box reads it and every `git remote -v` prints it. Fix: git -C %s remote set-url origin <the same URL with the user:token@ removed>, then supply the password from a 0600 file with a repo-local credential helper (docs/operator-guide.md).\n' "$dir" >&2
       bad=1

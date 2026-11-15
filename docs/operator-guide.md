@@ -297,16 +297,18 @@ router are adopted without checking the cap, which is a policy question the code
 prerequisite is a credential in a checkout's git config; see
 [Keep the git credential out of .git/config](#keep-the-git-credential-out-of-gitconfig).
 
-**Start refuses with “carries a git credential in the clear”.** A watched checkout stores its credential in
-the remote URL, where every worker can read it. The message names the file, the line and the mode; the fix
-is in [Keep the git credential out of .git/config](#keep-the-git-credential-out-of-gitconfig). On a plain
-`start` nothing was started, so the fix costs nothing to apply.
+**Start refuses with “carries a git credential in the clear”.** The router's own checkout, or one you listed in
+`PI_SUPERAGENT_WATCHED_CHECKOUTS`, stores its credential in the remote URL, where every worker can read it. The
+message names the file, the line and the mode; the fix is in
+[Keep the git credential out of .git/config](#keep-the-git-credential-out-of-gitconfig). Nothing was started, so
+the fix costs nothing to apply, and the same `start` or `restart` succeeds once the credential is out.
 
-On `restart` it is not free: `restart` is `stop; start`, and the scheduled health check is
-`status || start`. So a checkout that gains a credential *while the fleet runs* ends the fleet — the router is
-stopped, the start is refused, and the health check keeps refusing every five minutes until the URL is fixed.
-That is the intended posture: waking ~20 worker sessions over a disclosed credential is worse than a stopped
-router. The fix is the URL, not a second restart; the same `restart` succeeds once the credential is out of it.
+A ticket checkout under the state directory is different: a worker pushes with the box's GitHub login, so start
+removes a credential a worker wrote into its own clone and says so (“removed a git credential from … line N”,
+masked), then starts. It strips the `user:token@` part of a URL, deletes a line holding a bare GitHub token,
+and leaves `ssh://git@…` alone. Until 2026-11-15 start refused these too, and one leaked worker folder kept the
+fleet down for 15 hours after a reboot, with nobody told. A ticket worktree linked to a repository outside the
+state directory is still refused: that repository is not the fleet's to edit.
 
 **A worker looks stuck.** Open its herdr tab to inspect the current command. Type a message to steer
 the worker or press Esc to interrupt it.
