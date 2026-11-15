@@ -1,7 +1,7 @@
 import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { createServer, type AddressInfo } from 'node:net'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -457,6 +457,18 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(run(['start'], { PI_SUPERAGENT_WATCHED_CHECKOUTS: `${watched}:${watched}` }).status, 'a clean URL deploys').toBe(0)
   })
 
+  it('refuses a watched checkout even inside the state dir: the operator\'s checkouts are never edited', () => {
+    const secret = `ghp_${'u'.repeat(36)}`
+    const watched = join(state, 'operator-repo')
+    mkdirSync(join(watched, '.git'), { recursive: true })
+    writeFileSync(join(watched, '.git', 'config'), `[remote "origin"]\n\turl = https://x-access-token:${secret}@github.com/o/r.git\n`)
+    const out = run(['start'], { PI_SUPERAGENT_WATCHED_CHECKOUTS: watched })
+    expect(out.status, out.stderr).toBe(1)
+    expect(out.stderr).toMatch(/carries a git credential in the clear/)
+    expect(readFileSync(join(watched, '.git', 'config'), 'utf8'), 'left as it was').toContain(secret)
+    expect(existsSync(join(herdrDir, 'calls')), 'nothing was started').toBe(false)
+  })
+
   it('refuses a leaked credential when the command it is running is a symlink into the checkout', () => {
     // The install shape the operator's PATH points at: `<prefix>/bin/superagent` is a LINK into the package
     // (npm's global install leaves one, and a hand link into a checkout is the documented alternative). Then
@@ -482,15 +494,20 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(existsSync(join(herdrDir, 'calls')), 'nothing was started').toBe(false)
   })
 
-  it('refuses a ticket checkout that came back with a credential in its remote', () => {
+  it('cleans a ticket checkout that came back with a credential, and starts (operator, 2026-11-15)', () => {
+    // A worker pushes with the box's GitHub login; refusing here kept the fleet down 15 hours after a reboot.
     const secret = `ghp_${'y'.repeat(36)}`
+    const config = join(state, 'work', 'TK-7', '.git', 'config')
     mkdirSync(join(state, 'work', 'TK-7', '.git'), { recursive: true })
-    writeFileSync(join(state, 'work', 'TK-7', '.git', 'config'), `[credential]\n\thelper = !f(){ echo password=${secret}; }; f\n`)
+    writeFileSync(config, `[remote "origin"]\n\turl = ssh://git@github.com/o/r.git\n[credential]\n\thelper = !f(){ echo password=${secret}; }; f\n`)
     const out = run(['start'])
-    expect(out.status).toBe(1)
-    expect(out.stderr).toMatch(/work\/TK-7\/\.git\/config/)
+    expect(out.status, out.stderr).toBe(0)
+    expect(out.stderr).toMatch(/removed a git credential from \S*work\/TK-7\/\.git\/config line 4/)
     expect(out.stderr).toContain('password=ghp_***')
-    expect(out.stderr).not.toContain(secret)
+    expect(out.stderr, 'the clean-up must not publish the token it removed').not.toContain(secret)
+    expect(readFileSync(config, 'utf8'), 'the token is gone; an ssh user is an account, not a secret')
+      .toBe('[remote "origin"]\n\turl = ssh://git@github.com/o/r.git\n[credential]\n')
+    expect(readFileSync(join(herdrDir, 'calls'), 'utf8')).toMatch(/agent start superagent/)
   })
 
   it('refuses a ticket checkout that is a linked worktree, where the remotes live in the common dir', () => {
@@ -506,14 +523,31 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     execFileSync('git', ['-C', source, 'worktree', 'add', '-q', '-b', 'ticket', join(state, 'work', 'TK-9')])
     expect(existsSync(join(state, 'work', 'TK-9', '.git', 'config')), 'a linked worktree has no config of its own').toBe(false)
     const out = run(['start'])
-    expect(out.status, out.stderr).toBe(1)
+    expect(out.status, out.stderr).toBe(0)
     expect(out.stderr, 'the common dir is the file that holds the credential').toContain(join('source-repo', '.git', 'config'))
     expect(out.stderr).toContain('x-access-token:***@github.com')
-    expect(out.stderr, 'the guard must not publish the token it found').not.toContain(secret)
+    expect(out.stderr, 'the clean-up must not publish the token it removed').not.toContain(secret)
+    expect(execFileSync('git', ['-C', source, 'remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim())
+      .toBe('https://github.com/kmatzen/pi-superagent.git')
+  })
+
+  it('refuses a ticket worktree linked to a repository outside the state dir: that one is not the fleet\'s to edit', () => {
+    const secret = `ghp_${'v'.repeat(36)}`
+    const outside = mkdtempSync(join(tmpdir(), 'pi-sa-outside-')); dirs.push(outside)
+    execFileSync('git', ['init', '-q', outside])
+    execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@example.com', 'commit', '--allow-empty', '-qm', 'seed'], { cwd: outside })
+    execFileSync('git', ['-C', outside, 'remote', 'add', 'origin', `https://x-access-token:${secret}@github.com/o/r.git`])
+    mkdirSync(join(state, 'work'), { recursive: true })
+    execFileSync('git', ['-C', outside, 'worktree', 'add', '-q', '-b', 'ticket', join(state, 'work', 'TK-10')])
+    const out = run(['start'])
+    expect(out.status, out.stderr).toBe(1)
+    expect(out.stderr).toMatch(/carries a git credential in the clear/)
+    expect(out.stderr).not.toContain(secret)
+    expect(readFileSync(join(outside, '.git', 'config'), 'utf8'), 'left as it was').toContain(secret)
     expect(existsSync(join(herdrDir, 'calls')), 'nothing was started').toBe(false)
   })
 
-  it('refuses the checkout a worker cloned itself: work/<ticket>/repo, one level below the ticket dir', () => {
+  it('cleans the checkout a worker cloned itself: work/<ticket>/repo, one level below the ticket dir', () => {
     // The ticket prompt tells a worker to clone into its workspace, so the checkout lands at
     // <worktrees>/<ticket>/repo/. Measured on the live box: 26 of the 29 ticket checkouts are that shape, and
     // the one holding the exposed token today is one of them. Scanning only <worktrees>/<ticket>/.git says
@@ -521,44 +555,37 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     const secret = `ghp_${'w'.repeat(36)}`
     mkdirSync(join(state, 'work', 'TK-11', 'repo', '.git'), { recursive: true })
     writeFileSync(join(state, 'work', 'TK-11', 'repo', '.git', 'config'), `[remote "origin"]\n\turl = https://x-access-token:${secret}@github.com/kmatzen/pi-superagent.git\n`)
-    const out = run(['start'])
-    expect(out.status, out.stderr).toBe(1)
-    expect(out.stderr).toContain(join('work', 'TK-11', 'repo', '.git', 'config'))
-    expect(out.stderr).toContain('x-access-token:***@github.com')
-    expect(out.stderr, 'the guard must not publish the token it found').not.toContain(secret)
-    expect(existsSync(join(herdrDir, 'calls')), 'nothing was started').toBe(false)
     // Depth is bounded: a nested `.git` three levels down (a vendored dependency) is not scanned, so the
     // guard costs one directory listing at start, not a walk of a 2 GB tree.
-    mkdirSync(join(state, 'work', 'TK-12', 'repo', 'vendor', 'dep', '.git'), { recursive: true })
-    writeFileSync(join(state, 'work', 'TK-12', 'repo', 'vendor', 'dep', '.git', 'config'), `[remote "origin"]\n\turl = https://x-access-token:${secret}@github.com/o/r.git\n`)
-    // With the ticket checkout's own URL cleaned, the tree deploys — the nested leak above is the depth bound.
-    writeFileSync(join(state, 'work', 'TK-11', 'repo', '.git', 'config'), '[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
-    expect(run(['start']).status, 'a clean tree of checkouts deploys').toBe(0)
+    const nested = join(state, 'work', 'TK-12', 'repo', 'vendor', 'dep', '.git', 'config')
+    mkdirSync(dirname(nested), { recursive: true })
+    writeFileSync(nested, `[remote "origin"]\n\turl = https://x-access-token:${secret}@github.com/o/r.git\n`)
+    const out = run(['start'])
+    expect(out.status, out.stderr).toBe(0)
+    expect(out.stderr).toContain(join('work', 'TK-11', 'repo', '.git', 'config'))
+    expect(out.stderr).toContain('x-access-token:***@github.com')
+    expect(out.stderr, 'the clean-up must not publish the token it removed').not.toContain(secret)
+    expect(readFileSync(join(state, 'work', 'TK-11', 'repo', '.git', 'config'), 'utf8'))
+      .toBe('[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
+    expect(readFileSync(nested, 'utf8'), 'below the depth bound nothing is read or written').toContain(secret)
   })
 
-  it('a restart on a box that leaked mid-life leaves the fleet down: the guard refuses to bring it back', () => {
-    // The consequence of putting the guard in `start` has to be written down and pinned, because `restart` is
-    // `stop; start` and the scheduled health check is `status || start`. A checkout that gains a credential
-    // while the router runs therefore ENDS the fleet: the router is stopped, then the start is refused. That
-    // is the intended posture — do not wake ~20 workers over a disclosed credential — but the operator has to
-    // know the fix is the URL, not a second restart.
+  it('a restart on a box that leaked mid-life cleans the worker\'s clone and brings the fleet back', () => {
+    // `restart` is `stop; start`, and the boot service and the scheduled health check both start. Refusing here
+    // ended the fleet until a person fixed the URL: after the 2026-11-15 reboot that was 15 hours with nobody told.
     const secret = `ghp_${'q'.repeat(36)}`
-    mkdirSync(join(state, 'work', 'TK-14', 'repo', '.git'), { recursive: true })
-    writeFileSync(join(state, 'work', 'TK-14', 'repo', '.git', 'config'), '[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
+    const config = join(state, 'work', 'TK-14', 'repo', '.git', 'config')
+    mkdirSync(dirname(config), { recursive: true })
+    writeFileSync(config, '[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
     expect(run(['start']).status, 'the fleet comes up clean').toBe(0)
-    expect(existsSync(join(herdrDir, 'agent.superagent'))).toBe(true)
     // A worker bakes the token into the remote while the router is live.
-    writeFileSync(join(state, 'work', 'TK-14', 'repo', '.git', 'config'), `[remote "origin"]\n\turl = https://x-access-token:${secret}@github.com/kmatzen/pi-superagent.git\n`)
+    writeFileSync(config, `[remote "origin"]\n\turl = https://x-access-token:${secret}@github.com/kmatzen/pi-superagent.git\n`)
     const out = run(['restart'])
-    expect(out.status).toBe(1)
-    expect(out.stderr).toMatch(/carries a git credential in the clear/)
+    expect(out.status, out.stderr).toBe(0)
+    expect(out.stderr).toMatch(/removed a git credential from/)
     expect(out.stderr).not.toContain(secret)
-    expect(existsSync(join(herdrDir, 'agent.superagent')), 'the router is stopped, and the refusal is the whole message').toBe(false)
-    const calls = readFileSync(join(herdrDir, 'calls'), 'utf8')
-    expect(calls.match(/agent start superagent/g), 'no second start: the fleet stays down until the URL is fixed').toHaveLength(1)
-    // Fix the URL and the same restart brings it back, so the guard is a door and not a wall.
-    writeFileSync(join(state, 'work', 'TK-14', 'repo', '.git', 'config'), '[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
-    expect(run(['restart']).status, 'a clean URL restarts').toBe(0)
+    expect(readFileSync(config, 'utf8')).toBe('[remote "origin"]\n\turl = https://github.com/kmatzen/pi-superagent.git\n')
+    expect(readFileSync(join(herdrDir, 'calls'), 'utf8').match(/agent start superagent/g), 'started again').toHaveLength(2)
   })
 
   it('start refuses a checkout whose code has uncommitted changes, unless told otherwise', () => {
