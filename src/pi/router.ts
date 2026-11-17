@@ -1,5 +1,6 @@
 /** The router's shared surface: config, the SDK seam, the worker brief, and the admissibility policy. */
 import { isListed } from './authors.ts'
+import { resultsPrefix } from './report-tool.ts'
 import type { Policy, SourceScope, Ticket } from '../core/index.ts'
 import type { GhOptions } from './gh-api.ts'
 
@@ -162,6 +163,13 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   'nearly full.',
   'Waiting on CI: poll it one step per command (`gh pr checks`, then `sleep 60` at most, and again), never one long',
   'wait: a person\'s review reaches you only between commands, and the guard refuses longer waits.',
+  `Upload every experiment's visible result — the plots, the sample frames or clips, the metric file — to ${resultsPrefix(ticket.channels[0]?.thread, ticket.id)}/`,
+  '(`aws s3 cp` or `s5cmd`) and list each link in ticket_report\'s `results`: the pod\'s disk dies with the pod, and a person who',
+  'cannot see the result cannot accept the work. Numbers on the issue, pictures in the bucket, both linked.',
+  'Run the job on a Pluto pod whose resource role can write that bucket. Prove it with one small upload before the run starts;',
+  'if that upload is refused, report blocked naming the pod and the role it lacks. Do not run the job and keep the result on the pod.',
+  'A ready report for a run that held a GPU job claim is refused without results links, and visuals come first: a run that made no',
+  'picture to look at reports blocked saying why, not ready with a table. A waiting report needs none: the run is not over.',
 ].join('\n')
 
 /** How work reaches a repository: a pull request the ticket then waits on. Work that changes no repository ends as before. */

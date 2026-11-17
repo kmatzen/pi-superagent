@@ -71,4 +71,14 @@ describe('what the thread reads when a run ends', () => {
     expect(pullEndText('#387', [pr(9, 'merged'), pr(12, 'closed')], '2026-11-13T03:56:17.558Z'))
       .toMatch(/^#387: https:\/\/github.com\/o\/r\/pull\/9 merged and https:\/\/github.com\/o\/r\/pull\/12 closed without merging\. A fresh worker/)
   })
+
+  it('puts the links a person opens above the pull request', () => {
+    const text = receiptText('#507', 'worker', { state: 'ready', summary: 'the dose curve is flat',
+      results: ['s3://matzen-adobe/superagent/507-abcd/figures/curve.png', 's3://matzen-adobe/superagent/507-abcd/metrics.json'],
+      pullRequests: ['https://github.com/o/r/pull/9'] })
+    expect(text).toMatch(/\*\*Results:\*\*\n1\. s3:\/\/matzen-adobe[\s\S]*2\. s3:\/\/matzen-adobe[\s\S]*\*\*Pull request:\*\* https:\/\/github\.com/)
+    expect(receiptText('#507', 'worker', { state: 'waiting', summary: 'run 31 trains',
+      results: ['s3://matzen-adobe/superagent/507-abcd/frames/a.png'], wakeAt: '2026-11-12T20:15:00.000Z' }))
+      .toContain('**Results:** s3://matzen-adobe/superagent/507-abcd/frames/a.png')
+  })
 })

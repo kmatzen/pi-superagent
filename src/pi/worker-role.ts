@@ -74,10 +74,11 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   // A report that hands the ticket to a person frees this session at once: whatever the worker does after it, the router
   // never reads. Background-task wakes kept a freed worker running tools after its ready report (2026-11-12).
   let handedOver = false
-  pi.registerTool(reportTool((state, summary, question, _origin, pullRequests, wakeInMinutes, notes) => {
+  pi.registerTool(reportTool((state, summary, question, _origin, pullRequests, wakeInMinutes, notes, results) => {
     reported = true
     if (HANDS_OVER.includes(state)) handedOver = true
     append('reports.jsonl', { state, summary, question: question ?? null, ...(pullRequests?.length ? { pullRequests } : {}),
+      ...(results?.length ? { results } : {}),
       ...(wakeInMinutes !== undefined ? { wakeInMinutes } : {}), ...(notes ? { notes } : {}) })
   }))
   pi.on('tool_call', (event?: unknown) => {
@@ -99,12 +100,27 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   const unwatched = (held: string[]): string => `Not reported: you still hold ${held.join(', ')}, and someone must keep watching what `
     + 'runs there. Report waiting (or blocked) with wakeInMinutes for when a fresh worker should check it, or stop it and '
     + 'release the claim first if it is done.'
+  // The same ledger decides what the person must be able to see. A run that held a GPU job ran an experiment, and an
+  // experiment the pod deletes when it stops is an experiment nobody can check: the figures, sample clips and metric
+  // files go to the ticket's prefix under the results bucket, and their links go on the issue (operator, 2026-11-17).
+  // `ready` only: a waiting report is mid-run, with nothing finished to upload yet.
+  const noResults = (held: string[]): string => `Not reported: you ran ${held.join(', ')} on a pod, report the work finished, and the pod is temporary. `
+    + `Upload the visual results (plots, sample frames or clips, the metric file) to your ticket's results prefix from the brief, `
+    + `then report with results set to their links, one per file. A run that made no picture to look at reports blocked, saying why.`
   pi.on('tool_call', (event?: unknown) => {
     const call = event as { toolName?: string; input?: Record<string, unknown> }
     if (call.toolName !== 'ticket_report' || !HANDS_OVER.includes(String(call.input?.state))) return
     if (typeof call.input?.wakeInMinutes === 'number') return
     const held = heldClaims()
     if (held.length) return { block: true, reason: unwatched(held) }
+  })
+  pi.on('tool_call', (event?: unknown) => {
+    const call = event as { toolName?: string; input?: Record<string, unknown> }
+    if (call.toolName !== 'ticket_report' || String(call.input?.state) !== 'ready') return
+    const listed = Array.isArray(call.input?.results) ? (call.input.results as unknown[]).filter(r => typeof r === 'string' && r.trim()) : []
+    if (listed.length) return
+    const held = heldClaims()
+    if (held.length) return { block: true, reason: noResults(held) }
   })
   pi.on('tool_call', (event?: unknown) => {
     const call = event as { toolName?: string; input?: Record<string, unknown> }

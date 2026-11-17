@@ -293,6 +293,17 @@ that hard-code /tmp, a nearly full /tmp (under 10% free) loses this user's entri
 every 15 minutes (`tmp.pressure_sweep`). "Live" for every disk pass now also means any worker record that has not
 ended, tracked by this router or not, so a tab the router lost is never swept out from under its agent.
 
+**An experiment ends when its figures are readable by a person (2026-11-17).** Results lived on the pod that made
+them, and the pod is temporary: a finished ticket could not be checked a day later. `ticket_report` now takes
+`results`, the links a person opens, and the worker's own GPU-claim ledger decides when they are required — a
+`ready` report from a run that held a claim is refused with no links, because that run ran an experiment. A
+`waiting` report is exempt: the run is mid-flight with nothing finished to upload, and refusing it would buy
+silence during every training run. Files go to `s3://matzen-adobe/superagent/<issue>-<ticket8>/`, said in full in
+the brief so no worker invents a layout, and the receipt puts the links above the pull request, because the person
+who opened an experiment ticket came for the picture. The brief makes the pod's S3 write a pre-flight check rather
+than a discovery at the end: one small upload before the job starts, and a refusal is a `blocked` report naming the
+resource role the pod lacks. The bucket is one constant (`RESULTS_ROOT`) so the operator can move it in one line.
+
 **Skip, never sweep, a non-directory in the work root (2026-11-11).** A stray log file there made the sweep
 `readdirSync` a file; the sweep runs after every intake, its rejection was unhandled, and every tick died for
 25 minutes. Files in the root are counted as strays, logged once, and left alone.

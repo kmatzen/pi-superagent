@@ -22,7 +22,22 @@ export type ReportOrigin = 'worker' | 'crash' | 'silent' | 'launch'
 export type ReportOutcome = 'recorded' | 'dropped'
 
 export type Reporter = (state: string, summary: string, question?: string | null, origin?: ReportOrigin,
-                        pullRequests?: readonly string[], wakeInMinutes?: number, notes?: string) => ReportOutcome | void
+                        pullRequests?: readonly string[], wakeInMinutes?: number, notes?: string,
+                        results?: readonly string[]) => ReportOutcome | void
+
+/** Where experiment output goes, so a person can see it after the pod is gone. The prefix is per ticket, said in
+ *  full in the brief; the operator moves the bucket by changing this one line. */
+export const RESULTS_ROOT = 's3://matzen-adobe/superagent'
+
+/** The per-ticket results prefix: the issue number for a human, the ticket id's head so two tickets with the
+ *  same number in different repos cannot write over each other. */
+export const resultsPrefix = (thread: string | undefined, ticketId: string): string =>
+  `${RESULTS_ROOT}/${(thread ?? '').replace(/^#/, '') || 'ticket'}-${ticketId.slice(0, 8)}`
+
+/** A results link is something a person can open: the bucket, or a plain http(s) URL. An entry the operator
+ *  cannot follow is refused here, in the run, where the worker can fix it — not one process later in a log. */
+const RESULT_URL = /^(s3:\/\/[\w.-]+\/[\w.\-~+/=%&@:!$'()*,;]+|https?:\/\/[^\s]+)$/
+const RESULTS_URL_HELP = `report the object's own URL, e.g. ${RESULTS_ROOT}/<issue>-<ticket>/figures/curve.png`
 
 /** How soon a fresh worker may be called back to check what a worker left running, in minutes. */
 export const WAKE_MIN = 5
@@ -49,19 +64,30 @@ export function reportTool(report: Reporter): ReportTool {
       + 'plain words, then at most three short lines, then "Details (skippable):" and at most six bullets. notes is private: what the next '
       + 'worker on this ticket needs (where things are, commands, what to check). It is never posted. '
       + 'pullRequests lists the URLs of the pull requests this work opened; leave it out when the work changed no repository. '
-      + 'Every entry must be the URL gh pr create printed, on github.com — an entry the router cannot follow refuses the report.',
+      + 'Every entry must be the URL gh pr create printed, on github.com — an entry the router cannot follow refuses the report. '
+      + `results lists the links a person opens to see the work: uploaded figures, sample videos, metric files, at ${RESULTS_ROOT}/. `
+      + 'A run that started a GPU job must list them: visuals first, and the numbers they show.',
     parameters: {
       type: 'object',
       properties: {
         state: { type: 'string', enum: ['ready', 'waiting', 'blocked', 'failed', 'cancelled'] }, summary: { type: 'string' }, question: { type: 'string' },
         pullRequests: { type: 'array', items: { type: 'string' } },
+        results: { type: 'array', items: { type: 'string' } },
         wakeInMinutes: { type: 'number' }, notes: { type: 'string' },
       },
       required: ['state', 'summary'],
     },
     execute: (_id, args) => {
-      const a = args as unknown as { state: string; summary: string; question?: string; pullRequests?: unknown; wakeInMinutes?: unknown; notes?: unknown }
+      const a = args as unknown as { state: string; summary: string; question?: string; pullRequests?: unknown; wakeInMinutes?: unknown; notes?: unknown, results?: unknown }
       const pulls = Array.isArray(a.pullRequests) ? a.pullRequests.filter((p): p is string => typeof p === 'string') : []
+      const results = Array.isArray(a.results) ? a.results.filter((r): r is string => typeof r === 'string' && r.trim() !== '') : []
+      const unreachable = results.filter(r => !RESULT_URL.test(r.trim()))
+      if (unreachable.length) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `not a results link: ${unreachable.map(u => u.slice(0, 200)).join(', ')} — ${RESULTS_URL_HELP}. Nothing was reported; fix the entry and call ticket_report again.` }],
+        }
+      }
       const unreadable = pulls.filter(url => !parsePull(url))
       if (unreadable.length) {
         return {
@@ -89,7 +115,8 @@ export function reportTool(report: Reporter): ReportTool {
       const problems = voiceProblems(String(a.summary ?? ''), a.question)
       if (problems.length) return { isError: true, content: [{ type: 'text', text: VOICE_REFUSED(problems) }] }
       const notes = typeof a.notes === 'string' && a.notes.trim() ? a.notes.trim().slice(0, 8000) : undefined
-      const outcome = report(a.state, a.summary, a.question ?? null, undefined, pulls.length ? pulls : undefined, wake, notes)
+      const outcome = report(a.state, a.summary, a.question ?? null, undefined, pulls.length ? pulls : undefined, wake, notes,
+        results.length ? results.map(r => r.trim()) : undefined)
       // A reporter that answers nothing (the worker pane's file bridge) cannot know the verdict; say the plain
       // thing. The router process says `dropped` loudly in its own log, which is where the operator reads it.
       return { content: [{ type: 'text', text: outcome === 'dropped' ? NOT_RECORDED : 'reported' }] }
