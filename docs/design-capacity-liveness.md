@@ -257,3 +257,27 @@ a fact this document now has to carry: the stalled-launch sweep and the duplicat
 and the quiet rule runs after the launch loop, because its release depends on the report it files in the
 same step. A move that keeps that order provable needs the three sweeps' tests to move with them, and the
 first attempt at the move lost scope twice in the splice. It is a half-day of careful work, not a fold.
+
+## The CI handoff (2026-11-16): a wait is not a job
+
+The fleet was doing what it was told. `briefFor` said: "Waiting on CI: poll it one step per command (`gh pr
+checks`, then `sleep 60` at most, and again)". Each step is a turn, the launch gate counts turns
+(`executor.running`), so a worker watching a 25-minute build held a slot for 25 minutes. Measured in the retired
+router's log: 266 start-to-release pairs, 422.8 worker-hours, 96 of them between 15 and 60 minutes and 18 over
+four hours. That is session life, not CI time isolated; the brief line is what made the two the same thing.
+
+`waiting` already freed the slot — it is in `awaitsAHumanState`, exempt from the report cap, shown as "a trigger"
+in the panel — and its `wakeInMinutes` already calls a fresh worker back at a set time. What was missing is the
+door on the other side: `wake()` resumes a released ticket on a **human** message only, so the event a worker
+handed its slot over for (checks finishing, a review bot speaking on its pull request) could not call it back. In
+the retired router's 707 releases, not one reported `waiting`.
+
+Shipped: the brief hands CI over instead of watching it (report `waiting`, `wakeInMinutes` set to how long the
+checks take, the pull request named in notes, turn ended); the guard's refusal text names the same handoff at the
+moment a worker reaches for `sleep 300`; and `wake()` opens for one machine event, bounded at three wakes per
+`waiting` streak (#205: 48 reports in 2h13m, one per finished check). A cap trip strands nothing, because the
+wake-up the worker scheduled itself arrives as a person's input.
+
+Not shipped: the router reads no check-suite state, so a CI run that comments nowhere is seen at the scheduled
+wake-up, up to `wakeInMinutes` late. `formal/Ticket.tla` models the human wake only; the machine door has no
+invariant yet.
