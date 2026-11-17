@@ -430,7 +430,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const channel = ticket.channels[0]
     if (!channel) return
     const said = origin === 'launch' ? ''
-      : createHash('sha1').update(JSON.stringify([run.state, run.summary, run.question ?? null, run.pullRequests ?? []])).digest('hex').slice(0, 12)
+      : createHash('sha1').update(JSON.stringify([run.state, run.summary, run.question ?? null, run.pullRequests ?? [], run.results ?? []])).digest('hex').slice(0, 12)
     outbox.send({ id: `report:${assignmentId}:${origin}:${said}`, channel, kind: 'reply', ticketId: ticket.id,
       text: receiptText(channel.thread, origin, run, relaunched, tracker.url(ticket.id)) })
   }

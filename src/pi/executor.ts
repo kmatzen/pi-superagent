@@ -53,7 +53,8 @@ export interface ExecutorOptions {
   renderInput(input: TicketInput): string | undefined
   slotPollMs?: number
   /** Every report the engine accepted, with who ended the run: the deployment tells the person. */
-  reported?(ticket: Ticket, assignmentId: string, origin: ReportOrigin, report: Filed & { pullRequests?: readonly string[] }): void
+  reported?(ticket: Ticket, assignmentId: string, origin: ReportOrigin,
+            report: Filed & { pullRequests?: readonly string[], results?: readonly string[] }): void
   /**
    * Every report that reached the executor and could not be filed, said once each: the worker's tool call
    * answers `reported` in the pane, the ticket records nothing, and a run that spoke to nobody is indistinguishable
@@ -167,7 +168,7 @@ export class PiExecutor {
   // Bound to the session that owns the ticket: a report from a worker the domain has already replaced or
   // stopped is not a ticket write.
   private reporter(ticket: Ticket, own: () => WorkerSession | undefined): Reporter {
-    return (state, summary, question, origin = 'worker', pullRequests, wakeInMinutes, notes): ReportOutcome => {
+    return (state, summary, question, origin = 'worker', pullRequests, wakeInMinutes, notes, results): ReportOutcome => {
       const live = this.live.get(ticket.id)
       if (!live || live.session.sessionId !== own()?.sessionId) {
         const reason = live ? 'its worker was replaced' : 'the ticket has no live worker'
@@ -179,13 +180,13 @@ export class PiExecutor {
         })
         return 'dropped'
       }
-      this.file(ticket, live.assignmentId, origin, report(state, summary, question), pullRequests, wakeInMinutes, notes)
+      this.file(ticket, live.assignmentId, origin, report(state, summary, question), pullRequests, wakeInMinutes, notes, results)
       return 'recorded'
     }
   }
 
   private file(ticket: Ticket, assignmentId: string, origin: ReportOrigin, filed: Filed, pullRequests?: readonly string[],
-               wakeInMinutes?: number, notes?: string): void {
+               wakeInMinutes?: number, notes?: string, results?: readonly string[]): void {
     const followed = pullRequests?.length ? this.options.follow?.(ticket, pullRequests) ?? [] : []
     try {
       this.engine.report(ticket.id, filed)
@@ -205,7 +206,8 @@ export class PiExecutor {
     }
     const wakeAt = wakeInMinutes ? new Date(Date.now() + wakeInMinutes * 60_000).toISOString() : undefined
     this.options.reported?.(ticket, assignmentId, origin,
-      { ...filed, ...(followed.length ? { pullRequests: followed } : {}), ...(wakeAt ? { wakeAt } : {}), ...(notes ? { notes } : {}) })
+      { ...filed, ...(followed.length ? { pullRequests: followed } : {}), ...(results?.length ? { results } : {}),
+        ...(wakeAt ? { wakeAt } : {}), ...(notes ? { notes } : {}) })
   }
 
   private bind(ticket: Ticket, assignment: Assignment, session: WorkerSession, busy = true): void {

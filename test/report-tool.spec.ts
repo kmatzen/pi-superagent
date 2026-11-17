@@ -119,4 +119,19 @@ describe('ticket_report', () => {
     expect(tool.execute('r3', { state: 'ready', summary: 's', pullRequests: [] }).isError, 'a ready report with no pull request is legal').toBeUndefined()
     expect(seen).toEqual([valid, undefined])
   })
+
+  it('a results link is something the operator can open, and it reaches the reporter', () => {
+    // Operator, 2026-11-17: the pod dies with the run, so the figure has to live in the bucket and be linked.
+    const seen: Array<readonly string[] | undefined> = []
+    const tool = reportTool((_s, _m, _q, _o, _p, _w, _n, results) => { seen.push(results) })
+    const said = (results: unknown) => tool.execute('r', { state: 'ready', summary: 's', results }).isError
+    expect(said(['s3://matzen-adobe/superagent/507-abcd1234/figures/curve.png'])).toBeUndefined()
+    expect(said(['https://example.com/run/curve.png']), 'a hosted page is a link too').toBeUndefined()
+    expect(said(['/workspace/out/curve.png']), 'a path on the pod dies with the pod').toBe(true)
+    expect(said(['s3://matzen-adobe']), 'a bucket with no object in it shows nobody anything').toBe(true)
+    expect(said(['   ']), 'a blank entry is dropped, not refused').toBeUndefined()
+    expect(seen, 'the refused reports never reached the router').toEqual([
+      ['s3://matzen-adobe/superagent/507-abcd1234/figures/curve.png'], ['https://example.com/run/curve.png'], undefined,
+    ])
+  })
 })

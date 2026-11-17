@@ -50,4 +50,13 @@ describe('how work reaches a repository', () => {
     expect(brief).toMatch(/Before a ready report delete what you made that is not code/)
     expect(brief).toMatch(/Write scratch to \$TMPDIR, which is inside your workspace, never to \/tmp/)
   })
+
+  it('says where results go, that the pod must be able to write them, and that the links go on the issue', () => {
+    // Operator, 2026-11-17: a pod's disk dies with the pod, and an experiment nobody can see is not a result.
+    const ticket = { id: 'abcd1234ef567890', title: 'dose curve', channels: [{ thread: '#507' }] } as unknown as Ticket
+    const brief = briefFor(ticket, '/wt/abcd1234')
+    expect(brief).toMatch(/s3:\/\/matzen-adobe\/superagent\/507-abcd1234\/[\s\S]*the pod's disk dies with the pod/)
+    expect(brief, 'prove the role can write before the run, not after').toMatch(/Pluto pod whose resource role can write that bucket[\s\S]*one small upload before the run[\s\S]*report blocked naming the pod and the role it lacks/)
+    expect(brief, 'a finished experiment without a picture reports blocked, not ready').toMatch(/A ready report for a run that held a GPU job claim is refused without results links[\s\S]*A waiting report needs none/)
+  })
 })
