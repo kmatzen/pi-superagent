@@ -2021,7 +2021,7 @@ describe('the state a router start leaves behind', () => {
 
   it('says nothing when there are no checkouts yet', async () => {
     expect(await sweepWorktrees(join(tmpdir(), 'sa-sweep-absent'), new Set(), 20))
-      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [] })
+      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0 })
   })
 
   it('makes one panel secret per state directory, readable only by its owner', () => {
@@ -2048,6 +2048,8 @@ describe('the state a router start leaves behind', () => {
     expect(configFrom({ ...base, PI_SUPERAGENT_WORKER_QUIET_MINUTES: '45' })?.workerQuietMinutes).toBe(45)
     expect(configFrom({ ...base, PI_SUPERAGENT_WORKER_TOKEN_FILE: '/s/worker-token' })?.workerTokenFile).toBe('/s/worker-token')
     expect(configFrom({ ...base, PI_SUPERAGENT_CLAIMS_FILE: '/s/claims.json' })?.claimsFile).toBe('/s/claims.json')
+    expect(configFrom({ ...base, PI_SUPERAGENT_MIN_FREE_GB: '30' })?.minFreeGb).toBe(30)
+    expect(configFrom(base)?.minFreeGb, 'unset keeps the measured floor').toBeUndefined()
   })
 })
 
@@ -2068,6 +2070,22 @@ describe('the sweep of settled checkouts', () => {
     spawnSync('git', ['clone', '-q', bare, dir], { encoding: 'utf8' })
     mkdirSync(join(dir, 'repo'))
     writeFileSync(join(dir, 'repo', 'f'), 'x')
+    git(dir, 'add', '-A')
+    git(dir, 'commit', '-q', '-m', 'work')
+    if (pushed) git(dir, 'push', '-q', 'origin', 'HEAD')
+    return dir
+  }
+
+  // The other layout that is live on real boxes: the ticket directory holds `repo`, so a pressure drop must take
+  // the clone and leave the ticket directory, which is where its reports live.
+  const seedNested = (root: string, name: string, pushed: boolean) => {
+    const bare = mkdtempSync(join(tmpdir(), 'sa-sweep-origin-'))
+    origins.push(bare)
+    git(bare, 'init', '-q', '--bare', '.')
+    const dir = join(root, name, 'repo')
+    mkdirSync(join(root, name), { recursive: true })
+    spawnSync('git', ['clone', '-q', bare, dir], { encoding: 'utf8' })
+    writeFileSync(join(dir, 'f'), 'x')
     git(dir, 'add', '-A')
     git(dir, 'commit', '-q', '-m', 'work')
     if (pushed) git(dir, 'push', '-q', 'origin', 'HEAD')
@@ -2111,6 +2129,49 @@ describe('the sweep of settled checkouts', () => {
       expect(readdirSync(root)).toEqual([])
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
+
+  it('a full disk drops the checkout of an idle open ticket and keeps what it reported', async () => {
+    // 42 of the 49 workspaces that filled lookbook on 2026-11-17 sat on OPEN tickets, which no earlier pass touched.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-floor-'))
+    try {
+      const id = 'a6697362e931'
+      seedNested(root, id, true)
+      writeFileSync(join(root, id, 'report.md'), 'the work is on github')
+      const swept = await sweepWorktrees(root, new Set([id]), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(swept).toMatchObject({ clonesDropped: 1, keptWork: 0, freeGb: 1 })
+      expect(existsSync(join(root, id, 'repo'))).toBe(false)
+      expect(readFileSync(join(root, id, 'report.md'), 'utf8')).toContain('github')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('keeps a checkout with uncommitted edits under a full disk, and names it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-floor-dirty-'))
+    try {
+      const id = 'bbbb2222cccc'
+      const dir = seedNested(root, id, true)
+      writeFileSync(join(dir, 'f'), 'work that exists nowhere else')
+      const swept = await sweepWorktrees(root, new Set([id]), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(swept).toMatchObject({ clonesDropped: 0, keptWork: 1, keptWorkIds: [id] })
+      expect(existsSync(join(dir, 'f'))).toBe(true)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('a worker sitting in a checkout and a disk above the floor are both left alone', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-floor-live-'))
+    try {
+      seedNested(root, 'c11111111111', true)
+      seedNested(root, 'c22222222222', true)
+      const busy = await sweepWorktrees(root, new Set(['c11111111111', 'c22222222222']), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, live: new Set(['c11111111111']), free: async () => 1024 ** 3 })
+      expect(busy).toMatchObject({ clonesDropped: 1 })
+      expect(existsSync(join(root, 'c11111111111', 'repo', '.git'))).toBe(true)
+      const healthy = await sweepWorktrees(root, new Set(['c22222222222']), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 40 * 1024 ** 3 })
+      expect(healthy).toMatchObject({ clonesDropped: 0, freeGb: 40 })
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
 
 })
 
