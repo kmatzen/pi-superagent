@@ -16,6 +16,8 @@ export interface RouterConfig {
   keepWorktrees?: number
   /** GB cap for the work root; settled checkouts over it are swept oldest-first. Default 200. */
   workBudgetGb?: number
+  /** GB to keep free on the work root's filesystem; under it, idle checkouts go, oldest first. Default 20. */
+  minFreeGb?: number
   /** Per-worker scope limits (PI_SUPERAGENT_WORKER_LIMITS/MEMORY_GB/CPUS/TASKS); unset means machine-derived. */
   workerLimits?: import('./worker-limits.ts').WorkerLimitSettings
   /**

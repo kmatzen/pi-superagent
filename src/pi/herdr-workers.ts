@@ -63,6 +63,18 @@ export const agentName = (thread: string, sessionId: string): string =>
 
 const quote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
 
+/** A cursor the disk truncated must not kill the router: on 2026-11-17 a full disk left a 0-byte `cursor.json`
+ *  and every restart died in this `JSON.parse` for 8 hours. An unreadable cursor reads as end-of-log, which is
+ *  what `resume` writes for the same reason — what the last assignment said must not settle the new one. */
+const readCursor = (dir: string): { events: number; reports: number; rebuilt: boolean } => {
+  try {
+    const c = JSON.parse(readFileSync(join(dir, 'cursor.json'), 'utf8')) as Record<string, unknown>
+    if (typeof c.events === 'number' && typeof c.reports === 'number') return { events: c.events, reports: c.reports, rebuilt: false }
+  } catch { /* the disk decided this, not the fleet */ }
+  const size = (name: string): number => { try { return statSync(join(dir, name)).size } catch { return 0 } }
+  return { events: size('events.jsonl'), reports: size('reports.jsonl'), rebuilt: true }
+}
+
 export class HerdrWorkers {
   private workspaceId: string | undefined
   private readonly root: string
@@ -280,9 +292,8 @@ export class HerdrWorkers {
   attach(record: WorkerRecord, report: Reporter, { adopted = false }: { adopted?: boolean } = {}): WorkerSession {
     const { herdr, log } = this.options
     const cursorFile = join(record.dir, 'cursor.json')
-    const cursor = existsSync(cursorFile)
-      ? JSON.parse(readFileSync(cursorFile, 'utf8')) as { events: number; reports: number }
-      : { events: 0, reports: 0 }
+    const cursor = existsSync(cursorFile) ? readCursor(record.dir) : { events: 0, reports: 0, rebuilt: false }
+    if (cursor.rebuilt) log.line('warn', 'worker.cursor_rebuilt', { ticket: record.ticketId, dir: record.dir })
     let listener: ((event: WorkerEvent) => void) | undefined
     let failedSaid = false
     let seq = 0

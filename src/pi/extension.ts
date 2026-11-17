@@ -2,7 +2,7 @@
  *  worker, and inert everywhere else. */
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
+import { rm, statfs } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
@@ -1093,9 +1093,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         question: 'accept the work, steer it, or stop it on the panel',
       } as never)
     }
-    // Replies go out before anything that waits: with every slot busy, an acknowledgement must not queue behind
-    // the fleet, which is what held nine replies for ten minutes on 2026-11-08.
     outbox.flush()
+    // The disk floor is checked every beat, and swept only when breached: the startup pass only runs at startup.
+    void pressureSweep()
     // The launches this pass queued get a bounded start, and no more. `executor.idle()` is the launch queue's
     // tail and that queue is gated on a free worker slot, so awaiting it made the loop enterable only when the
     // fleet went quiet — hourly, at 20 workers against a cap of 8. That is the stall #303 was filed for.
@@ -1180,7 +1180,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   void recovered.then(async () => {
     const beganSweep = Date.now()
     const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)), cfg.keepWorktrees ?? 20,
-      (cfg.workBudgetGb ?? 200) * 1024 ** 3, deps.sizeOf)
+      (cfg.workBudgetGb ?? 200) * 1024 ** 3, deps.sizeOf, { minFreeBytes: minFreeBytes(cfg), live: liveTickets() })
     if (swept.strays) log.line('warn', 'worktree.strays', { strays: swept.strays, root: cfg.worktreeRoot })
     if (swept.removed || swept.keptWork) {
       log.line('info', 'worktree.swept', {
@@ -1189,6 +1189,34 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         note: swept.keptWork ? 'settled checkouts with commits on no remote are never deleted' : undefined })
     }
   }).catch((error: unknown) => log.line('error', 'worktree.sweep_failed', { error: String(error).slice(0, 200) }))
+  // Free space, not the number of worktrees, is what kills a box, and a router that runs for days never ran the
+  // startup pass again: lookbook 2026-11-17 reached 377 MB free with 42 of 49 workspaces on OPEN tickets, and the
+  // full disk wrote a 0-byte worker cursor that crashed every restart for 8 hours. One cheap `statfs` per beat;
+  // the sweep runs at most once per window, and only while the floor is breached.
+  const PRESSURE_SWEEP_MS = 15 * 60_000
+  /** Tickets a worker session is sitting in right now: that checkout is in use, so it is never a pressure target. */
+  const liveTickets = (): ReadonlySet<string> => new Set(executor.workers().map(w => w.ticketId))
+  let sweeping = false
+  let lastPressureSweep = 0
+  const pressureSweep = async (): Promise<void> => {
+    const min = minFreeBytes(cfg)
+    if (sweeping || min <= 0 || Date.now() - lastPressureSweep < PRESSURE_SWEEP_MS) return
+    if (await freeBytesOf(cfg.worktreeRoot) >= min) return
+    sweeping = true
+    const began = Date.now()
+    lastPressureSweep = began
+    try {
+      const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)),
+        cfg.keepWorktrees ?? 20, (cfg.workBudgetGb ?? 200) * 1024 ** 3, deps.sizeOf, { minFreeBytes: min, live: liveTickets() })
+      log.line('info', 'worktree.pressure_sweep', {
+        ...swept, keptWorkIds: swept.keptWorkIds.slice(0, 8), floorGb: Math.round(min / 1024 ** 3),
+        seconds: Math.round((Date.now() - began) / 1000),
+        note: swept.keptWorkIds.length ? 'checkouts with commits on no remote, uncommitted edits or a stash are never deleted' : undefined,
+      })
+    } catch (error) {
+      log.line('error', 'worktree.pressure_sweep_failed', { error: String(error).slice(0, 200) })
+    } finally { sweeping = false }
+  }
 
   let pollFailures = 0
   /** The GitHub source's own state, published into health.json next to the tick's. */
@@ -1443,6 +1471,35 @@ export interface SweepReport {
   empty: number
   /** The settled checkouts kept because their work is on no remote: named, so the operator can push them. */
   keptWorkIds: string[]
+  /** Checkouts dropped from LIVE tickets to keep the filesystem alive. The ticket directory, with its reports,
+   *  notes and inbox, is untouched: that is what a reopened issue and a woken worker come back to. */
+  clonesDropped: number
+  /** Free GB on the work root's filesystem at the end of a pressure pass; absent when that pass never ran. */
+  freeGb?: number
+}
+
+/** The floor a box dies at, not a tuning knob: at 377 MB free (lookbook 2026-11-17) `git clone` fails mid-launch
+ *  and a report file lands as 0 bytes, which wedged the fleet for 8 hours. */
+export const MIN_FREE_DEFAULT_GB = 20
+
+/** Free bytes this process can write: `bavail`, not `bfree` — the reserved blocks are not ours. An unreadable
+ *  path answers Infinity, because deleting files on a number you could not read is the wrong way to fail. */
+export const freeBytesOf = async (path: string): Promise<number> => {
+  try {
+    const s = await statfs(path)
+    return s.bsize * s.bavail
+  } catch { return Infinity }
+}
+
+export const minFreeBytes = (cfg: { minFreeGb?: number }): number => (cfg.minFreeGb ?? MIN_FREE_DEFAULT_GB) * 1024 ** 3
+
+export interface SweepPressure {
+  /** Keep at least this many bytes free on the work root's filesystem; 0 switches the pass off. */
+  minFreeBytes?: number
+  /** Tickets with a worker session on them: that checkout is in use, and dropping it interrupts an agent. */
+  live?: ReadonlySet<string>
+  /** Free-bytes reader, injectable so a test can drive a full disk. */
+  free?: () => Promise<number>
 }
 
 /** A ticket's checkout is the ticket directory itself, or `repo` inside it: both layouts are live. */
@@ -1454,6 +1511,19 @@ const checkoutOf = (dir: string): string | undefined =>
  * the sweep frees disk, it never frees work it could not read. Asynchronous because the synchronous version
  * held the router's event loop for 47 s on a live start (47 checkouts, measured), and the first tick waited.
  */
+/** Deleting a checkout must never delete work: commits on no remote, uncommitted edits to tracked files, or a
+ *  stash. Untracked build output and downloaded models deliberately do NOT count — they are most of a 2 GB ML
+ *  workspace and are rebuilt, not recovered. A git that cannot answer is unsafe: keep the bytes. */
+async function unsafeCheckout(dir: string): Promise<boolean> {
+  if (await unpushedCommits(dir) > 0) return true
+  for (const args of [['status', '--porcelain', '--untracked-files=no'], ['stash', 'list']]) {
+    try {
+      if ((await runGit('git', ['-C', dir, ...args], { timeout: 20_000 })).stdout.trim().length > 0) return true
+    } catch { return true }
+  }
+  return false
+}
+
 async function unpushedCommits(dir: string): Promise<number> {
   try {
     // An unborn HEAD (a clone of an empty repository, a checkout mid-clone) reads as unpushed and is kept.
@@ -1474,10 +1544,11 @@ function isDirectory(path: string): boolean {
 }
 
 export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (() => ReadonlySet<string>), keep: number,
-                                     maxBytes = 200 * 1024 ** 3, sizeOf: (dir: string) => Promise<number> = dirBytes): Promise<SweepReport> {
+                                     maxBytes = 200 * 1024 ** 3, sizeOf: (dir: string) => Promise<number> = dirBytes,
+                                     pressure: SweepPressure = {}): Promise<SweepReport> {
   // Asked at each delete: the sweep runs beside the passes, and a ticket can reopen while it runs.
   const isOpen = (name: string): boolean => (typeof open === 'function' ? open() : open).has(name)
-  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [] }
+  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0 }
   let names: string[]
   try { names = readdirSync(root) } catch { return report }
   const dirs = names.filter(name => isDirectory(join(root, name)))
@@ -1493,7 +1564,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
     if (!checkout) {
       if (readdirSync(dir).length === 0) report.empty++; else report.bare++
     }
-    if (checkout && await unpushedCommits(checkout) > 0) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
+    if (checkout && await unsafeCheckout(checkout)) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
     if (isOpen(entry.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
   }
@@ -1506,10 +1577,34 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
     if (bytes <= maxBytes) break
     const dir = join(root, e.name)
     const checkout = checkoutOf(dir)
-    if (checkout && await unpushedCommits(checkout) > 0) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
+    if (checkout && await unsafeCheckout(checkout)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
     const size = await sizeOf(dir)
     if (isOpen(e.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++; bytes -= size } catch { /* next sweep's problem */ }
+  }
+  // Free space, not the count, is what kills a box. The two passes above touch settled tickets only, and 42 of
+  // the 49 workspaces that filled lookbook sat on OPEN tickets, so under a floor the CHECKOUT of a live ticket
+  // with no worker on it goes too: the code is on GitHub and the next launch re-clones it, while the ticket
+  // directory with its reports, notes and inbox stays for a reopened issue. Oldest first, until the floor is met.
+  const minFree = pressure.minFreeBytes ?? 0
+  if (minFree > 0) {
+    const live = pressure.live ?? new Set<string>()
+    const free = pressure.free ?? (() => freeBytesOf(root))
+    const idle = dirs.filter(name => isOpen(name) && !live.has(name))
+      .map(name => ({ name, at: safeMtime(join(root, name)) }))
+      .sort((a, b) => a.at - b.at)
+    for (const e of idle) {
+      if (await free() >= minFree) break
+      const checkout = checkoutOf(join(root, e.name))
+      if (!checkout) continue
+      if (await unsafeCheckout(checkout)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
+      try {
+        await rm(checkout, { recursive: true, force: true })
+        report.clonesDropped++
+      } catch { /* a busy checkout lives to the next sweep */ }
+    }
+    const now = await free()
+    if (now !== Infinity) report.freeGb = Math.round(now / 1024 ** 3)
   }
   return report
 }
@@ -1651,6 +1746,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const pullReadBudgetMs = positiveNumber('PI_SUPERAGENT_PULL_READ_BUDGET_MS', env.PI_SUPERAGENT_PULL_READ_BUDGET_MS)
   const panelPort = positiveNumber('PI_SUPERAGENT_PANEL_PORT', env.PI_SUPERAGENT_PANEL_PORT)
   const keepWorktrees = positiveNumber('PI_SUPERAGENT_KEEP_WORKTREES', env.PI_SUPERAGENT_KEEP_WORKTREES)
+  const minFreeGb = positiveNumber('PI_SUPERAGENT_MIN_FREE_GB', env.PI_SUPERAGENT_MIN_FREE_GB)
   const workerTokenFile = env.PI_SUPERAGENT_WORKER_TOKEN_FILE?.trim()
   const claimsFile = env.PI_SUPERAGENT_CLAIMS_FILE?.trim()
   const workerStartMs = positiveNumber('PI_SUPERAGENT_WORKER_START_MS', env.PI_SUPERAGENT_WORKER_START_MS)
@@ -1674,6 +1770,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(panelPort === undefined ? {} : { panelPort }),
     ...(keepWorktrees === undefined ? {} : { keepWorktrees: Math.floor(keepWorktrees) }),
     ...(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB) === undefined ? {} : { workBudgetGb: Math.floor(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB)!) }),
+    ...(minFreeGb === undefined ? {} : { minFreeGb: Math.floor(minFreeGb) }),
     ...(workerTokenFile ? { workerTokenFile } : {}),
     ...(claimsFile ? { claimsFile } : {}),
     ...(workerStartMs ? { workerStartMs } : {}),
