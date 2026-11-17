@@ -134,6 +134,7 @@ describe('waits that would hold a person\'s review back', () => {
     expect(longWait('sleep 300')).toMatch(/sleep 300 waits past 60 s/)
     expect(longWait('git push && sleep 2m && gh pr checks 12')).toMatch(/sleep 2m/)
     expect(longWait('gh pr checks 12 --watch')).toMatch(/a watch blocks until CI finishes/)
+    expect(longWait('sleep 300'), 'the refusal points at the handoff, not only at polling').toMatch(/report waiting with wakeInMinutes and end your turn/)
     expect(longWait('gh run watch 4567 --exit-status')).toMatch(/a watch blocks/)
     expect(longWait('until gh pr checks 12 | grep -q pass; do sleep 30; done')).toMatch(/a loop that polls GitHub/)
     expect(longWait('sleep 60; gh pr checks 12')).toBeUndefined()

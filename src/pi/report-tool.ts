@@ -58,8 +58,8 @@ export function reportTool(report: Reporter): ReportTool {
   return {
     name: 'ticket_report', label: 'Report the ticket result',
     description: 'Report the result of this ticket. Call it once, at the end. state=blocked requires one yes/no question for the operator. '
-      + 'state=waiting means something you started still runs (training, CI, a deploy): set wakeInMinutes to when a fresh worker '
-      + `should check on it (${WAKE_MIN}-${WAKE_MAX}), and say in notes what to check. `
+      + 'state=waiting means something you started still runs (CI, training, a deploy): set wakeInMinutes to when a fresh worker '
+      + `should check on it (${WAKE_MIN}-${WAKE_MAX} minutes; for CI, how long the checks usually take, not ${WAKE_MIN}), and say in notes what to check. `
       + 'summary is posted on the issue for the person who asked, and is refused unless it reads plainly: line 1 is the news or the ask in '
       + 'plain words, then at most three short lines, then "Details (skippable):" and at most six bullets. notes is private: what the next '
       + 'worker on this ticket needs (where things are, commands, what to check). It is never posted. '

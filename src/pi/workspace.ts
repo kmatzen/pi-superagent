@@ -152,7 +152,7 @@ export const DELEGATION_TOOLS = ['subagent', 'workflow', 'workflow_control', 'se
 /** pi hands a worker new messages only between tool calls, so one command that waits minutes holds a person's review
  *  back that long (2026-11-12: workers slept 300-600 s per command polling CI while the operator's reviews queued). */
 export const MAX_WAIT_S = 60
-const WAIT_HELP = `poll in steps instead: one \`gh pr checks\` (or \`gh run view\`) per command, then \`sleep ${MAX_WAIT_S}\` at most, and look again. A person's review reaches you only between commands`
+const WAIT_HELP = `poll in steps instead: one \`gh pr checks\` (or \`gh run view\`) per command, then \`sleep ${MAX_WAIT_S}\` at most, and look again. A person's review reaches you only between commands. If the checks are all that is left, report waiting with wakeInMinutes and end your turn instead: a fresh worker is called back to read them`
 const UNIT_S: Record<string, number> = { '': 1, s: 1, m: 60, h: 3600, d: 86400 }
 
 export function longWait(command: string): string | undefined {
