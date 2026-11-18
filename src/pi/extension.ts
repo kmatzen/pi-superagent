@@ -1548,12 +1548,12 @@ const checkoutOf = (dir: string): string | undefined =>
  * the sweep frees disk, it never frees work it could not read. Asynchronous because the synchronous version
  * held the router's event loop for 47 s on a live start (47 checkouts, measured), and the first tick waited.
  */
-/** Deleting a checkout must never delete work: commits on no remote, uncommitted edits to tracked files, or a
- *  stash. Untracked build output and downloaded models deliberately do NOT count — they are most of a 2 GB ML
- *  workspace and are rebuilt, not recovered. A git that cannot answer is unsafe: keep the bytes. */
+/** Deleting a checkout must never delete work: commits on no remote, uncommitted edits, a stash, or a new file git
+ *  does not ignore (an agent's uncommitted script or note, and the agent may come back for it). Ignored files — the
+ *  .venv, build output, downloaded models — do not count: they are rebuilt. A git that cannot answer is unsafe. */
 async function unsafeCheckout(dir: string): Promise<boolean> {
   if (await unpushedCommits(dir) > 0) return true
-  for (const args of [['status', '--porcelain', '--untracked-files=no'], ['stash', 'list']]) {
+  for (const args of [['status', '--porcelain'], ['stash', 'list']]) {
     try {
       if ((await runGit('git', ['-C', dir, ...args], { timeout: 20_000 })).stdout.trim().length > 0) return true
     } catch { return true }

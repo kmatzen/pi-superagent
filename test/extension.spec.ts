@@ -2169,6 +2169,23 @@ describe('the sweep of settled checkouts', () => {
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
 
+  it('under a full disk an uncommitted new file keeps its checkout, and an ignored .venv does not', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-floor-new-'))
+    try {
+      const fresh = seedNested(root, 'dddd4444eeee', true)
+      writeFileSync(join(fresh, 'eval_notes.md'), 'what the agent found, never committed')
+      const venv = seedNested(root, 'ffff6666aaaa', true)
+      writeFileSync(join(venv, '.gitignore'), '.venv/\n')
+      git(venv, 'add', '.gitignore'); git(venv, 'commit', '-q', '-m', 'ignore'); git(venv, 'push', '-q', 'origin', 'HEAD')
+      mkdirSync(join(venv, '.venv')); writeFileSync(join(venv, '.venv', 'torch.so'), 'x')
+      const swept = await sweepWorktrees(root, new Set(['dddd4444eeee', 'ffff6666aaaa']), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(swept).toMatchObject({ clonesDropped: 1, keptWorkIds: ['dddd4444eeee'] })
+      expect(existsSync(join(fresh, 'eval_notes.md')), 'the agent may come back for it').toBe(true)
+      expect(existsSync(venv), 'an ignored venv is rebuilt, not recovered').toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
   it('a worker sitting in a checkout and a disk above the floor are both left alone', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-floor-live-'))
     try {

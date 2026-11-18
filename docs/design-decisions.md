@@ -241,9 +241,9 @@ The router now reads free space on every tick and, below `PI_SUPERAGENT_MIN_FREE
 of an open ticket no worker is sitting in, oldest first, at most every 15 minutes. That is the code, not the
 work: GitHub holds the branch, the next launch re-clones, and the ticket directory — reports, notes, inbox — is
 what a reopened issue and a woken worker come back to, so it stays. Commits on no remote, uncommitted edits to
-tracked files, a stash and a live worker's checkout are never touched. Untracked build output and downloaded
-models deliberately do not count as work: they are most of a 2 GB ML workspace, and they are rebuilt, not
-recovered. `worktree.pressure_sweep` reports what went, by how much, and the free space left after.
+tracked files, a stash, a new file git does not ignore (an agent's uncommitted script or note) and a live
+worker's checkout are never touched. Ignored files (the .venv, build output, downloaded models) do not count as
+work: they are most of a 2 GB ML workspace, and they are rebuilt, not recovered. `worktree.pressure_sweep` reports what went, by how much, and the free space left after.
 
 **Under pressure, clear the shared caches first, and stop launching (2026-11-18).** The pass above was written
 and never deployed, and it would not have saved the box: it refilled to 0 bytes ten hours after a cleanup, and
