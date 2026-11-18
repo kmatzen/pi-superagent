@@ -1,7 +1,7 @@
 /** The package entry point: the router in the session the start script launches, the worker role inside a
  *  worker, and inert everywhere else. */
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm, statfs } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { execFile } from 'node:child_process'
@@ -1239,7 +1239,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const caches = await clearCaches(runGit, deps.sizeOf)
       const afterCaches = await freeBytesOf(cfg.worktreeRoot)
       const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)),
-        cfg.keepWorktrees ?? 20, Infinity, deps.sizeOf, { minFreeBytes: min, live: liveTickets() })
+        cfg.keepWorktrees ?? 20, Infinity, deps.sizeOf, {
+          minFreeBytes: min, live: liveTickets(), inUse: () => ticketsInUse(cfg.worktreeRoot),
+          running: new Set([...executor.workers().filter(w => w.busy).map(w => w.ticketId), ...(await herdrWorkers?.workingTickets() ?? [])]),
+        })
       log.line('info', 'worktree.pressure_sweep', {
         ...swept, keptWorkIds: swept.keptWorkIds.slice(0, 8), floorGb: Math.round(min / 1024 ** 3),
         beforeGb: Math.round(before / 1024 ** 3), cachesFreedGb: Math.round((afterCaches - before) / 1024 ** 3), caches,
@@ -1584,6 +1587,32 @@ export interface SweepPressure {
   live?: ReadonlySet<string>
   /** Free-bytes reader, injectable so a test can drive a full disk. */
   free?: () => Promise<number>
+  /** Tickets some process is running in right now (`ticketsInUse`): a parked worker's venv goes only when none is. */
+  inUse?: () => ReadonlySet<string>
+  /** Tickets whose agent is working now, between tool calls included: never a venv to take. */
+  running?: ReadonlySet<string>
+}
+
+/** A shell or the agent itself sits in its workspace while it waits; only what they started is using it. */
+const WAITING = new Set(['pi', 'node-pi', 'bash', 'sh', 'dash', 'zsh', 'fish', 'tmux', 'herdr', 'sleep', 'tee'])
+
+/** Ticket directories a process works in now: its cwd or its command line is inside one. Linux `/proc`; elsewhere, none. */
+export function ticketsInUse(root: string, proc = '/proc'): Set<string> {
+  const used = new Set<string>()
+  const prefix = `${root.replace(/\/$/, '')}/`
+  const note = (text: string): void => {
+    for (let i = text.indexOf(prefix); i >= 0; i = text.indexOf(prefix, i + 1)) used.add(text.slice(i + prefix.length).split(/[/\s\0]/)[0]!)
+  }
+  let pids: string[] = []
+  try { pids = readdirSync(proc).filter(p => /^\d+$/.test(p)) } catch { return used }
+  for (const pid of pids) {
+    try {
+      if (WAITING.has(readFileSync(join(proc, pid, 'comm'), 'utf8').trim())) continue
+      note(`${readlinkSync(join(proc, pid, 'cwd'))}/`)
+      note(readFileSync(join(proc, pid, 'cmdline'), 'utf8'))
+    } catch { /* gone, or not ours to read */ }
+  }
+  return used
 }
 
 /** Every git checkout in a ticket's workspace: the ticket directory, `repo`, or a clone named for its repository
@@ -1717,6 +1746,20 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
       }
       for (const c of checkouts) {
         try { await rm(c, { recursive: true, force: true }); report.clonesDropped++ } catch { /* busy: the next sweep */ }
+      }
+    }
+    // Still short: a parked worker's environments, oldest first, when nothing it started is running there. The agent
+    // keeps its code and notes; `uv run` rebuilds the venv on its next command. One parked venv was 12.4 GB (2026-11-18).
+    const inUse = pressure.inUse?.() ?? new Set<string>()
+    const running = pressure.running ?? live
+    const parked = dirs.filter(name => live.has(name) && !running.has(name) && !inUse.has(name))
+      .map(name => ({ name, at: safeMtime(join(root, name)) }))
+      .sort((a, b) => a.at - b.at)
+    for (const e of parked) {
+      if (await free() >= minFree) break
+      for (const c of checkoutsIn(join(root, e.name))) {
+        if (!existsSync(join(c, '.venv'))) continue
+        await rm(join(c, '.venv'), { recursive: true, force: true }).then(() => { report.venvsDropped++ }, () => {})
       }
     }
     const now = await free()

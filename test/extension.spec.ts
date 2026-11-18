@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import superagent, { activationRefusal, clearCaches, createRouterExtension, sweepTmp, workerTmp, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import superagent, { activationRefusal, clearCaches, createRouterExtension, sweepTmp, ticketsInUse, workerTmp, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
@@ -2277,6 +2277,42 @@ describe('the sweep of settled checkouts', () => {
       expect(existsSync(join(root, 'eeee2222ffff', 'worktrees', 'side', 'f'))).toBe(true)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
+
+  it('a parked worker loses its venv only when it is not working and nothing it started runs there', async () => {
+    // 2026-11-18: one parked caramel venv was 12.4 GB, and the box sat at 12 GB free under 10 GB write bursts.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-parked-'))
+    try {
+      for (const id of ['p1parked0000', 'p2working000', 'p3inuse00000']) {
+        const repo = seedNested(root, id, true)
+        mkdirSync(join(repo, '.venv')); writeFileSync(join(repo, '.venv', 'torch.so'), 'x')
+      }
+      const live = new Set(['p1parked0000', 'p2working000', 'p3inuse00000'])
+      const swept = await sweepWorktrees(root, live, 20, Infinity, async () => 0, {
+        minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3, live,
+        running: new Set(['p2working000']), inUse: () => new Set(['p3inuse00000']),
+      })
+      expect(swept).toMatchObject({ clonesDropped: 0, venvsDropped: 1 })
+      expect(existsSync(join(root, 'p1parked0000', 'repo', '.venv')), 'parked and idle').toBe(false)
+      expect(existsSync(join(root, 'p1parked0000', 'repo', 'f')), 'its code stays').toBe(true)
+      expect(existsSync(join(root, 'p2working000', 'repo', '.venv')), 'working, between tool calls too').toBe(true)
+      expect(existsSync(join(root, 'p3inuse00000', 'repo', '.venv')), 'a job it started runs there').toBe(true)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('a process in a workspace marks it in use, and a waiting shell or the agent itself does not', () => {
+    const proc = mkdtempSync(join(tmpdir(), 'sa-proc-'))
+    try {
+      const fake = (pid: string, comm: string, cwd: string, cmdline: string) => {
+        mkdirSync(join(proc, pid)); writeFileSync(join(proc, pid, 'comm'), `${comm}\n`)
+        symlinkSync(cwd, join(proc, pid, 'cwd')); writeFileSync(join(proc, pid, 'cmdline'), cmdline.split(' ').join('\0'))
+      }
+      fake('10', 'python', '/w/aaaa/caramel', 'python -m pytest')
+      fake('11', 'pi', '/w/bbbb', 'pi')
+      fake('12', 'bash', '/w/cccc', 'bash')
+      fake('13', 'nohup', '/home', '/w/dddd/repo/.venv/bin/python train.py')
+      expect([...ticketsInUse('/w', proc)].sort()).toEqual(['aaaa', 'dddd'])
+    } finally { rmSync(proc, { recursive: true, force: true }) }
+  })
 
   it('a worker sitting in a checkout and a disk above the floor are both left alone', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-floor-live-'))

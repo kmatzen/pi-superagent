@@ -536,9 +536,13 @@ describe('herdr workers', () => {
 
   it('names every ticket with a worker record that has not ended, so a disk sweep leaves its checkout alone', async () => {
     const dir = tmp()
-    const workers = new HerdrWorkers(options(dir, memoryHerdr().herdr))
+    const m = memoryHerdr()
+    const workers = new HerdrWorkers(options(dir, m.herdr))
     const session = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
     expect([...workers.openTickets()]).toEqual(['abcd1234ef'])
+    expect([...await workers.workingTickets()], 'herdr says idle').toEqual([])
+    m.agents.forEach(a => { a.agent_status = 'working' as never })
+    expect([...await workers.workingTickets()]).toEqual(['abcd1234ef'])
     session.dispose()
   })
 
