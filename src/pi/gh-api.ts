@@ -75,7 +75,7 @@ async function paged<T>(call: (args: string[]) => Promise<string>, url: (page: n
   }
 }
 
-const ghCall = ({ bin = 'gh', tokenFile, onCall }: GhOptions) => (args: string[], stdin?: string): Promise<string> => new Promise((resolve, reject) => {
+export const ghCall = ({ bin = 'gh', tokenFile, onCall }: GhOptions) => (args: string[], stdin?: string): Promise<string> => new Promise((resolve, reject) => {
   onCall?.(args)
   let env = process.env
   if (tokenFile) {

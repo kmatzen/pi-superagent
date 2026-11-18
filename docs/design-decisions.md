@@ -266,6 +266,13 @@ any one of them holds work, including a repository with a second worktree, since
 other. A workspace kept for its work under pressure still loses its `.venv` directories: an environment is rebuilt
 from the lock file, and one was 7.6 GB. Under the floor, settled tickets inside the keep count are candidates too.
 
+**Pushed means GitHub has it, not that a remote-tracking ref says so (2026-11-18).** Workers push to a token URL,
+which moves no `refs/remotes/*`, so `rev-list HEAD --not --remotes` called their pushed branches unsaved: 7 of 9
+sampled "unpushed" workspaces were on GitHub, and the sweeps kept 29 of them forever. Before keeping a checkout for
+commits on no remote, every pass now asks GitHub, as the account workers push with, to compare HEAD with the
+branch of the same name; `identical` or `ahead` is pushed. No branch, no GitHub remote, a 404 or any other error
+keeps the checkout. Uncommitted edits, a stash, new files and a second worktree still keep it either way.
+
 **Still short of the floor, a parked worker's venv goes (2026-11-18).** After every idle workspace was swept the box
 held 12 GB free against 10 GB write bursts, and parked workers' environments held 14.9 GB of unique blocks, 12.4 GB
 in one caramel venv. Under the floor the pass now also drops the `.venv` of a ticket whose worker is live but not
