@@ -1239,7 +1239,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const caches = await clearCaches()
       const afterCaches = await freeBytesOf(cfg.worktreeRoot)
       const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)),
-        cfg.keepWorktrees ?? 20, (cfg.workBudgetGb ?? 200) * 1024 ** 3, deps.sizeOf, { minFreeBytes: min, live: liveTickets() })
+        cfg.keepWorktrees ?? 20, Infinity, deps.sizeOf, { minFreeBytes: min, live: liveTickets() })
       log.line('info', 'worktree.pressure_sweep', {
         ...swept, keptWorkIds: swept.keptWorkIds.slice(0, 8), floorGb: Math.round(min / 1024 ** 3),
         beforeGb: Math.round(before / 1024 ** 3), cachesFreedGb: Math.round((afterCaches - before) / 1024 ** 3), caches,
@@ -1643,7 +1643,8 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
   }
   // The count is not the cost: measured 2026-11-11, the kept set was 58 GB because one build tree is 15 GB.
   // Settled checkouts, oldest first, go over the count as well until the root fits the budget.
-  const kept = names.filter(name => isDirectory(join(root, name))).map(name => ({ name, at: safeMtime(join(root, name)) }))
+  // An infinite budget skips the pass: it sizes every workspace with `du`, minutes on a full box (2026-11-18).
+  const kept = Number.isFinite(maxBytes) ? names.filter(name => isDirectory(join(root, name))).map(name => ({ name, at: safeMtime(join(root, name)) })) : []
   let bytes = 0
   for (const e of kept) bytes += await sizeOf(join(root, e.name))
   for (const e of kept.filter(e => !isOpen(e.name)).sort((a, b) => a.at - b.at)) {
