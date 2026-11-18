@@ -257,6 +257,15 @@ a clone plus an install, and 68 were queued when the disk hit 0. Running workers
 pause lifts on the first tick above half the floor (`disk.launches_paused` / `disk.launches_resumed`). The brief
 also tells workers what never belongs on the box: model weights, datasets, checkpoints, and output left in /tmp.
 
+**A checkout is wherever git says it is (2026-11-18).** The sweeps looked for a checkout at the ticket directory or at
+`repo/` inside it; most tickets on the box clone into a directory named for the repository (`caramel/`,
+`repos/caramel/`, `worktrees/caramel/<branch>/`). The pressure pass therefore skipped them, and the settled pass, since
+0.2.0, counted them as bare workspaces and deleted them without asking git about unpushed work. Every pass now finds
+each checkout three levels down (real directories only, never through a symlink) and keeps the whole workspace when
+any one of them holds work, including a repository with a second worktree, since deleting either side breaks the
+other. A workspace kept for its work under pressure still loses its `.venv` directories: an environment is rebuilt
+from the lock file, and one was 7.6 GB. Under the floor, settled tickets inside the keep count are candidates too.
+
 **A worker's scratch lives in its workspace, not /tmp (2026-11-18).** /tmp on the fleet box is a 512 MB tmpfs, and
 10,740 worker leftovers (export tarballs, scratch clones, test directories) filled it while the big disk had 17 GB
 free, so every write to /tmp failed. Each worker now starts with `TMPDIR=<workspace>/.tmp`: on the big disk, ignored

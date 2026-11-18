@@ -2021,7 +2021,7 @@ describe('the state a router start leaves behind', () => {
 
   it('says nothing when there are no checkouts yet', async () => {
     expect(await sweepWorktrees(join(tmpdir(), 'sa-sweep-absent'), new Set(), 20))
-      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0 })
+      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0, venvsDropped: 0 })
   })
 
   it('makes one panel secret per state directory, readable only by its owner', () => {
@@ -2230,6 +2230,51 @@ describe('the sweep of settled checkouts', () => {
       expect(swept).toMatchObject({ clonesDropped: 1, keptWorkIds: ['dddd4444eeee'] })
       expect(existsSync(join(fresh, 'eval_notes.md')), 'the agent may come back for it').toBe(true)
       expect(existsSync(venv), 'an ignored venv is rebuilt, not recovered').toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('finds a clone named for its repository: unpushed work there survives the settled pass, a pushed one goes under pressure', async () => {
+    // 2026-11-18: most tickets on the box clone into <ticket>/<repo>; the settled pass called that bare and deleted it.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-named-'))
+    try {
+      const named = (ticket: string, repo: string, pushed: boolean) => {
+        const bare = mkdtempSync(join(tmpdir(), 'sa-sweep-origin-')); origins.push(bare)
+        git(bare, 'init', '-q', '--bare', '.')
+        const dir = join(root, ticket, repo)
+        mkdirSync(join(root, ticket), { recursive: true })
+        spawnSync('git', ['clone', '-q', bare, dir], { encoding: 'utf8' })
+        writeFileSync(join(dir, 'f'), 'x'); git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'work')
+        if (pushed) git(dir, 'push', '-q', 'origin', 'HEAD')
+        return dir
+      }
+      named('aaaa0000bbbb', 'caramel', false)
+      aged(join(root, 'aaaa0000bbbb'), 9)
+      expect(await sweepWorktrees(root, new Set(), 0)).toMatchObject({ removed: 0, bare: 0, keptWork: 1, keptWorkIds: ['aaaa0000bbbb'] })
+      expect(existsSync(join(root, 'aaaa0000bbbb', 'caramel', 'f')), 'the only copy of the work').toBe(true)
+
+      named('cccc1111dddd', 'conveyor', true)
+      const venvOwner = join(root, 'aaaa0000bbbb', 'caramel')
+      writeFileSync(join(venvOwner, '.gitignore'), '.venv/\n')
+      git(venvOwner, 'add', '.gitignore'); git(venvOwner, 'commit', '-q', '-m', 'ignore')
+      mkdirSync(join(venvOwner, '.venv')); writeFileSync(join(venvOwner, '.venv', 'torch.so'), 'x')
+      const swept = await sweepWorktrees(root, new Set(['aaaa0000bbbb', 'cccc1111dddd']), 20, Infinity, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(swept).toMatchObject({ clonesDropped: 1, venvsDropped: 1, keptWorkIds: ['aaaa0000bbbb'] })
+      expect(existsSync(join(root, 'cccc1111dddd', 'conveyor')), 'pushed and clean: re-cloned on the next launch').toBe(false)
+      expect(existsSync(join(venvOwner, '.venv')), 'kept for its work, not for its venv').toBe(false)
+      expect(existsSync(join(venvOwner, 'f'))).toBe(true)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('a clone with a second worktree is kept whole: deleting either side breaks the other', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-wt-'))
+    try {
+      const main = seedNested(root, 'eeee2222ffff', true)
+      git(main, 'worktree', 'add', '-q', join(root, 'eeee2222ffff', 'worktrees', 'side'), '-b', 'side')
+      const swept = await sweepWorktrees(root, new Set(['eeee2222ffff']), 20, Infinity, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(swept).toMatchObject({ clonesDropped: 0, keptWorkIds: ['eeee2222ffff'] })
+      expect(existsSync(join(root, 'eeee2222ffff', 'worktrees', 'side', 'f'))).toBe(true)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
 
