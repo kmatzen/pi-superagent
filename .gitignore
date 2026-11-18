@@ -5,3 +5,6 @@ dist/
 formal/states/
 __pycache__/
 states/
+
+# npm pack output: a deploy artifact, never source (one rode into #140 nine times).
+*.tgz
