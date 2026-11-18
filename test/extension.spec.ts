@@ -2299,17 +2299,24 @@ describe('the sweep of settled checkouts', () => {
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
 
-  it('a process in a workspace marks it in use, and a waiting shell or the agent itself does not', () => {
+  it('a job in a workspace marks it in use; the waiting agent, its shells and its own servers do not', () => {
+    // 2026-11-18: every parked worker had scout and a node MCP server sitting in its workspace, children of pi.
     const proc = mkdtempSync(join(tmpdir(), 'sa-proc-'))
     try {
-      const fake = (pid: string, comm: string, cwd: string, cmdline: string) => {
+      const fake = (pid: string, ppid: string, comm: string, cwd: string, cmdline: string) => {
         mkdirSync(join(proc, pid)); writeFileSync(join(proc, pid, 'comm'), `${comm}\n`)
+        writeFileSync(join(proc, pid, 'stat'), `${pid} (${comm}) S ${ppid} 1 1 0`)
         symlinkSync(cwd, join(proc, pid, 'cwd')); writeFileSync(join(proc, pid, 'cmdline'), cmdline.split(' ').join('\0'))
       }
-      fake('10', 'python', '/w/aaaa/caramel', 'python -m pytest')
-      fake('11', 'pi', '/w/bbbb', 'pi')
-      fake('12', 'bash', '/w/cccc', 'bash')
-      fake('13', 'nohup', '/home', '/w/dddd/repo/.venv/bin/python train.py')
+      fake('1', '0', 'systemd', '/', 'init')
+      fake('20', '1', 'pi', '/w/bbbb', 'pi')
+      fake('21', '20', 'scout', '/w/bbbb', 'scout mcp')
+      fake('22', '21', 'scout-index', '/w/bbbb', 'scout index')
+      fake('23', '20', 'node', '/w/bbbb', 'node doorman-mcp.mjs')
+      fake('30', '1', 'pi', '/w/aaaa', 'pi')
+      fake('31', '30', 'bash', '/w/aaaa', 'bash -c pytest')
+      fake('32', '31', 'python', '/w/aaaa/caramel', 'python -m pytest')
+      fake('40', '1', 'python', '/home', '/w/dddd/repo/.venv/bin/python train.py')
       expect([...ticketsInUse('/w', proc)].sort()).toEqual(['aaaa', 'dddd'])
     } finally { rmSync(proc, { recursive: true, force: true }) }
   })

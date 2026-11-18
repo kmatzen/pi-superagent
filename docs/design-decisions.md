@@ -270,8 +270,8 @@ from the lock file, and one was 7.6 GB. Under the floor, settled tickets inside 
 held 12 GB free against 10 GB write bursts, and parked workers' environments held 14.9 GB of unique blocks, 12.4 GB
 in one caramel venv. Under the floor the pass now also drops the `.venv` of a ticket whose worker is live but not
 working (busy in the executor, or `working` in herdr, protects it, between tool calls included) and in which no
-process runs: `ticketsInUse` reads each process's cwd and command line from /proc, ignoring the waiting agent and
-its shells. The agent keeps its code, notes and inbox; `uv run` rebuilds the environment on its next command.
+process runs: `ticketsInUse` reads each process's cwd and command line from /proc, ignoring the waiting agent, its
+shells and its own MCP servers (non-shell children of pi). The agent keeps its code, notes and inbox; `uv run` rebuilds the environment on its next command.
 
 **A worker's scratch lives in its workspace, not /tmp (2026-11-18).** /tmp on the fleet box is a 512 MB tmpfs, and
 10,740 worker leftovers (export tarballs, scratch clones, test directories) filled it while the big disk had 17 GB
