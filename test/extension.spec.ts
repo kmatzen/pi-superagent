@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import superagent, { activationRefusal, clearCaches, createRouterExtension, sweepTmp, ticketsInUse, workerTmp, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import superagent, { activationRefusal, clearCaches, createRouterExtension, pushedTo, sweepTmp, ticketsInUse, workerTmp, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
@@ -2320,6 +2320,47 @@ describe('the sweep of settled checkouts', () => {
       expect([...ticketsInUse('/w', proc)].sort()).toEqual(['aaaa', 'dddd'])
     } finally { rmSync(proc, { recursive: true, force: true }) }
   })
+
+  it('work a worker pushed to a token URL counts as pushed when GitHub has it, and stays when it does not', async () => {
+    // 2026-11-18: 7 of 9 sampled "unpushed" workspaces were on GitHub; the token push moved no remote-tracking ref.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-github-'))
+    try {
+      for (const id of ['g1pushed0000', 'g2local00000']) {
+        const dir = seedNested(root, id, false)
+        git(dir, 'remote', 'set-url', 'origin', 'https://x-access-token:secret@github.com/Research-Adobe/parfait.git')
+        git(dir, 'checkout', '-q', '-b', 'fix/green-gate')
+        writeFileSync(join(dir, 'g'), id); git(dir, 'add', 'g'); git(dir, 'commit', '-q', '-m', id)
+        aged(join(root, id), 9)
+      }
+      const known = git(join(root, 'g1pushed0000', 'repo'), 'rev-parse', 'HEAD').stdout.trim()
+      const asked: string[] = []
+      const swept = await sweepWorktrees(root, new Set(), 0, Infinity, async () => 0, {
+        pushed: pushedTo(async args => {
+          asked.push(args[1]!)
+          if (!args[1]!.includes(known)) throw new Error('HTTP 404')
+          return 'identical\n'
+        }),
+      })
+      expect(swept).toMatchObject({ removed: 1, keptWork: 1, keptWorkIds: ['g2local00000'] })
+      expect(asked[0], 'the repository and branch, never the credential in the URL').toMatch(/^repos\/Research-Adobe\/parfait\/compare\/[0-9a-f]{40}\.\.\.fix%2Fgreen-gate$/)
+      expect(existsSync(join(root, 'g2local00000', 'repo', 'f')), 'GitHub never saw it: the only copy').toBe(true)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('asks GitHub only what it can answer: no branch, no GitHub remote, or any error is not pushed', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-pushed-'))
+    try {
+      const dir = seedNested(root, 'h1h1h1h1h1h1', true)
+      const yes = pushedTo(async () => 'identical\n'), behind = pushedTo(async () => 'behind\n')
+      expect(await yes(dir), 'origin is a local path, not GitHub').toBe(false)
+      git(dir, 'remote', 'set-url', 'origin', 'git@github.com:o/r.git')
+      expect(await yes(dir)).toBe(true)
+      expect(await behind(dir), 'local commits GitHub does not have').toBe(false)
+      expect(await pushedTo(async () => { throw new Error('HTTP 404') })(dir)).toBe(false)
+      git(dir, 'checkout', '-q', '--detach')
+      expect(await yes(dir), 'a detached HEAD has no branch to compare').toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
 
   it('a worker sitting in a checkout and a disk above the floor are both left alone', async () => {
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-floor-live-'))

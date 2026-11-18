@@ -12,7 +12,7 @@ import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type ThreadRef, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
 import {GithubSource, REPLY_MARKER, type GithubApi, type IssueState} from './source-github.ts'
-import { ghApi, ghPulls } from './gh-api.ts'
+import { ghApi, ghCall, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type PullRef, type PullState, type ReconcileReport } from './pulls.ts'
 import { PullTracker } from './tracker.ts'
@@ -229,6 +229,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // ever counted it. Reset per pass and reported on the tick line.
   let ghCalls = 0
   const accounts = ghAccounts(cfg, () => { ghCalls += 1 })
+  // The sweeps ask GitHub, as the account workers push with, whether a branch is there before keeping its checkout.
+  const onGithub = pushedTo(ghCall(accounts.pulls))
   const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({
     // Reviews are read as the account that opens the pull requests: the watched account is not in the
     // organization that hosts them, and a pull request it cannot see is a review the ticket never gets.
@@ -1185,7 +1187,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   void recovered.then(async () => {
     const beganSweep = Date.now()
     const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)), cfg.keepWorktrees ?? 20,
-      (cfg.workBudgetGb ?? 200) * 1024 ** 3, deps.sizeOf, { minFreeBytes: minFreeBytes(cfg), live: liveTickets() })
+      (cfg.workBudgetGb ?? 200) * 1024 ** 3, deps.sizeOf, { minFreeBytes: minFreeBytes(cfg), live: liveTickets(), pushed: onGithub })
     if (swept.strays) log.line('warn', 'worktree.strays', { strays: swept.strays, root: cfg.worktreeRoot })
     if (swept.removed || swept.keptWork) {
       log.line('info', 'worktree.swept', {
@@ -1240,7 +1242,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const afterCaches = await freeBytesOf(cfg.worktreeRoot)
       const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)),
         cfg.keepWorktrees ?? 20, Infinity, deps.sizeOf, {
-          minFreeBytes: min, live: liveTickets(), inUse: () => ticketsInUse(cfg.worktreeRoot),
+          minFreeBytes: min, live: liveTickets(), inUse: () => ticketsInUse(cfg.worktreeRoot), pushed: onGithub,
           running: new Set([...executor.workers().filter(w => w.busy).map(w => w.ticketId), ...(await herdrWorkers?.workingTickets() ?? [])]),
         })
       log.line('info', 'worktree.pressure_sweep', {
@@ -1591,6 +1593,22 @@ export interface SweepPressure {
   inUse?: () => ReadonlySet<string>
   /** Tickets whose agent is working now, between tool calls included: never a venv to take. */
   running?: ReadonlySet<string>
+  /** Whether GitHub has a checkout's HEAD on its branch (`pushedTo`); unset, only remote-tracking refs count. */
+  pushed?: (checkout: string) => Promise<boolean>
+}
+
+/** A worker pushes to a token URL, which moves no remote-tracking ref, so `--not --remotes` calls its pushed branch
+ *  unsaved: 7 of 9 sampled "unpushed" workspaces were on GitHub (2026-11-18). GitHub's compare decides; any doubt,
+ *  including a 404 for a branch GitHub never saw, answers false and the checkout is kept. */
+export const pushedTo = (gh: (args: string[]) => Promise<string>) => async (dir: string): Promise<boolean> => {
+  try {
+    const git = async (...args: string[]): Promise<string> => (await runGit('git', ['-C', dir, ...args], { timeout: 10_000 })).stdout.trim()
+    const repo = /github\.com[/:]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(await git('remote', 'get-url', 'origin'))?.[1]
+    const branch = await git('branch', '--show-current')
+    if (!repo || !branch) return false
+    const status = (await gh(['api', `repos/${repo}/compare/${await git('rev-parse', 'HEAD')}...${encodeURIComponent(branch)}`, '--jq', '.status'])).trim()
+    return status === 'identical' || status === 'ahead'
+  } catch { return false }
 }
 
 const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh', 'fish'])
@@ -1651,8 +1669,8 @@ function checkoutsIn(dir: string, depth = 3): string[] {
 const realDirectory = (path: string): boolean => { try { return lstatSync(path).isDirectory() } catch { return false } }
 
 /** One checkout that holds work keeps the whole workspace: its clones may be each other's worktrees. */
-async function holdsWork(checkouts: readonly string[]): Promise<boolean> {
-  for (const c of checkouts) if (await unsafeCheckout(c)) return true
+async function holdsWork(checkouts: readonly string[], pushed?: (checkout: string) => Promise<boolean>): Promise<boolean> {
+  for (const c of checkouts) if (await unsafeCheckout(c, pushed)) return true
   return false
 }
 
@@ -1660,8 +1678,8 @@ async function holdsWork(checkouts: readonly string[]): Promise<boolean> {
  *  does not ignore (an agent's uncommitted script or note, and the agent may come back for it). Ignored files — the
  *  .venv, build output, downloaded models — do not count: they are rebuilt. A git that cannot answer is unsafe, and
  *  so is a repository with a second worktree: deleting either side breaks the other. */
-async function unsafeCheckout(dir: string): Promise<boolean> {
-  if (await unpushedCommits(dir) > 0) return true
+async function unsafeCheckout(dir: string, pushed?: (checkout: string) => Promise<boolean>): Promise<boolean> {
+  if (await unpushedCommits(dir) > 0 && !(await pushed?.(dir))) return true
   for (const args of [['status', '--porcelain'], ['stash', 'list']]) {
     try {
       if ((await runGit('git', ['-C', dir, ...args], { timeout: 20_000 })).stdout.trim().length > 0) return true
@@ -1719,7 +1737,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
     if (!checkouts.length) {
       if (readdirSync(dir).length === 0) report.empty++; else report.bare++
     }
-    if (await holdsWork(checkouts)) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
+    if (await holdsWork(checkouts, pressure.pushed)) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
     if (isOpen(entry.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
   }
@@ -1732,7 +1750,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
   for (const e of kept.filter(e => !isOpen(e.name)).sort((a, b) => a.at - b.at)) {
     if (bytes <= maxBytes) break
     const dir = join(root, e.name)
-    if (await holdsWork(checkoutsIn(dir))) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
+    if (await holdsWork(checkoutsIn(dir), pressure.pushed)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
     const size = await sizeOf(dir)
     if (isOpen(e.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++; bytes -= size } catch { /* next sweep's problem */ }
@@ -1754,7 +1772,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
       await rm(join(root, e.name, WORKER_TMP), { recursive: true, force: true }).catch(() => {})
       const checkouts = checkoutsIn(join(root, e.name))
       if (!checkouts.length) continue
-      if (await holdsWork(checkouts)) {
+      if (await holdsWork(checkouts, pressure.pushed)) {
         // The work stays; its environments do not: a .venv is rebuilt from the lock file, and one was 7.6 GB.
         for (const c of checkouts) {
           if (!existsSync(join(c, '.venv'))) continue
