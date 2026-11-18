@@ -272,6 +272,10 @@ export class HerdrWorkers {
     }
   }
 
+  /** Tickets with a worker record that has not ended, tracked by this router or not: a disk sweep must not pull a
+   *  checkout out from under any of them. */
+  openTickets(): Set<string> { return new Set(this.records().map(r => r.ticketId)) }
+
   private records(ended = false): WorkerRecord[] {
     if (!existsSync(this.root)) return []
     return readdirSync(this.root)

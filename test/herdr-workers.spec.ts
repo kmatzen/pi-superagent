@@ -534,6 +534,14 @@ describe('herdr workers', () => {
     expect(said, 'end-of-log, so the finished assignment does not settle the new one').toEqual([])
   })
 
+  it('names every ticket with a worker record that has not ended, so a disk sweep leaves its checkout alone', async () => {
+    const dir = tmp()
+    const workers = new HerdrWorkers(options(dir, memoryHerdr().herdr))
+    const session = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    expect([...workers.openTickets()]).toEqual(['abcd1234ef'])
+    session.dispose()
+  })
+
   it('a worker adopted between runs starts parked, so it holds no slot', async () => {
     const dir = tmp()
     const m = memoryHerdr()

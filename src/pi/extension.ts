@@ -1,8 +1,9 @@
 /** The package entry point: the router in the session the start script launches, the worker role inside a
  *  worker, and inert everywhere else. */
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm, statfs } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
@@ -771,6 +772,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
             ...(cfg.githubRepo ? { PI_SUPERAGENT_HOME_REPO: cfg.githubRepo } : {}),
             ...(cfg.claimsFile ? { PI_SUPERAGENT_CLAIMS_FILE: cfg.claimsFile } : {}),
             ...(limitBin ? { PATH: `${limitBin}:${process.env.PATH ?? ''}` } : {}),
+            // Scratch on the big disk, swept with the ticket: /tmp here is a 512 MB tmpfs that workers filled (2026-11-18).
+            TMPDIR: workerTmp(workspace.dir),
           },
         })
       }
@@ -1197,9 +1200,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // the sweep runs at most once per window, and only while the floor is breached.
   const PRESSURE_SWEEP_MS = 15 * 60_000
   /** Tickets a worker session is sitting in right now: that checkout is in use, so it is never a pressure target. */
-  const liveTickets = (): ReadonlySet<string> => new Set(executor.workers().map(w => w.ticketId))
+  const liveTickets = (): ReadonlySet<string> =>
+    new Set([...executor.workers().map(w => w.ticketId), ...(herdrWorkers?.openTickets() ?? [])])
   let sweeping = false
   let lastPressureSweep = 0
+  let lastTmpSweep = 0
   // One statfs per beat. Below half the floor no new worker starts: on 2026-11-18 the box reached 0 bytes with 8
   // workers running and 68 queued, and every launch is a clone plus an install. Launches resume once a sweep frees it.
   const checkDisk = async (): Promise<void> => {
@@ -1213,6 +1218,13 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         { freeGb: Math.round(free / 1024 ** 3), floorGb: Math.round(min / 1024 ** 3) })
     }
     if (free < min) await pressureSweep()
+    const tmp = await statfs(tmpdir()).catch(() => undefined)
+    if (tmp && tmp.bavail < tmp.blocks / 10 && Date.now() - lastTmpSweep >= PRESSURE_SWEEP_MS) {
+      lastTmpSweep = Date.now()
+      const swept = await sweepTmp()
+      const after = await statfs(tmpdir()).catch(() => tmp)
+      log.line('info', 'tmp.pressure_sweep', { ...swept, freeMb: Math.round(after.bavail * after.bsize / 1024 ** 2) })
+    }
   }
   const pressureSweep = async (): Promise<void> => {
     const min = minFreeBytes(cfg)
@@ -1514,6 +1526,30 @@ export const freeBytesOf = async (path: string): Promise<number> => {
 
 export const minFreeBytes = (cfg: { minFreeGb?: number }): number => (cfg.minFreeGb ?? MIN_FREE_DEFAULT_GB) * 1024 ** 3
 
+/** A worker's TMPDIR, inside its workspace; the `*` ignore keeps it out of `git status` in a checkout. */
+export const WORKER_TMP = '.tmp'
+export function workerTmp(workspace: string): string {
+  const dir = join(workspace, WORKER_TMP)
+  mkdirSync(dir, { recursive: true })
+  if (!existsSync(join(dir, '.gitignore'))) writeFileSync(join(dir, '.gitignore'), '*\n')
+  return dir
+}
+
+/** Our own entries in a nearly full /tmp, untouched for `ageMs`, for the tools that hard-code /tmp over TMPDIR. */
+export async function sweepTmp(dir = tmpdir(), ageMs = 6 * 3_600_000): Promise<{ removed: number; kept: number }> {
+  const uid = process.getuid?.()
+  let removed = 0, kept = 0
+  for (const name of readdirSync(dir)) {
+    try {
+      const st = lstatSync(join(dir, name))
+      if (st.uid !== uid || st.isSocket() || Date.now() - st.mtimeMs < ageMs) { kept++; continue }
+      await rm(join(dir, name), { recursive: true, force: true })
+      removed++
+    } catch { kept++ }
+  }
+  return { removed, kept }
+}
+
 /** Rebuildable caches every worker shares through the operator's HOME, cleared by their own tools: `uv cache clean`
  *  waits for an install in flight instead of cutting it, and a venv keeps the files it hard-linked from the cache. */
 export const PRESSURE_CACHES: ReadonlyArray<readonly [string, ...string[]]> = [['uv', 'cache', 'clean'], ['npm', 'cache', 'clean', '--force']]
@@ -1632,6 +1668,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
       .sort((a, b) => a.at - b.at)
     for (const e of idle) {
       if (await free() >= minFree) break
+      await rm(join(root, e.name, WORKER_TMP), { recursive: true, force: true }).catch(() => {})
       const checkout = checkoutOf(join(root, e.name))
       if (!checkout) continue
       if (await unsafeCheckout(checkout)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
