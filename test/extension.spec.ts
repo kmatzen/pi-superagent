@@ -2021,7 +2021,7 @@ describe('the state a router start leaves behind', () => {
 
   it('says nothing when there are no checkouts yet', async () => {
     expect(await sweepWorktrees(join(tmpdir(), 'sa-sweep-absent'), new Set(), 20))
-      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0, venvsDropped: 0 })
+      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0, venvsDropped: 0, lent: 0 })
   })
 
   it('makes one panel secret per state directory, readable only by its owner', () => {
@@ -2359,6 +2359,24 @@ describe('the sweep of settled checkouts', () => {
       expect(await pushedTo(async () => { throw new Error('HTTP 404') })(dir)).toBe(false)
       git(dir, 'checkout', '-q', '--detach')
       expect(await yes(dir), 'a detached HEAD has no branch to compare').toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('never deletes a clone another workspace borrows git objects from', async () => {
+    // 2026-11-18: two clones on the box read `bad object HEAD` after the sweep deleted the clone they referenced.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-lent-'))
+    try {
+      const source = seedNested(root, 'lender000000', true)
+      const borrower = join(root, 'borrower0000', 'repo')
+      mkdirSync(join(root, 'borrower0000'))
+      spawnSync('git', ['clone', '-q', '--reference', source, source, borrower], { encoding: 'utf8' })
+      expect(existsSync(join(borrower, '.git', 'objects', 'info', 'alternates'))).toBe(true)
+      aged(join(root, 'lender000000'), 9)
+      const swept = await sweepWorktrees(root, new Set(['borrower0000']), 0, Infinity, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3, live: new Set(['borrower0000']) })
+      expect(swept).toMatchObject({ removed: 0, clonesDropped: 0 })
+      expect(swept.lent).toBeGreaterThan(0)
+      expect(git(borrower, 'rev-parse', 'HEAD').status, 'the borrower still reads its history').toBe(0)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
 
