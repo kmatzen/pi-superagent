@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import superagent, { activationRefusal, createRouterExtension, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import superagent, { activationRefusal, clearCaches, createRouterExtension, pushedTo, sweepTmp, ticketsInUse, workerTmp, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
@@ -2021,7 +2021,7 @@ describe('the state a router start leaves behind', () => {
 
   it('says nothing when there are no checkouts yet', async () => {
     expect(await sweepWorktrees(join(tmpdir(), 'sa-sweep-absent'), new Set(), 20))
-      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [] })
+      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0, venvsDropped: 0, lent: 0 })
   })
 
   it('makes one panel secret per state directory, readable only by its owner', () => {
@@ -2048,6 +2048,8 @@ describe('the state a router start leaves behind', () => {
     expect(configFrom({ ...base, PI_SUPERAGENT_WORKER_QUIET_MINUTES: '45' })?.workerQuietMinutes).toBe(45)
     expect(configFrom({ ...base, PI_SUPERAGENT_WORKER_TOKEN_FILE: '/s/worker-token' })?.workerTokenFile).toBe('/s/worker-token')
     expect(configFrom({ ...base, PI_SUPERAGENT_CLAIMS_FILE: '/s/claims.json' })?.claimsFile).toBe('/s/claims.json')
+    expect(configFrom({ ...base, PI_SUPERAGENT_MIN_FREE_GB: '30' })?.minFreeGb).toBe(30)
+    expect(configFrom(base)?.minFreeGb, 'unset keeps the measured floor').toBeUndefined()
   })
 })
 
@@ -2068,6 +2070,22 @@ describe('the sweep of settled checkouts', () => {
     spawnSync('git', ['clone', '-q', bare, dir], { encoding: 'utf8' })
     mkdirSync(join(dir, 'repo'))
     writeFileSync(join(dir, 'repo', 'f'), 'x')
+    git(dir, 'add', '-A')
+    git(dir, 'commit', '-q', '-m', 'work')
+    if (pushed) git(dir, 'push', '-q', 'origin', 'HEAD')
+    return dir
+  }
+
+  // The other layout that is live on real boxes: the ticket directory holds `repo`, so a pressure drop must take
+  // the clone and leave the ticket directory, which is where its reports live.
+  const seedNested = (root: string, name: string, pushed: boolean) => {
+    const bare = mkdtempSync(join(tmpdir(), 'sa-sweep-origin-'))
+    origins.push(bare)
+    git(bare, 'init', '-q', '--bare', '.')
+    const dir = join(root, name, 'repo')
+    mkdirSync(join(root, name), { recursive: true })
+    spawnSync('git', ['clone', '-q', bare, dir], { encoding: 'utf8' })
+    writeFileSync(join(dir, 'f'), 'x')
     git(dir, 'add', '-A')
     git(dir, 'commit', '-q', '-m', 'work')
     if (pushed) git(dir, 'push', '-q', 'origin', 'HEAD')
@@ -2111,6 +2129,271 @@ describe('the sweep of settled checkouts', () => {
       expect(readdirSync(root)).toEqual([])
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
+
+  it('clears a big shared cache with its own tool, keeps a small one, and says which it could not', async () => {
+    // 2026-11-18: the uv cache was 32 of the 47 GB that refilled the box, outside the work root this sweep reads.
+    const root = mkdtempSync(join(tmpdir(), 'sa-caches-'))
+    try {
+      const dirs = ['uv', 'npm', 'pip'].map(n => { mkdirSync(join(root, n)); return join(root, n) })
+      const sizes: Record<string, number> = { [dirs[0]!]: 30 * 1024 ** 3, [dirs[1]!]: 5 * 1024 ** 3, [dirs[2]!]: 200 * 1024 ** 2 }
+      const ran: string[] = []
+      const said = await clearCaches(async (bin, args) => {
+        ran.push([bin, ...args].join(' '))
+        if (bin === 'npm') throw Object.assign(new Error('spawn npm ENOENT'), { code: 'ENOENT' })
+      }, async dir => sizes[dir] ?? 0, [
+        { dir: dirs[0]!, command: ['uv', 'cache', 'clean'] },
+        { dir: dirs[1]!, command: ['npm', 'cache', 'clean', '--force'] },
+        { dir: dirs[2]!, command: ['pip', 'cache', 'purge'] },
+      ])
+      expect(ran, 'a 200 MB cache is what lets the next venv hard-link: it stays').toEqual(['uv cache clean', 'npm cache clean --force'])
+      expect(said).toEqual(['uv: cleared 30 GB', 'npm: not installed', 'pip: 200 MB, kept'])
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('a worker\'s scratch lives in its workspace, out of git status, and goes when nobody works the ticket', async () => {
+    // 2026-11-18: /tmp on the box is a 512 MB tmpfs, and 10,740 worker leftovers filled it.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-scratch-'))
+    try {
+      const repo = seedNested(root, 'abab1212cdcd', true)
+      const scratch = workerTmp(join(root, 'abab1212cdcd', 'repo'))
+      writeFileSync(join(scratch, 'frames.tar.gz'), 'x')
+      expect(git(repo, 'status', '--porcelain').stdout, 'a checkout with scratch in it is still clean').toBe('')
+      writeFileSync(join(workerTmp(join(root, 'abab1212cdcd')), 'big.bin'), 'x')
+      await sweepWorktrees(root, new Set(['abab1212cdcd']), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(existsSync(join(root, 'abab1212cdcd', '.tmp')), 'idle scratch is gone').toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('an infinite budget sizes nothing, so a pressure pass reaches the full disk at once', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-nosize-'))
+    try {
+      mkdirSync(join(root, 'settled')); writeFileSync(join(root, 'settled', 'f'), 'x')
+      let sized = 0
+      await sweepWorktrees(root, new Set(), 20, Infinity, async () => { sized++; return 0 })
+      expect(sized).toBe(0)
+      await sweepWorktrees(root, new Set(), 20, 1, async () => { sized++; return 0 })
+      expect(sized, 'a finite budget still sizes the root').toBeGreaterThan(0)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('a nearly full /tmp loses our entries untouched for six hours, and keeps fresh ones', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sa-tmp-'))
+    try {
+      mkdirSync(join(dir, 'scene3d-old')); writeFileSync(join(dir, 'scene3d-old', 'f'), 'x')
+      writeFileSync(join(dir, 'parfait-refresh.tar.gz'), 'x')
+      aged(join(dir, 'scene3d-old'), 1)
+      expect(await sweepTmp(dir)).toEqual({ removed: 1, kept: 1 })
+      expect(readdirSync(dir)).toEqual(['parfait-refresh.tar.gz'])
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('a full disk drops the checkout of an idle open ticket and keeps what it reported', async () => {
+    // 42 of the 49 workspaces that filled lookbook on 2026-11-17 sat on OPEN tickets, which no earlier pass touched.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-floor-'))
+    try {
+      const id = 'a6697362e931'
+      seedNested(root, id, true)
+      writeFileSync(join(root, id, 'report.md'), 'the work is on github')
+      const swept = await sweepWorktrees(root, new Set([id]), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(swept).toMatchObject({ clonesDropped: 1, keptWork: 0, freeGb: 1 })
+      expect(existsSync(join(root, id, 'repo'))).toBe(false)
+      expect(readFileSync(join(root, id, 'report.md'), 'utf8')).toContain('github')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('keeps a checkout with uncommitted edits under a full disk, and names it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-floor-dirty-'))
+    try {
+      const id = 'bbbb2222cccc'
+      const dir = seedNested(root, id, true)
+      writeFileSync(join(dir, 'f'), 'work that exists nowhere else')
+      const swept = await sweepWorktrees(root, new Set([id]), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(swept).toMatchObject({ clonesDropped: 0, keptWork: 1, keptWorkIds: [id] })
+      expect(existsSync(join(dir, 'f'))).toBe(true)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('under a full disk an uncommitted new file keeps its checkout, and an ignored .venv does not', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-floor-new-'))
+    try {
+      const fresh = seedNested(root, 'dddd4444eeee', true)
+      writeFileSync(join(fresh, 'eval_notes.md'), 'what the agent found, never committed')
+      const venv = seedNested(root, 'ffff6666aaaa', true)
+      writeFileSync(join(venv, '.gitignore'), '.venv/\n')
+      git(venv, 'add', '.gitignore'); git(venv, 'commit', '-q', '-m', 'ignore'); git(venv, 'push', '-q', 'origin', 'HEAD')
+      mkdirSync(join(venv, '.venv')); writeFileSync(join(venv, '.venv', 'torch.so'), 'x')
+      const swept = await sweepWorktrees(root, new Set(['dddd4444eeee', 'ffff6666aaaa']), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(swept).toMatchObject({ clonesDropped: 1, keptWorkIds: ['dddd4444eeee'] })
+      expect(existsSync(join(fresh, 'eval_notes.md')), 'the agent may come back for it').toBe(true)
+      expect(existsSync(venv), 'an ignored venv is rebuilt, not recovered').toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('finds a clone named for its repository: unpushed work there survives the settled pass, a pushed one goes under pressure', async () => {
+    // 2026-11-18: most tickets on the box clone into <ticket>/<repo>; the settled pass called that bare and deleted it.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-named-'))
+    try {
+      const named = (ticket: string, repo: string, pushed: boolean) => {
+        const bare = mkdtempSync(join(tmpdir(), 'sa-sweep-origin-')); origins.push(bare)
+        git(bare, 'init', '-q', '--bare', '.')
+        const dir = join(root, ticket, repo)
+        mkdirSync(join(root, ticket), { recursive: true })
+        spawnSync('git', ['clone', '-q', bare, dir], { encoding: 'utf8' })
+        writeFileSync(join(dir, 'f'), 'x'); git(dir, 'add', '-A'); git(dir, 'commit', '-q', '-m', 'work')
+        if (pushed) git(dir, 'push', '-q', 'origin', 'HEAD')
+        return dir
+      }
+      named('aaaa0000bbbb', 'caramel', false)
+      aged(join(root, 'aaaa0000bbbb'), 9)
+      expect(await sweepWorktrees(root, new Set(), 0)).toMatchObject({ removed: 0, bare: 0, keptWork: 1, keptWorkIds: ['aaaa0000bbbb'] })
+      expect(existsSync(join(root, 'aaaa0000bbbb', 'caramel', 'f')), 'the only copy of the work').toBe(true)
+
+      named('cccc1111dddd', 'conveyor', true)
+      const venvOwner = join(root, 'aaaa0000bbbb', 'caramel')
+      writeFileSync(join(venvOwner, '.gitignore'), '.venv/\n')
+      git(venvOwner, 'add', '.gitignore'); git(venvOwner, 'commit', '-q', '-m', 'ignore')
+      mkdirSync(join(venvOwner, '.venv')); writeFileSync(join(venvOwner, '.venv', 'torch.so'), 'x')
+      const swept = await sweepWorktrees(root, new Set(['aaaa0000bbbb', 'cccc1111dddd']), 20, Infinity, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(swept).toMatchObject({ clonesDropped: 1, venvsDropped: 1, keptWorkIds: ['aaaa0000bbbb'] })
+      expect(existsSync(join(root, 'cccc1111dddd', 'conveyor')), 'pushed and clean: re-cloned on the next launch').toBe(false)
+      expect(existsSync(join(venvOwner, '.venv')), 'kept for its work, not for its venv').toBe(false)
+      expect(existsSync(join(venvOwner, 'f'))).toBe(true)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('a clone with a second worktree is kept whole: deleting either side breaks the other', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-wt-'))
+    try {
+      const main = seedNested(root, 'eeee2222ffff', true)
+      git(main, 'worktree', 'add', '-q', join(root, 'eeee2222ffff', 'worktrees', 'side'), '-b', 'side')
+      const swept = await sweepWorktrees(root, new Set(['eeee2222ffff']), 20, Infinity, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(swept).toMatchObject({ clonesDropped: 0, keptWorkIds: ['eeee2222ffff'] })
+      expect(existsSync(join(root, 'eeee2222ffff', 'worktrees', 'side', 'f'))).toBe(true)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('a parked worker loses its venv only when it is not working and nothing it started runs there', async () => {
+    // 2026-11-18: one parked caramel venv was 12.4 GB, and the box sat at 12 GB free under 10 GB write bursts.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-parked-'))
+    try {
+      for (const id of ['p1parked0000', 'p2working000', 'p3inuse00000']) {
+        const repo = seedNested(root, id, true)
+        mkdirSync(join(repo, '.venv')); writeFileSync(join(repo, '.venv', 'torch.so'), 'x')
+      }
+      const live = new Set(['p1parked0000', 'p2working000', 'p3inuse00000'])
+      const swept = await sweepWorktrees(root, live, 20, Infinity, async () => 0, {
+        minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3, live,
+        running: new Set(['p2working000']), inUse: () => new Set(['p3inuse00000']),
+      })
+      expect(swept).toMatchObject({ clonesDropped: 0, venvsDropped: 1 })
+      expect(existsSync(join(root, 'p1parked0000', 'repo', '.venv')), 'parked and idle').toBe(false)
+      expect(existsSync(join(root, 'p1parked0000', 'repo', 'f')), 'its code stays').toBe(true)
+      expect(existsSync(join(root, 'p2working000', 'repo', '.venv')), 'working, between tool calls too').toBe(true)
+      expect(existsSync(join(root, 'p3inuse00000', 'repo', '.venv')), 'a job it started runs there').toBe(true)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('a job in a workspace marks it in use; the waiting agent, its shells and its own servers do not', () => {
+    // 2026-11-18: every parked worker had scout and a node MCP server sitting in its workspace, children of pi.
+    const proc = mkdtempSync(join(tmpdir(), 'sa-proc-'))
+    try {
+      const fake = (pid: string, ppid: string, comm: string, cwd: string, cmdline: string) => {
+        mkdirSync(join(proc, pid)); writeFileSync(join(proc, pid, 'comm'), `${comm}\n`)
+        writeFileSync(join(proc, pid, 'stat'), `${pid} (${comm}) S ${ppid} 1 1 0`)
+        symlinkSync(cwd, join(proc, pid, 'cwd')); writeFileSync(join(proc, pid, 'cmdline'), cmdline.split(' ').join('\0'))
+      }
+      fake('1', '0', 'systemd', '/', 'init')
+      fake('20', '1', 'pi', '/w/bbbb', 'pi')
+      fake('21', '20', 'scout', '/w/bbbb', 'scout mcp')
+      fake('22', '21', 'scout-index', '/w/bbbb', 'scout index')
+      fake('23', '20', 'node', '/w/bbbb', 'node doorman-mcp.mjs')
+      fake('30', '1', 'pi', '/w/aaaa', 'pi')
+      fake('31', '30', 'bash', '/w/aaaa', 'bash -c pytest')
+      fake('32', '31', 'python', '/w/aaaa/caramel', 'python -m pytest')
+      fake('40', '1', 'python', '/home', '/w/dddd/repo/.venv/bin/python train.py')
+      expect([...ticketsInUse('/w', proc)].sort()).toEqual(['aaaa', 'dddd'])
+    } finally { rmSync(proc, { recursive: true, force: true }) }
+  })
+
+  it('work a worker pushed to a token URL counts as pushed when GitHub has it, and stays when it does not', async () => {
+    // 2026-11-18: 7 of 9 sampled "unpushed" workspaces were on GitHub; the token push moved no remote-tracking ref.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-github-'))
+    try {
+      for (const id of ['g1pushed0000', 'g2local00000']) {
+        const dir = seedNested(root, id, false)
+        git(dir, 'remote', 'set-url', 'origin', 'https://x-access-token:secret@github.com/Research-Adobe/parfait.git')
+        git(dir, 'checkout', '-q', '-b', 'fix/green-gate')
+        writeFileSync(join(dir, 'g'), id); git(dir, 'add', 'g'); git(dir, 'commit', '-q', '-m', id)
+        aged(join(root, id), 9)
+      }
+      const known = git(join(root, 'g1pushed0000', 'repo'), 'rev-parse', 'HEAD').stdout.trim()
+      const asked: string[] = []
+      const swept = await sweepWorktrees(root, new Set(), 0, Infinity, async () => 0, {
+        pushed: pushedTo(async args => {
+          asked.push(args[1]!)
+          if (!args[1]!.includes(known)) throw new Error('HTTP 404')
+          return 'identical\n'
+        }),
+      })
+      expect(swept).toMatchObject({ removed: 1, keptWork: 1, keptWorkIds: ['g2local00000'] })
+      expect(asked[0], 'the repository and branch, never the credential in the URL').toMatch(/^repos\/Research-Adobe\/parfait\/compare\/[0-9a-f]{40}\.\.\.fix%2Fgreen-gate$/)
+      expect(existsSync(join(root, 'g2local00000', 'repo', 'f')), 'GitHub never saw it: the only copy').toBe(true)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('asks GitHub only what it can answer: no branch, no GitHub remote, or any error is not pushed', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-pushed-'))
+    try {
+      const dir = seedNested(root, 'h1h1h1h1h1h1', true)
+      const yes = pushedTo(async () => 'identical\n'), behind = pushedTo(async () => 'behind\n')
+      expect(await yes(dir), 'origin is a local path, not GitHub').toBe(false)
+      git(dir, 'remote', 'set-url', 'origin', 'git@github.com:o/r.git')
+      expect(await yes(dir)).toBe(true)
+      expect(await behind(dir), 'local commits GitHub does not have').toBe(false)
+      expect(await pushedTo(async () => { throw new Error('HTTP 404') })(dir)).toBe(false)
+      git(dir, 'checkout', '-q', '--detach')
+      expect(await yes(dir), 'a detached HEAD has no branch to compare').toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('never deletes a clone another workspace borrows git objects from', async () => {
+    // 2026-11-18: two clones on the box read `bad object HEAD` after the sweep deleted the clone they referenced.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-lent-'))
+    try {
+      const source = seedNested(root, 'lender000000', true)
+      const borrower = join(root, 'borrower0000', 'repo')
+      mkdirSync(join(root, 'borrower0000'))
+      spawnSync('git', ['clone', '-q', '--reference', source, source, borrower], { encoding: 'utf8' })
+      expect(existsSync(join(borrower, '.git', 'objects', 'info', 'alternates'))).toBe(true)
+      aged(join(root, 'lender000000'), 9)
+      const swept = await sweepWorktrees(root, new Set(['borrower0000']), 0, Infinity, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3, live: new Set(['borrower0000']) })
+      expect(swept).toMatchObject({ removed: 0, clonesDropped: 0 })
+      expect(swept.lent).toBeGreaterThan(0)
+      expect(git(borrower, 'rev-parse', 'HEAD').status, 'the borrower still reads its history').toBe(0)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('a worker sitting in a checkout and a disk above the floor are both left alone', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-floor-live-'))
+    try {
+      seedNested(root, 'c11111111111', true)
+      seedNested(root, 'c22222222222', true)
+      const busy = await sweepWorktrees(root, new Set(['c11111111111', 'c22222222222']), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, live: new Set(['c11111111111']), free: async () => 1024 ** 3 })
+      expect(busy).toMatchObject({ clonesDropped: 1 })
+      expect(existsSync(join(root, 'c11111111111', 'repo', '.git'))).toBe(true)
+      const healthy = await sweepWorktrees(root, new Set(['c22222222222']), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 40 * 1024 ** 3 })
+      expect(healthy).toMatchObject({ clonesDropped: 0, freeGb: 40 })
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
 
 })
 
