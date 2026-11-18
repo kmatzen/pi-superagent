@@ -262,8 +262,9 @@ also tells workers what never belongs on the box: model weights, datasets, check
 `repos/caramel/`, `worktrees/caramel/<branch>/`). The pressure pass therefore skipped them, and the settled pass, since
 0.2.0, counted them as bare workspaces and deleted them without asking git about unpushed work. Every pass now finds
 each checkout three levels down (real directories only, never through a symlink) and keeps the whole workspace when
-any one of them holds work, including a repository with a second worktree, since deleting either side breaks the
-other. A workspace kept for its work under pressure still loses its `.venv` directories: an environment is rebuilt
+any one of them holds work, including a worktree whose other half lives in another workspace, since deleting either
+side breaks the other. A clone and its worktrees inside one workspace go together: 39 of the checkouts the sweep
+kept on 2026-11-18 were a worker's own `worktrees/<repo>/<branch>`. A workspace kept for its work under pressure still loses its `.venv` directories: an environment is rebuilt
 from the lock file, and one was 7.6 GB. Under the floor, settled tickets inside the keep count are candidates too.
 
 **Pushed means GitHub has it, not that a remote-tracking ref says so (2026-11-18).** Workers push to a token URL,
