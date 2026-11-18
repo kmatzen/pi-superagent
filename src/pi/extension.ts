@@ -1507,6 +1507,8 @@ export interface SweepReport {
   /** Checkouts dropped from LIVE tickets to keep the filesystem alive. The ticket directory, with its reports,
    *  notes and inbox, is untouched: that is what a reopened issue and a woken worker come back to. */
   clonesDropped: number
+  /** `.venv` directories dropped from workspaces kept for their work: rebuilt from the lock file, never work. */
+  venvsDropped: number
   /** Free GB on the work root's filesystem at the end of a pressure pass; absent when that pass never ran. */
   freeGb?: number
 }
@@ -1584,18 +1586,32 @@ export interface SweepPressure {
   free?: () => Promise<number>
 }
 
-/** A ticket's checkout is the ticket directory itself, or `repo` inside it: both layouts are live. */
-const checkoutOf = (dir: string): string | undefined =>
-  existsSync(join(dir, '.git')) ? dir : existsSync(join(dir, 'repo', '.git')) ? join(dir, 'repo') : undefined
+/** Every git checkout in a ticket's workspace: the ticket directory, `repo`, or a clone named for its repository
+ *  (`caramel`, `repos/caramel`, `worktrees/caramel/<branch>`), which is the layout most tickets on the box use and the
+ *  one the sweeps never saw (2026-11-18): the pressure pass skipped it, and the settled pass called it bare and deleted
+ *  it without asking git. Real directories only, so a symlink never leads a delete outside the workspace. */
+function checkoutsIn(dir: string, depth = 3): string[] {
+  if (existsSync(join(dir, '.git'))) return [dir]
+  if (depth === 0) return []
+  let names: string[] = []
+  try { names = readdirSync(dir) } catch { return [] }
+  return names
+    .filter(n => n !== '.venv' && n !== 'node_modules' && n !== WORKER_TMP && realDirectory(join(dir, n)))
+    .flatMap(n => checkoutsIn(join(dir, n), depth - 1))
+}
 
-/**
- * Commits on this checkout that exist on no remote. An unreadable checkout reads as unpushed and is kept:
- * the sweep frees disk, it never frees work it could not read. Asynchronous because the synchronous version
- * held the router's event loop for 47 s on a live start (47 checkouts, measured), and the first tick waited.
- */
+const realDirectory = (path: string): boolean => { try { return lstatSync(path).isDirectory() } catch { return false } }
+
+/** One checkout that holds work keeps the whole workspace: its clones may be each other's worktrees. */
+async function holdsWork(checkouts: readonly string[]): Promise<boolean> {
+  for (const c of checkouts) if (await unsafeCheckout(c)) return true
+  return false
+}
+
 /** Deleting a checkout must never delete work: commits on no remote, uncommitted edits, a stash, or a new file git
  *  does not ignore (an agent's uncommitted script or note, and the agent may come back for it). Ignored files — the
- *  .venv, build output, downloaded models — do not count: they are rebuilt. A git that cannot answer is unsafe. */
+ *  .venv, build output, downloaded models — do not count: they are rebuilt. A git that cannot answer is unsafe, and
+ *  so is a repository with a second worktree: deleting either side breaks the other. */
 async function unsafeCheckout(dir: string): Promise<boolean> {
   if (await unpushedCommits(dir) > 0) return true
   for (const args of [['status', '--porcelain'], ['stash', 'list']]) {
@@ -1603,9 +1619,18 @@ async function unsafeCheckout(dir: string): Promise<boolean> {
       if ((await runGit('git', ['-C', dir, ...args], { timeout: 20_000 })).stdout.trim().length > 0) return true
     } catch { return true }
   }
+  try {
+    const { stdout } = await runGit('git', ['-C', dir, 'worktree', 'list', '--porcelain'], { timeout: 20_000 })
+    if (stdout.split('\n').filter(l => l.startsWith('worktree ') && existsSync(l.slice(9))).length > 1) return true
+  } catch { return true }
   return false
 }
 
+/**
+ * Commits on this checkout that exist on no remote. An unreadable checkout reads as unpushed and is kept:
+ * the sweep frees disk, it never frees work it could not read. Asynchronous because the synchronous version
+ * held the router's event loop for 47 s on a live start (47 checkouts, measured), and the first tick waited.
+ */
 async function unpushedCommits(dir: string): Promise<number> {
   try {
     // An unborn HEAD (a clone of an empty repository, a checkout mid-clone) reads as unpushed and is kept.
@@ -1630,7 +1655,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
                                      pressure: SweepPressure = {}): Promise<SweepReport> {
   // Asked at each delete: the sweep runs beside the passes, and a ticket can reopen while it runs.
   const isOpen = (name: string): boolean => (typeof open === 'function' ? open() : open).has(name)
-  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0 }
+  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0, venvsDropped: 0 }
   let names: string[]
   try { names = readdirSync(root) } catch { return report }
   const dirs = names.filter(name => isDirectory(join(root, name)))
@@ -1641,12 +1666,12 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
     .sort((a, b) => b.at - a.at)
   for (const [index, entry] of settled.entries()) {
     const dir = join(root, entry.name)
-    const checkout = checkoutOf(dir)
-    if (index < keep) { if (checkout) report.checkouts++; continue }
-    if (!checkout) {
+    const checkouts = checkoutsIn(dir)
+    if (index < keep) { if (checkouts.length) report.checkouts++; continue }
+    if (!checkouts.length) {
       if (readdirSync(dir).length === 0) report.empty++; else report.bare++
     }
-    if (checkout && await unsafeCheckout(checkout)) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
+    if (await holdsWork(checkouts)) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
     if (isOpen(entry.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
   }
@@ -1659,8 +1684,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
   for (const e of kept.filter(e => !isOpen(e.name)).sort((a, b) => a.at - b.at)) {
     if (bytes <= maxBytes) break
     const dir = join(root, e.name)
-    const checkout = checkoutOf(dir)
-    if (checkout && await unsafeCheckout(checkout)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
+    if (await holdsWork(checkoutsIn(dir))) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
     const size = await sizeOf(dir)
     if (isOpen(e.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++; bytes -= size } catch { /* next sweep's problem */ }
@@ -1673,19 +1697,27 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
   if (minFree > 0) {
     const live = pressure.live ?? new Set<string>()
     const free = pressure.free ?? (() => freeBytesOf(root))
-    const idle = dirs.filter(name => isOpen(name) && !live.has(name))
+    // Settled tickets inside the keep count too: under the floor the count is a luxury, and their code is on GitHub.
+    const idle = dirs.filter(name => !live.has(name))
       .map(name => ({ name, at: safeMtime(join(root, name)) }))
       .sort((a, b) => a.at - b.at)
     for (const e of idle) {
       if (await free() >= minFree) break
       await rm(join(root, e.name, WORKER_TMP), { recursive: true, force: true }).catch(() => {})
-      const checkout = checkoutOf(join(root, e.name))
-      if (!checkout) continue
-      if (await unsafeCheckout(checkout)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
-      try {
-        await rm(checkout, { recursive: true, force: true })
-        report.clonesDropped++
-      } catch { /* a busy checkout lives to the next sweep */ }
+      const checkouts = checkoutsIn(join(root, e.name))
+      if (!checkouts.length) continue
+      if (await holdsWork(checkouts)) {
+        // The work stays; its environments do not: a .venv is rebuilt from the lock file, and one was 7.6 GB.
+        for (const c of checkouts) {
+          if (!existsSync(join(c, '.venv'))) continue
+          await rm(join(c, '.venv'), { recursive: true, force: true }).then(() => { report.venvsDropped++ }, () => {})
+        }
+        report.keptWork++; report.keptWorkIds.push(e.name)
+        continue
+      }
+      for (const c of checkouts) {
+        try { await rm(c, { recursive: true, force: true }); report.clonesDropped++ } catch { /* busy: the next sweep */ }
+      }
     }
     const now = await free()
     if (now !== Infinity) report.freeGb = Math.round(now / 1024 ** 3)
