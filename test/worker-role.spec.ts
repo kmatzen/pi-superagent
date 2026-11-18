@@ -460,4 +460,21 @@ describe('the worker role', () => {
     expect(f.sent).toEqual([{ text: 'the brief', deliverAs: 'followUp' }])
     f.emit('session_shutdown')
   })
+
+  it('a finished experiment hands over only with its results uploaded and linked', () => {
+    // Operator, 2026-11-17: the pod dies with the run, so ready means the figures are in the bucket and linked.
+    const dir = tmp()
+    const ledger = join(tmp(), 'job-claims.json')
+    writeFileSync(ledger, JSON.stringify({ entries: [{ ref: `job-${basename(dir)}`, session: basename(dir), expiresAt: '2999-01-01' }] }))
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir, PI_SUPERAGENT_WORKSPACE: '/w', PI_SUPERAGENT_CLAIMS_FILE: ledger })
+    const verdict = (input: Record<string, unknown>) => f.emit('tool_call', { toolName: 'ticket_report', input }).find(v => v)
+    const link = `s3://matzen-adobe/superagent/507-${basename(dir).slice(0, 8)}/figures/curve.png`
+    expect(verdict({ state: 'ready', summary: 'the dose curve is flat', wakeInMinutes: 60 }), 'finished, with a claim and nothing to look at')
+      .toMatchObject({ block: true, reason: expect.stringContaining('Upload the visual results') })
+    expect(verdict({ state: 'ready', summary: 'the dose curve is flat', wakeInMinutes: 60, results: [link] }), 'the links satisfy it').toBeUndefined()
+    expect(verdict({ state: 'waiting', summary: 'run 31 trains', wakeInMinutes: 60 }), 'mid-run has nothing finished to upload').toBeUndefined()
+    f.tools.find(t => t.name === 'ticket_report')!.execute('c1', { state: 'ready', summary: 'the dose curve is flat', results: [link] })
+    expect(lines(join(dir, 'reports.jsonl'))).toMatchObject([{ state: 'ready', results: [link] }])
+  })
 })

@@ -7,6 +7,8 @@ export interface ReportedRun {
   question?: string | null
   /** The pull requests the ticket now follows, by URL. */
   pullRequests?: readonly string[]
+  /** What a person opens to see the work: uploaded figures, clips, metric files. */
+  results?: readonly string[]
   /** When a fresh worker is called back to check what this run left running. */
   wakeAt?: string
   /** For the next worker on the ticket only: never part of a receipt. */
@@ -22,6 +24,12 @@ function pullLines(urls: readonly string[], tracker?: string): string {
   if (urls.length === 1) return `\n\n**Pull request:** ${urls[0]}`
   return `\n\n**Pull requests, in merge order:**\n${urls.map((url, i) => `${i + 1}. ${url}`).join('\n')}`
     + (tracker ? `\n\nEach one's state, kept current: ${tracker}` : '')
+}
+
+/** The links to the evidence, above the pull request: on an experiment ticket the person came for the picture. */
+function resultLines(urls: readonly string[]): string {
+  if (urls.length === 1) return `\n\n**Results:** ${urls[0]}`
+  return `\n\n**Results:**\n${urls.map((url, i) => `${i + 1}. ${url}`).join('\n')}`
 }
 /**
  * The terminal end, said out loud. A `ready` report with no pull request ends the ticket in the engine and
@@ -45,14 +53,15 @@ export function receiptText(thread: string, origin: ReportOrigin, run: ReportedR
       return `${thread}: the worker stopped without reporting a result.\n\n${STILL_OPEN}`
     case 'worker': {
       const pulls = run.pullRequests?.length ? pullLines(run.pullRequests, tracker) : ''
+      const results = run.results?.length ? resultLines(run.results) : ''
       const next = run.wakeAt ? `\n\nNext check: a fresh worker looks at it at ${run.wakeAt.slice(11, 16)} UTC.` : ''
       if (run.state === 'blocked') {
-        return `${head}${pulls}\n\n${run.question ? `**Question:** ${run.question}\n\n` : ''}Reply here; the worker reads every comment.${next}`
+        return `${head}${results}${pulls}\n\n${run.question ? `**Question:** ${run.question}\n\n` : ''}Reply here; the worker reads every comment.${next}`
       }
-      if (run.state === 'waiting') return `${head}${pulls}${next}`
-      if (run.state === 'failed') return `${head}${pulls}\n\n${STILL_OPEN}`
-      if (run.state === 'ready' && !pulls) return `${head}\n\n${FINISHED}`
-      return run.state === 'ready' && pulls ? `${head}${pulls}\n\n${(run.pullRequests?.length ?? 0) > 1 ? IN_REVIEW_MANY : IN_REVIEW}` : `${head}${pulls}`
+      if (run.state === 'waiting') return `${head}${results}${pulls}${next}`
+      if (run.state === 'failed') return `${head}${results}${pulls}\n\n${STILL_OPEN}`
+      if (run.state === 'ready' && !pulls) return `${head}${results}\n\n${FINISHED}`
+      return run.state === 'ready' && pulls ? `${head}${results}${pulls}\n\n${(run.pullRequests?.length ?? 0) > 1 ? IN_REVIEW_MANY : IN_REVIEW}` : `${head}${results}${pulls}`
     }
   }
 }
