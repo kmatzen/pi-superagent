@@ -2156,6 +2156,18 @@ describe('the sweep of settled checkouts', () => {
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
 
+  it('an infinite budget sizes nothing, so a pressure pass reaches the full disk at once', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-nosize-'))
+    try {
+      mkdirSync(join(root, 'settled')); writeFileSync(join(root, 'settled', 'f'), 'x')
+      let sized = 0
+      await sweepWorktrees(root, new Set(), 20, Infinity, async () => { sized++; return 0 })
+      expect(sized).toBe(0)
+      await sweepWorktrees(root, new Set(), 20, 1, async () => { sized++; return 0 })
+      expect(sized, 'a finite budget still sizes the root').toBeGreaterThan(0)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
   it('a nearly full /tmp loses our entries untouched for six hours, and keeps fresh ones', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sa-tmp-'))
     try {
