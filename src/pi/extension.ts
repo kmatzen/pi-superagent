@@ -1593,10 +1593,13 @@ export interface SweepPressure {
   running?: ReadonlySet<string>
 }
 
+const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh', 'fish'])
 /** A shell or the agent itself sits in its workspace while it waits; only what they started is using it. */
-const WAITING = new Set(['pi', 'node-pi', 'bash', 'sh', 'dash', 'zsh', 'fish', 'tmux', 'herdr', 'sleep', 'tee'])
+const WAITING = new Set([...SHELLS, 'pi', 'tmux', 'herdr', 'sleep', 'tee'])
 
-/** Ticket directories a process works in now: its cwd or its command line is inside one. Linux `/proc`; elsewhere, none. */
+/** Ticket directories a process works in now: its cwd or command line is inside one. The agent's own servers (a
+ *  non-shell child of `pi`, such as its MCP servers, and their children) do not count; a job does, whether it runs
+ *  under a tool call's shell or on its own after that shell exited. Linux `/proc`; elsewhere, none. */
 export function ticketsInUse(root: string, proc = '/proc'): Set<string> {
   const used = new Set<string>()
   const prefix = `${root.replace(/\/$/, '')}/`
@@ -1605,12 +1608,28 @@ export function ticketsInUse(root: string, proc = '/proc'): Set<string> {
   }
   let pids: string[] = []
   try { pids = readdirSync(proc).filter(p => /^\d+$/.test(p)) } catch { return used }
+  const tree = new Map<string, { comm: string; ppid: string }>()
   for (const pid of pids) {
     try {
-      if (WAITING.has(readFileSync(join(proc, pid, 'comm'), 'utf8').trim())) continue
+      const stat = readFileSync(join(proc, pid, 'stat'), 'utf8')
+      tree.set(pid, { comm: readFileSync(join(proc, pid, 'comm'), 'utf8').trim(), ppid: stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1] ?? '' })
+    } catch { /* gone */ }
+  }
+  const agentServer = (pid: string): boolean => {
+    for (let me = pid, hops = 0; hops < 64; hops++) {
+      const self = tree.get(me), parent = self && tree.get(self.ppid)
+      if (!self || !parent) return false
+      if (parent.comm === 'pi') return !SHELLS.has(self.comm)
+      me = self.ppid
+    }
+    return false
+  }
+  for (const [pid, { comm }] of tree) {
+    if (WAITING.has(comm) || agentServer(pid)) continue
+    try {
       note(`${readlinkSync(join(proc, pid, 'cwd'))}/`)
       note(readFileSync(join(proc, pid, 'cmdline'), 'utf8'))
-    } catch { /* gone, or not ours to read */ }
+    } catch { /* not ours to read */ }
   }
   return used
 }
