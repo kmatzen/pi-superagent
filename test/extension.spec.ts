@@ -2130,15 +2130,24 @@ describe('the sweep of settled checkouts', () => {
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
-  it('clears the shared caches with their own tools, and says which ones it could not', async () => {
+  it('clears a big shared cache with its own tool, keeps a small one, and says which it could not', async () => {
     // 2026-11-18: the uv cache was 32 of the 47 GB that refilled the box, outside the work root this sweep reads.
-    const ran: string[] = []
-    const said = await clearCaches(async (bin, args) => {
-      ran.push([bin, ...args].join(' '))
-      if (bin === 'npm') throw Object.assign(new Error('spawn npm ENOENT'), { code: 'ENOENT' })
-    })
-    expect(ran).toEqual(['uv cache clean', 'npm cache clean --force'])
-    expect(said).toEqual(['uv: cleared', 'npm: not installed'])
+    const root = mkdtempSync(join(tmpdir(), 'sa-caches-'))
+    try {
+      const dirs = ['uv', 'npm', 'pip'].map(n => { mkdirSync(join(root, n)); return join(root, n) })
+      const sizes: Record<string, number> = { [dirs[0]!]: 30 * 1024 ** 3, [dirs[1]!]: 5 * 1024 ** 3, [dirs[2]!]: 200 * 1024 ** 2 }
+      const ran: string[] = []
+      const said = await clearCaches(async (bin, args) => {
+        ran.push([bin, ...args].join(' '))
+        if (bin === 'npm') throw Object.assign(new Error('spawn npm ENOENT'), { code: 'ENOENT' })
+      }, async dir => sizes[dir] ?? 0, [
+        { dir: dirs[0]!, command: ['uv', 'cache', 'clean'] },
+        { dir: dirs[1]!, command: ['npm', 'cache', 'clean', '--force'] },
+        { dir: dirs[2]!, command: ['pip', 'cache', 'purge'] },
+      ])
+      expect(ran, 'a 200 MB cache is what lets the next venv hard-link: it stays').toEqual(['uv cache clean', 'npm cache clean --force'])
+      expect(said).toEqual(['uv: cleared 30 GB', 'npm: not installed', 'pip: 200 MB, kept'])
+    } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
   it('a worker\'s scratch lives in its workspace, out of git status, and goes when nobody works the ticket', async () => {

@@ -3,7 +3,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm, statfs } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
@@ -1236,7 +1236,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // Caches first: they are rebuilt by the next install, and they were 32 of the 47 GB that refilled the box
       // on 2026-11-18 — outside the work root, where the checkout sweep below never looks.
       const before = await freeBytesOf(cfg.worktreeRoot)
-      const caches = await clearCaches()
+      const caches = await clearCaches(runGit, deps.sizeOf)
       const afterCaches = await freeBytesOf(cfg.worktreeRoot)
       const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)),
         cfg.keepWorktrees ?? 20, Infinity, deps.sizeOf, { minFreeBytes: min, live: liveTickets() })
@@ -1552,14 +1552,23 @@ export async function sweepTmp(dir = tmpdir(), ageMs = 6 * 3_600_000): Promise<{
 
 /** Rebuildable caches every worker shares through the operator's HOME, cleared by their own tools: `uv cache clean`
  *  waits for an install in flight instead of cutting it, and a venv keeps the files it hard-linked from the cache. */
-export const PRESSURE_CACHES: ReadonlyArray<readonly [string, ...string[]]> = [['uv', 'cache', 'clean'], ['npm', 'cache', 'clean', '--force']]
+export const PRESSURE_CACHES: ReadonlyArray<{ dir: string; command: readonly [string, ...string[]] }> = [
+  { dir: join(homedir(), '.cache', 'uv'), command: ['uv', 'cache', 'clean'] },
+  { dir: join(homedir(), '.npm'), command: ['npm', 'cache', 'clean', '--force'] },
+]
+
+/** A small cache stays: the uv cache is also what lets a new venv hard-link instead of copy, so clearing it on every
+ *  window under pressure re-downloads torch and can grow the disk (2026-11-18, the box sat under the floor). */
+export const CACHE_CLEAR_MIN_BYTES = 2 * 1024 ** 3
 
 /** A missing tool, or a cache still busy at the timeout, waits for the next window; each outcome is said, never silent. */
 export async function clearCaches(run: (bin: string, args: string[], o: { timeout: number }) => Promise<unknown> = runGit,
-                                  commands = PRESSURE_CACHES): Promise<string[]> {
+                                  sizeOf: (dir: string) => Promise<number> = dirBytes, caches = PRESSURE_CACHES): Promise<string[]> {
   const said: string[] = []
-  for (const [bin, ...args] of commands) {
-    try { await run(bin, args, { timeout: 10 * 60_000 }); said.push(`${bin}: cleared`) } catch (error) {
+  for (const { dir, command: [bin, ...args] } of caches) {
+    const size = existsSync(dir) ? await sizeOf(dir).catch(() => 0) : 0
+    if (size < CACHE_CLEAR_MIN_BYTES) { said.push(`${bin}: ${Math.round(size / 1024 ** 2)} MB, kept`); continue }
+    try { await run(bin, args, { timeout: 10 * 60_000 }); said.push(`${bin}: cleared ${Math.round(size / 1024 ** 3)} GB`) } catch (error) {
       said.push(`${bin}: ${(error as { code?: unknown }).code === 'ENOENT' ? 'not installed' : String(error).slice(0, 80)}`)
     }
   }

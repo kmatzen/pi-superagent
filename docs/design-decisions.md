@@ -250,7 +250,9 @@ and never deployed, and it would not have saved the box: it refilled to 0 bytes 
 32 of the 47 GB was the uv package cache in the operator's HOME, which every worker shares and no sweep read.
 Below the floor the router now runs `uv cache clean` and `npm cache clean --force` before touching any checkout:
 the tools wait for an install in flight instead of cutting it, and a venv keeps every file it hard-linked out of
-the cache, so the only cost is a re-download. Below half the floor the executor starts no new worker: a launch is
+the cache, so the only cost is a re-download. A cache under 2 GB stays: the uv cache is also what lets a new venv
+hard-link instead of copy, and wiping it every window while the box sat under the floor re-downloaded torch for
+each new venv and could grow the disk it was meant to free. Below half the floor the executor starts no new worker: a launch is
 a clone plus an install, and 68 were queued when the disk hit 0. Running workers are never stopped for disk; the
 pause lifts on the first tick above half the floor (`disk.launches_paused` / `disk.launches_resumed`). The brief
 also tells workers what never belongs on the box: model weights, datasets, checkpoints, and output left in /tmp.
