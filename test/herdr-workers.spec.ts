@@ -517,6 +517,35 @@ describe('herdr workers', () => {
     expect(m.calls.filter(c => c.startsWith('tabClose')), 'settled once').toHaveLength(1)
   })
 
+  it('a 0-byte cursor left by a full disk attaches at end-of-log instead of killing the router', async () => {
+    // Measured 2026-11-17 on lookbook: the disk filled, the cursor landed as 0 bytes, and JSON.parse of it threw
+    // out of the recover sweep on every restart for 8 hours.
+    const dir = tmp()
+    const workers = new HerdrWorkers(options(dir, memoryHerdr().herdr))
+    const session = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    const record = (await workers.find('abcd1234ef'))!
+    const bridge = join(dir, 'workers', session.sessionId)
+    session.dispose()
+    appendFileSync(join(bridge, 'reports.jsonl'), '{"state":"blocked","summary":"from the assignment that ended"}\n')
+    writeFileSync(join(bridge, 'cursor.json'), '')
+    const said: string[] = []
+    expect(() => workers.attach(record, (state, summary) => { said.push(`${state}: ${summary}`) })).not.toThrow()
+    await new Promise(resolve => setTimeout(resolve, 60))
+    expect(said, 'end-of-log, so the finished assignment does not settle the new one').toEqual([])
+  })
+
+  it('names every ticket with a worker record that has not ended, so a disk sweep leaves its checkout alone', async () => {
+    const dir = tmp()
+    const m = memoryHerdr()
+    const workers = new HerdrWorkers(options(dir, m.herdr))
+    const session = await workers.launch({ ticket, thread: '#7', workspace: '/w/7', env: {}, report: () => {} })
+    expect([...workers.openTickets()]).toEqual(['abcd1234ef'])
+    expect([...await workers.workingTickets()], 'herdr says idle').toEqual([])
+    m.agents.forEach(a => { a.agent_status = 'working' as never })
+    expect([...await workers.workingTickets()]).toEqual(['abcd1234ef'])
+    session.dispose()
+  })
+
   it('a worker adopted between runs starts parked, so it holds no slot', async () => {
     const dir = tmp()
     const m = memoryHerdr()

@@ -234,6 +234,65 @@ meant to bound the disk; the kept set measured 58 GB because one build tree is 1
 caps the work root, and settled checkouts over it go oldest-first — the same two safety rules as the count sweep:
 never unpushed work, never an open ticket.
 
+**Sweep under disk pressure, open tickets included (2026-11-17).** Both sweeps above touch settled tickets only,
+and they ran once, at startup. Lookbook reached 377 MB free with 42 of its 49 workspaces on OPEN tickets; the
+full disk left a 0-byte worker cursor, every restart crashed reading it, and the fleet stayed dead for 8 hours.
+The router now reads free space on every tick and, below `PI_SUPERAGENT_MIN_FREE_GB` (20), drops the *checkout*
+of an open ticket no worker is sitting in, oldest first, at most every 15 minutes. That is the code, not the
+work: GitHub holds the branch, the next launch re-clones, and the ticket directory — reports, notes, inbox — is
+what a reopened issue and a woken worker come back to, so it stays. Commits on no remote, uncommitted edits to
+tracked files, a stash, a new file git does not ignore (an agent's uncommitted script or note) and a live
+worker's checkout are never touched. Ignored files (the .venv, build output, downloaded models) do not count as
+work: they are most of a 2 GB ML workspace, and they are rebuilt, not recovered. `worktree.pressure_sweep` reports what went, by how much, and the free space left after.
+
+**Under pressure, clear the shared caches first, and stop launching (2026-11-18).** The pass above was written
+and never deployed, and it would not have saved the box: it refilled to 0 bytes ten hours after a cleanup, and
+32 of the 47 GB was the uv package cache in the operator's HOME, which every worker shares and no sweep read.
+Below the floor the router now runs `uv cache clean` and `npm cache clean --force` before touching any checkout:
+the tools wait for an install in flight instead of cutting it, and a venv keeps every file it hard-linked out of
+the cache, so the only cost is a re-download. A cache under 2 GB stays: the uv cache is also what lets a new venv
+hard-link instead of copy, and wiping it every window while the box sat under the floor re-downloaded torch for
+each new venv and could grow the disk it was meant to free. Below half the floor the executor starts no new worker: a launch is
+a clone plus an install, and 68 were queued when the disk hit 0. Running workers are never stopped for disk; the
+pause lifts on the first tick above half the floor (`disk.launches_paused` / `disk.launches_resumed`). The brief
+also tells workers what never belongs on the box: model weights, datasets, checkpoints, and output left in /tmp.
+
+**A checkout is wherever git says it is (2026-11-18).** The sweeps looked for a checkout at the ticket directory or at
+`repo/` inside it; most tickets on the box clone into a directory named for the repository (`caramel/`,
+`repos/caramel/`, `worktrees/caramel/<branch>/`). The pressure pass therefore skipped them, and the settled pass, since
+0.2.0, counted them as bare workspaces and deleted them without asking git about unpushed work. Every pass now finds
+each checkout three levels down (real directories only, never through a symlink) and keeps the whole workspace when
+any one of them holds work, including a repository with a second worktree, since deleting either side breaks the
+other. A workspace kept for its work under pressure still loses its `.venv` directories: an environment is rebuilt
+from the lock file, and one was 7.6 GB. Under the floor, settled tickets inside the keep count are candidates too.
+
+**Pushed means GitHub has it, not that a remote-tracking ref says so (2026-11-18).** Workers push to a token URL,
+which moves no `refs/remotes/*`, so `rev-list HEAD --not --remotes` called their pushed branches unsaved: 7 of 9
+sampled "unpushed" workspaces were on GitHub, and the sweeps kept 29 of them forever. Before keeping a checkout for
+commits on no remote, every pass now asks GitHub, as the account workers push with, to compare HEAD with the
+branch of the same name; `identical` or `ahead` is pushed. No branch, no GitHub remote, a 404 or any other error
+keeps the checkout. Uncommitted edits, a stash, new files and a second worktree still keep it either way.
+
+**Never delete a clone another workspace borrows from (2026-11-18).** Two clones on the box read `bad object HEAD`:
+each had been made with `clone --reference` against another ticket's clone (`objects/info/alternates`), and a sweep
+had deleted that source. Every pass now reads the alternates of every checkout first and keeps any workspace another
+workspace borrows objects from (`lent` in the sweep's log line), comparing real paths, since git records them that way.
+
+**Still short of the floor, a parked worker's venv goes (2026-11-18).** After every idle workspace was swept the box
+held 12 GB free against 10 GB write bursts, and parked workers' environments held 14.9 GB of unique blocks, 12.4 GB
+in one caramel venv. Under the floor the pass now also drops the `.venv` of a ticket whose worker is live but not
+working (busy in the executor, or `working` in herdr, protects it, between tool calls included) and in which no
+process runs: `ticketsInUse` reads each process's cwd and command line from /proc, ignoring the waiting agent, its
+shells and its own MCP servers (non-shell children of pi). The agent keeps its code, notes and inbox; `uv run` rebuilds the environment on its next command.
+
+**A worker's scratch lives in its workspace, not /tmp (2026-11-18).** /tmp on the fleet box is a 512 MB tmpfs, and
+10,740 worker leftovers (export tarballs, scratch clones, test directories) filled it while the big disk had 17 GB
+free, so every write to /tmp failed. Each worker now starts with `TMPDIR=<workspace>/.tmp`: on the big disk, ignored
+by git through its own `*` .gitignore, and removed by the pressure pass once no worker holds the ticket. For tools
+that hard-code /tmp, a nearly full /tmp (under 10% free) loses this user's entries untouched for six hours, at most
+every 15 minutes (`tmp.pressure_sweep`). "Live" for every disk pass now also means any worker record that has not
+ended, tracked by this router or not, so a tab the router lost is never swept out from under its agent.
+
 **Skip, never sweep, a non-directory in the work root (2026-11-11).** A stray log file there made the sweep
 `readdirSync` a file; the sweep runs after every intake, its rejection was unhandled, and every tick died for
 25 minutes. Files in the root are counted as strays, logged once, and left alone.

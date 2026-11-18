@@ -16,6 +16,8 @@ export interface RouterConfig {
   keepWorktrees?: number
   /** GB cap for the work root; settled checkouts over it are swept oldest-first. Default 200. */
   workBudgetGb?: number
+  /** GB to keep free on the work root's filesystem; under it, idle checkouts go, oldest first. Default 20. */
+  minFreeGb?: number
   /** Per-worker scope limits (PI_SUPERAGENT_WORKER_LIMITS/MEMORY_GB/CPUS/TASKS); unset means machine-derived. */
   workerLimits?: import('./worker-limits.ts').WorkerLimitSettings
   /**
@@ -153,6 +155,11 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   'This machine is shared: budget CPU and memory. Run builds and tests sequentially, cap parallel jobs',
   '(make -j4, pytest -n4, not an unbounded fan-out), avoid pulling huge caches, and stop every process',
   'you started before you report.',
+  'Its disk is shared and small, and it filled to 0 bytes twice: never download model weights, datasets or checkpoints',
+  'onto it — that work runs on a Pluto pod. Write scratch to $TMPDIR, which is inside your workspace, never to /tmp: /tmp is a',
+  'small RAM disk. Before a ready report delete what you made that is not code (outputs, downloads, a .venv you no longer',
+  'need). The router clears shared caches and idle checkouts when the disk runs low, and starts no new worker while it is',
+  'nearly full.',
   'Waiting on CI: poll it one step per command (`gh pr checks`, then `sleep 60` at most, and again), never one long',
   'wait: a person\'s review reaches you only between commands, and the guard refuses longer waits.',
 ].join('\n')

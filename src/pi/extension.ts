@@ -1,8 +1,9 @@
 /** The package entry point: the router in the session the start script launches, the worker role inside a
  *  worker, and inert everywhere else. */
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { rm, statfs } from 'node:fs/promises'
+import { homedir, tmpdir } from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
@@ -11,7 +12,7 @@ import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type ThreadRef, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
 import {GithubSource, REPLY_MARKER, type GithubApi, type IssueState} from './source-github.ts'
-import { ghApi, ghPulls } from './gh-api.ts'
+import { ghApi, ghCall, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type PullRef, type PullState, type ReconcileReport } from './pulls.ts'
 import { PullTracker } from './tracker.ts'
@@ -228,6 +229,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // ever counted it. Reset per pass and reported on the tick line.
   let ghCalls = 0
   const accounts = ghAccounts(cfg, () => { ghCalls += 1 })
+  // The sweeps ask GitHub, as the account workers push with, whether a branch is there before keeping its checkout.
+  const onGithub = pushedTo(ghCall(accounts.pulls))
   const githubApi = deps.githubApi ?? (cfg.githubRepo ? ghApi({
     // Reviews are read as the account that opens the pull requests: the watched account is not in the
     // organization that hosts them, and a pull request it cannot see is a review the ticket never gets.
@@ -744,6 +747,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       + kept.map(w => `- ${w.at.slice(0, 16).replace('T', ' ')} UTC, ${w.author}: ${w.text.replace(/\s*\n\s*/g, ' ')}`).join('\n')
   }
 
+  let diskCritical = false
   const executor = new PiExecutor(engine, {
     launch: async ({ ticket, report }) => {
       const channel = ticket.channels[0]
@@ -770,6 +774,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
             ...(cfg.githubRepo ? { PI_SUPERAGENT_HOME_REPO: cfg.githubRepo } : {}),
             ...(cfg.claimsFile ? { PI_SUPERAGENT_CLAIMS_FILE: cfg.claimsFile } : {}),
             ...(limitBin ? { PATH: `${limitBin}:${process.env.PATH ?? ''}` } : {}),
+            // Scratch on the big disk, swept with the ticket: /tmp here is a 512 MB tmpfs that workers filled (2026-11-18).
+            TMPDIR: workerTmp(workspace.dir),
           },
         })
       }
@@ -858,6 +864,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       return undefined
     },
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
+    launchBlocked: () => diskCritical,
   })
   executorRef = executor
 
@@ -1093,9 +1100,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         question: 'accept the work, steer it, or stop it on the panel',
       } as never)
     }
-    // Replies go out before anything that waits: with every slot busy, an acknowledgement must not queue behind
-    // the fleet, which is what held nine replies for ten minutes on 2026-11-08.
     outbox.flush()
+    // The disk floor is checked every beat, and swept only when breached: the startup pass only runs at startup.
+    void checkDisk()
     // The launches this pass queued get a bounded start, and no more. `executor.idle()` is the launch queue's
     // tail and that queue is gated on a free worker slot, so awaiting it made the loop enterable only when the
     // fleet went quiet — hourly, at 20 workers against a cap of 8. That is the stall #303 was filed for.
@@ -1180,7 +1187,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   void recovered.then(async () => {
     const beganSweep = Date.now()
     const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)), cfg.keepWorktrees ?? 20,
-      (cfg.workBudgetGb ?? 200) * 1024 ** 3, deps.sizeOf)
+      (cfg.workBudgetGb ?? 200) * 1024 ** 3, deps.sizeOf, { minFreeBytes: minFreeBytes(cfg), live: liveTickets(), pushed: onGithub })
     if (swept.strays) log.line('warn', 'worktree.strays', { strays: swept.strays, root: cfg.worktreeRoot })
     if (swept.removed || swept.keptWork) {
       log.line('info', 'worktree.swept', {
@@ -1189,6 +1196,65 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         note: swept.keptWork ? 'settled checkouts with commits on no remote are never deleted' : undefined })
     }
   }).catch((error: unknown) => log.line('error', 'worktree.sweep_failed', { error: String(error).slice(0, 200) }))
+  // Free space, not the number of worktrees, is what kills a box, and a router that runs for days never ran the
+  // startup pass again: lookbook 2026-11-17 reached 377 MB free with 42 of 49 workspaces on OPEN tickets, and the
+  // full disk wrote a 0-byte worker cursor that crashed every restart for 8 hours. One cheap `statfs` per beat;
+  // the sweep runs at most once per window, and only while the floor is breached.
+  const PRESSURE_SWEEP_MS = 15 * 60_000
+  /** Tickets a worker session is sitting in right now: that checkout is in use, so it is never a pressure target. */
+  const liveTickets = (): ReadonlySet<string> =>
+    new Set([...executor.workers().map(w => w.ticketId), ...(herdrWorkers?.openTickets() ?? [])])
+  let sweeping = false
+  let lastPressureSweep = 0
+  let lastTmpSweep = 0
+  // One statfs per beat. Below half the floor no new worker starts: on 2026-11-18 the box reached 0 bytes with 8
+  // workers running and 68 queued, and every launch is a clone plus an install. Launches resume once a sweep frees it.
+  const checkDisk = async (): Promise<void> => {
+    const min = minFreeBytes(cfg)
+    if (min <= 0) return
+    const free = await freeBytesOf(cfg.worktreeRoot)
+    const critical = free < min / 2
+    if (critical !== diskCritical) {
+      diskCritical = critical
+      log.line(critical ? 'warn' : 'info', critical ? 'disk.launches_paused' : 'disk.launches_resumed',
+        { freeGb: Math.round(free / 1024 ** 3), floorGb: Math.round(min / 1024 ** 3) })
+    }
+    if (free < min) await pressureSweep()
+    const tmp = await statfs(tmpdir()).catch(() => undefined)
+    if (tmp && tmp.bavail < tmp.blocks / 10 && Date.now() - lastTmpSweep >= PRESSURE_SWEEP_MS) {
+      lastTmpSweep = Date.now()
+      const swept = await sweepTmp()
+      const after = await statfs(tmpdir()).catch(() => tmp)
+      log.line('info', 'tmp.pressure_sweep', { ...swept, freeMb: Math.round(after.bavail * after.bsize / 1024 ** 2) })
+    }
+  }
+  const pressureSweep = async (): Promise<void> => {
+    const min = minFreeBytes(cfg)
+    if (sweeping || Date.now() - lastPressureSweep < PRESSURE_SWEEP_MS) return
+    sweeping = true
+    const began = Date.now()
+    lastPressureSweep = began
+    try {
+      // Caches first: they are rebuilt by the next install, and they were 32 of the 47 GB that refilled the box
+      // on 2026-11-18 — outside the work root, where the checkout sweep below never looks.
+      const before = await freeBytesOf(cfg.worktreeRoot)
+      const caches = await clearCaches(runGit, deps.sizeOf)
+      const afterCaches = await freeBytesOf(cfg.worktreeRoot)
+      const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)),
+        cfg.keepWorktrees ?? 20, Infinity, deps.sizeOf, {
+          minFreeBytes: min, live: liveTickets(), inUse: () => ticketsInUse(cfg.worktreeRoot), pushed: onGithub,
+          running: new Set([...executor.workers().filter(w => w.busy).map(w => w.ticketId), ...(await herdrWorkers?.workingTickets() ?? [])]),
+        })
+      log.line('info', 'worktree.pressure_sweep', {
+        ...swept, keptWorkIds: swept.keptWorkIds.slice(0, 8), floorGb: Math.round(min / 1024 ** 3),
+        beforeGb: Math.round(before / 1024 ** 3), cachesFreedGb: Math.round((afterCaches - before) / 1024 ** 3), caches,
+        seconds: Math.round((Date.now() - began) / 1000),
+        note: swept.keptWorkIds.length ? 'checkouts with commits on no remote, uncommitted edits or a stash are never deleted' : undefined,
+      })
+    } catch (error) {
+      log.line('error', 'worktree.pressure_sweep_failed', { error: String(error).slice(0, 200) })
+    } finally { sweeping = false }
+  }
 
   let pollFailures = 0
   /** The GitHub source's own state, published into health.json next to the tick's. */
@@ -1443,11 +1509,214 @@ export interface SweepReport {
   empty: number
   /** The settled checkouts kept because their work is on no remote: named, so the operator can push them. */
   keptWorkIds: string[]
+  /** Checkouts dropped from LIVE tickets to keep the filesystem alive. The ticket directory, with its reports,
+   *  notes and inbox, is untouched: that is what a reopened issue and a woken worker come back to. */
+  clonesDropped: number
+  /** `.venv` directories dropped from workspaces kept for their work: rebuilt from the lock file, never work. */
+  venvsDropped: number
+  /** Workspaces kept because another workspace's clone borrows their git objects. */
+  lent: number
+  /** Free GB on the work root's filesystem at the end of a pressure pass; absent when that pass never ran. */
+  freeGb?: number
 }
 
-/** A ticket's checkout is the ticket directory itself, or `repo` inside it: both layouts are live. */
-const checkoutOf = (dir: string): string | undefined =>
-  existsSync(join(dir, '.git')) ? dir : existsSync(join(dir, 'repo', '.git')) ? join(dir, 'repo') : undefined
+/** The floor a box dies at, not a tuning knob: at 377 MB free (lookbook 2026-11-17) `git clone` fails mid-launch
+ *  and a report file lands as 0 bytes, which wedged the fleet for 8 hours. */
+export const MIN_FREE_DEFAULT_GB = 20
+
+/** Free bytes this process can write: `bavail`, not `bfree` — the reserved blocks are not ours. An unreadable
+ *  path answers Infinity, because deleting files on a number you could not read is the wrong way to fail. */
+export const freeBytesOf = async (path: string): Promise<number> => {
+  try {
+    const s = await statfs(path)
+    return s.bsize * s.bavail
+  } catch { return Infinity }
+}
+
+export const minFreeBytes = (cfg: { minFreeGb?: number }): number => (cfg.minFreeGb ?? MIN_FREE_DEFAULT_GB) * 1024 ** 3
+
+/** A worker's TMPDIR, inside its workspace; the `*` ignore keeps it out of `git status` in a checkout. */
+export const WORKER_TMP = '.tmp'
+export function workerTmp(workspace: string): string {
+  const dir = join(workspace, WORKER_TMP)
+  mkdirSync(dir, { recursive: true })
+  if (!existsSync(join(dir, '.gitignore'))) writeFileSync(join(dir, '.gitignore'), '*\n')
+  return dir
+}
+
+/** Our own entries in a nearly full /tmp, untouched for `ageMs`, for the tools that hard-code /tmp over TMPDIR. */
+export async function sweepTmp(dir = tmpdir(), ageMs = 6 * 3_600_000): Promise<{ removed: number; kept: number }> {
+  const uid = process.getuid?.()
+  let removed = 0, kept = 0
+  for (const name of readdirSync(dir)) {
+    try {
+      const st = lstatSync(join(dir, name))
+      if (st.uid !== uid || st.isSocket() || Date.now() - st.mtimeMs < ageMs) { kept++; continue }
+      await rm(join(dir, name), { recursive: true, force: true })
+      removed++
+    } catch { kept++ }
+  }
+  return { removed, kept }
+}
+
+/** Rebuildable caches every worker shares through the operator's HOME, cleared by their own tools: `uv cache clean`
+ *  waits for an install in flight instead of cutting it, and a venv keeps the files it hard-linked from the cache. */
+export const PRESSURE_CACHES: ReadonlyArray<{ dir: string; command: readonly [string, ...string[]] }> = [
+  { dir: join(homedir(), '.cache', 'uv'), command: ['uv', 'cache', 'clean'] },
+  { dir: join(homedir(), '.npm'), command: ['npm', 'cache', 'clean', '--force'] },
+]
+
+/** A small cache stays: the uv cache is also what lets a new venv hard-link instead of copy, so clearing it on every
+ *  window under pressure re-downloads torch and can grow the disk (2026-11-18, the box sat under the floor). */
+export const CACHE_CLEAR_MIN_BYTES = 2 * 1024 ** 3
+
+/** A missing tool, or a cache still busy at the timeout, waits for the next window; each outcome is said, never silent. */
+export async function clearCaches(run: (bin: string, args: string[], o: { timeout: number }) => Promise<unknown> = runGit,
+                                  sizeOf: (dir: string) => Promise<number> = dirBytes, caches = PRESSURE_CACHES): Promise<string[]> {
+  const said: string[] = []
+  for (const { dir, command: [bin, ...args] } of caches) {
+    const size = existsSync(dir) ? await sizeOf(dir).catch(() => 0) : 0
+    if (size < CACHE_CLEAR_MIN_BYTES) { said.push(`${bin}: ${Math.round(size / 1024 ** 2)} MB, kept`); continue }
+    try { await run(bin, args, { timeout: 10 * 60_000 }); said.push(`${bin}: cleared ${Math.round(size / 1024 ** 3)} GB`) } catch (error) {
+      said.push(`${bin}: ${(error as { code?: unknown }).code === 'ENOENT' ? 'not installed' : String(error).slice(0, 80)}`)
+    }
+  }
+  return said
+}
+
+export interface SweepPressure {
+  /** Keep at least this many bytes free on the work root's filesystem; 0 switches the pass off. */
+  minFreeBytes?: number
+  /** Tickets with a worker session on them: that checkout is in use, and dropping it interrupts an agent. */
+  live?: ReadonlySet<string>
+  /** Free-bytes reader, injectable so a test can drive a full disk. */
+  free?: () => Promise<number>
+  /** Tickets some process is running in right now (`ticketsInUse`): a parked worker's venv goes only when none is. */
+  inUse?: () => ReadonlySet<string>
+  /** Tickets whose agent is working now, between tool calls included: never a venv to take. */
+  running?: ReadonlySet<string>
+  /** Whether GitHub has a checkout's HEAD on its branch (`pushedTo`); unset, only remote-tracking refs count. */
+  pushed?: (checkout: string) => Promise<boolean>
+}
+
+/** A worker pushes to a token URL, which moves no remote-tracking ref, so `--not --remotes` calls its pushed branch
+ *  unsaved: 7 of 9 sampled "unpushed" workspaces were on GitHub (2026-11-18). GitHub's compare decides; any doubt,
+ *  including a 404 for a branch GitHub never saw, answers false and the checkout is kept. */
+export const pushedTo = (gh: (args: string[]) => Promise<string>) => async (dir: string): Promise<boolean> => {
+  try {
+    const git = async (...args: string[]): Promise<string> => (await runGit('git', ['-C', dir, ...args], { timeout: 10_000 })).stdout.trim()
+    const repo = /github\.com[/:]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(await git('remote', 'get-url', 'origin'))?.[1]
+    const branch = await git('branch', '--show-current')
+    if (!repo || !branch) return false
+    const status = (await gh(['api', `repos/${repo}/compare/${await git('rev-parse', 'HEAD')}...${encodeURIComponent(branch)}`, '--jq', '.status'])).trim()
+    return status === 'identical' || status === 'ahead'
+  } catch { return false }
+}
+
+const SHELLS = new Set(['bash', 'sh', 'dash', 'zsh', 'fish'])
+/** A shell or the agent itself sits in its workspace while it waits; only what they started is using it. */
+const WAITING = new Set([...SHELLS, 'pi', 'tmux', 'herdr', 'sleep', 'tee'])
+
+/** Ticket directories a process works in now: its cwd or command line is inside one. The agent's own servers (a
+ *  non-shell child of `pi`, such as its MCP servers, and their children) do not count; a job does, whether it runs
+ *  under a tool call's shell or on its own after that shell exited. Linux `/proc`; elsewhere, none. */
+export function ticketsInUse(root: string, proc = '/proc'): Set<string> {
+  const used = new Set<string>()
+  // /proc answers real paths; a command line may carry the configured one.
+  const prefixes = [...new Set([root, (() => { try { return realpathSync(root) } catch { return root } })()])].map(r => `${r.replace(/\/$/, '')}/`)
+  const note = (text: string): void => {
+    for (const prefix of prefixes) {
+      for (let i = text.indexOf(prefix); i >= 0; i = text.indexOf(prefix, i + 1)) used.add(text.slice(i + prefix.length).split(/[/\s\0]/)[0]!)
+    }
+  }
+  let pids: string[] = []
+  try { pids = readdirSync(proc).filter(p => /^\d+$/.test(p)) } catch { return used }
+  const tree = new Map<string, { comm: string; ppid: string }>()
+  for (const pid of pids) {
+    try {
+      const stat = readFileSync(join(proc, pid, 'stat'), 'utf8')
+      tree.set(pid, { comm: readFileSync(join(proc, pid, 'comm'), 'utf8').trim(), ppid: stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1] ?? '' })
+    } catch { /* gone */ }
+  }
+  const agentServer = (pid: string): boolean => {
+    for (let me = pid, hops = 0; hops < 64; hops++) {
+      const self = tree.get(me), parent = self && tree.get(self.ppid)
+      if (!self || !parent) return false
+      if (parent.comm === 'pi') return !SHELLS.has(self.comm)
+      me = self.ppid
+    }
+    return false
+  }
+  for (const [pid, { comm }] of tree) {
+    if (WAITING.has(comm) || agentServer(pid)) continue
+    try {
+      note(`${readlinkSync(join(proc, pid, 'cwd'))}/`)
+      note(readFileSync(join(proc, pid, 'cmdline'), 'utf8'))
+    } catch { /* not ours to read */ }
+  }
+  return used
+}
+
+/** Every git checkout in a ticket's workspace: the ticket directory, `repo`, or a clone named for its repository
+ *  (`caramel`, `repos/caramel`, `worktrees/caramel/<branch>`), which is the layout most tickets on the box use and the
+ *  one the sweeps never saw (2026-11-18): the pressure pass skipped it, and the settled pass called it bare and deleted
+ *  it without asking git. Real directories only, so a symlink never leads a delete outside the workspace. */
+function checkoutsIn(dir: string, depth = 3): string[] {
+  if (existsSync(join(dir, '.git'))) return [dir]
+  if (depth === 0) return []
+  let names: string[] = []
+  try { names = readdirSync(dir) } catch { return [] }
+  return names
+    .filter(n => n !== '.venv' && n !== 'node_modules' && n !== WORKER_TMP && realDirectory(join(dir, n)))
+    .flatMap(n => checkoutsIn(join(dir, n), depth - 1))
+}
+
+const realDirectory = (path: string): boolean => { try { return lstatSync(path).isDirectory() } catch { return false } }
+
+/** One checkout that holds work keeps the whole workspace: its clones may be each other's worktrees. */
+async function holdsWork(checkouts: readonly string[], pushed?: (checkout: string) => Promise<boolean>): Promise<boolean> {
+  for (const c of checkouts) if (await unsafeCheckout(c, pushed)) return true
+  return false
+}
+
+/** Workspaces another workspace's clone borrows git objects from (`objects/info/alternates`, as `clone --reference`
+ *  writes): deleting one breaks the borrower. On 2026-11-18 two clones on the box read `bad object HEAD` that way. */
+export function lenders(root: string, names: readonly string[]): Set<string> {
+  const lent = new Set<string>()
+  const real = (path: string): string => { try { return realpathSync(path) } catch { return resolve(path) } }
+  const prefix = `${real(root)}/`
+  for (const name of names) {
+    for (const c of checkoutsIn(join(root, name))) {
+      const objects = join(c, '.git', 'objects')
+      let lines: string[] = []
+      try { lines = readFileSync(join(objects, 'info', 'alternates'), 'utf8').split('\n').map(l => l.trim()).filter(Boolean) } catch { continue }
+      for (const line of lines) {
+        const target = real(resolve(objects, line))
+        const owner = target.startsWith(prefix) ? target.slice(prefix.length).split('/')[0] : undefined
+        if (owner && owner !== name) lent.add(owner)
+      }
+    }
+  }
+  return lent
+}
+
+/** Deleting a checkout must never delete work: commits on no remote, uncommitted edits, a stash, or a new file git
+ *  does not ignore (an agent's uncommitted script or note, and the agent may come back for it). Ignored files — the
+ *  .venv, build output, downloaded models — do not count: they are rebuilt. A git that cannot answer is unsafe, and
+ *  so is a repository with a second worktree: deleting either side breaks the other. */
+async function unsafeCheckout(dir: string, pushed?: (checkout: string) => Promise<boolean>): Promise<boolean> {
+  if (await unpushedCommits(dir) > 0 && !(await pushed?.(dir))) return true
+  for (const args of [['status', '--porcelain'], ['stash', 'list']]) {
+    try {
+      if ((await runGit('git', ['-C', dir, ...args], { timeout: 20_000 })).stdout.trim().length > 0) return true
+    } catch { return true }
+  }
+  try {
+    const { stdout } = await runGit('git', ['-C', dir, 'worktree', 'list', '--porcelain'], { timeout: 20_000 })
+    if (stdout.split('\n').filter(l => l.startsWith('worktree ') && existsSync(l.slice(9))).length > 1) return true
+  } catch { return true }
+  return false
+}
 
 /**
  * Commits on this checkout that exist on no remote. An unreadable checkout reads as unpushed and is kept:
@@ -1474,42 +1743,93 @@ function isDirectory(path: string): boolean {
 }
 
 export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (() => ReadonlySet<string>), keep: number,
-                                     maxBytes = 200 * 1024 ** 3, sizeOf: (dir: string) => Promise<number> = dirBytes): Promise<SweepReport> {
+                                     maxBytes = 200 * 1024 ** 3, sizeOf: (dir: string) => Promise<number> = dirBytes,
+                                     pressure: SweepPressure = {}): Promise<SweepReport> {
   // Asked at each delete: the sweep runs beside the passes, and a ticket can reopen while it runs.
   const isOpen = (name: string): boolean => (typeof open === 'function' ? open() : open).has(name)
-  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [] }
+  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0, venvsDropped: 0, lent: 0 }
   let names: string[]
   try { names = readdirSync(root) } catch { return report }
   const dirs = names.filter(name => isDirectory(join(root, name)))
   report.strays = names.length - dirs.length
+  const lent = lenders(root, dirs)
+  const borrowedFrom = (name: string): boolean => { if (!lent.has(name)) return false; report.lent++; return true }
   const settled = dirs
     .filter(name => !isOpen(name))
     .map(name => ({ name, at: statSync(join(root, name)).mtimeMs }))
     .sort((a, b) => b.at - a.at)
   for (const [index, entry] of settled.entries()) {
     const dir = join(root, entry.name)
-    const checkout = checkoutOf(dir)
-    if (index < keep) { if (checkout) report.checkouts++; continue }
-    if (!checkout) {
+    const checkouts = checkoutsIn(dir)
+    if (index < keep) { if (checkouts.length) report.checkouts++; continue }
+    if (!checkouts.length) {
       if (readdirSync(dir).length === 0) report.empty++; else report.bare++
     }
-    if (checkout && await unpushedCommits(checkout) > 0) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
-    if (isOpen(entry.name)) continue
+    if (await holdsWork(checkouts, pressure.pushed)) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
+    if (isOpen(entry.name) || borrowedFrom(entry.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
   }
   // The count is not the cost: measured 2026-11-11, the kept set was 58 GB because one build tree is 15 GB.
   // Settled checkouts, oldest first, go over the count as well until the root fits the budget.
-  const kept = names.filter(name => isDirectory(join(root, name))).map(name => ({ name, at: safeMtime(join(root, name)) }))
+  // An infinite budget skips the pass: it sizes every workspace with `du`, minutes on a full box (2026-11-18).
+  const kept = Number.isFinite(maxBytes) ? names.filter(name => isDirectory(join(root, name))).map(name => ({ name, at: safeMtime(join(root, name)) })) : []
   let bytes = 0
   for (const e of kept) bytes += await sizeOf(join(root, e.name))
   for (const e of kept.filter(e => !isOpen(e.name)).sort((a, b) => a.at - b.at)) {
     if (bytes <= maxBytes) break
     const dir = join(root, e.name)
-    const checkout = checkoutOf(dir)
-    if (checkout && await unpushedCommits(checkout) > 0) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
+    if (await holdsWork(checkoutsIn(dir), pressure.pushed)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
     const size = await sizeOf(dir)
-    if (isOpen(e.name)) continue
+    if (isOpen(e.name) || borrowedFrom(e.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++; bytes -= size } catch { /* next sweep's problem */ }
+  }
+  // Free space, not the count, is what kills a box. The two passes above touch settled tickets only, and 42 of
+  // the 49 workspaces that filled lookbook sat on OPEN tickets, so under a floor the CHECKOUT of a live ticket
+  // with no worker on it goes too: the code is on GitHub and the next launch re-clones it, while the ticket
+  // directory with its reports, notes and inbox stays for a reopened issue. Oldest first, until the floor is met.
+  const minFree = pressure.minFreeBytes ?? 0
+  if (minFree > 0) {
+    const live = pressure.live ?? new Set<string>()
+    const free = pressure.free ?? (() => freeBytesOf(root))
+    // Settled tickets inside the keep count too: under the floor the count is a luxury, and their code is on GitHub.
+    const idle = dirs.filter(name => !live.has(name))
+      .map(name => ({ name, at: safeMtime(join(root, name)) }))
+      .sort((a, b) => a.at - b.at)
+    for (const e of idle) {
+      if (await free() >= minFree) break
+      await rm(join(root, e.name, WORKER_TMP), { recursive: true, force: true }).catch(() => {})
+      const checkouts = checkoutsIn(join(root, e.name))
+      if (!checkouts.length) continue
+      if (await holdsWork(checkouts, pressure.pushed)) {
+        // The work stays; its environments do not: a .venv is rebuilt from the lock file, and one was 7.6 GB.
+        for (const c of checkouts) {
+          if (!existsSync(join(c, '.venv'))) continue
+          await rm(join(c, '.venv'), { recursive: true, force: true }).then(() => { report.venvsDropped++ }, () => {})
+        }
+        report.keptWork++; report.keptWorkIds.push(e.name)
+        continue
+      }
+      if (borrowedFrom(e.name)) continue
+      for (const c of checkouts) {
+        try { await rm(c, { recursive: true, force: true }); report.clonesDropped++ } catch { /* busy: the next sweep */ }
+      }
+    }
+    // Still short: a parked worker's environments, oldest first, when nothing it started is running there. The agent
+    // keeps its code and notes; `uv run` rebuilds the venv on its next command. One parked venv was 12.4 GB (2026-11-18).
+    const inUse = pressure.inUse?.() ?? new Set<string>()
+    const running = pressure.running ?? live
+    const parked = dirs.filter(name => live.has(name) && !running.has(name) && !inUse.has(name))
+      .map(name => ({ name, at: safeMtime(join(root, name)) }))
+      .sort((a, b) => a.at - b.at)
+    for (const e of parked) {
+      if (await free() >= minFree) break
+      for (const c of checkoutsIn(join(root, e.name))) {
+        if (!existsSync(join(c, '.venv'))) continue
+        await rm(join(c, '.venv'), { recursive: true, force: true }).then(() => { report.venvsDropped++ }, () => {})
+      }
+    }
+    const now = await free()
+    if (now !== Infinity) report.freeGb = Math.round(now / 1024 ** 3)
   }
   return report
 }
@@ -1651,6 +1971,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const pullReadBudgetMs = positiveNumber('PI_SUPERAGENT_PULL_READ_BUDGET_MS', env.PI_SUPERAGENT_PULL_READ_BUDGET_MS)
   const panelPort = positiveNumber('PI_SUPERAGENT_PANEL_PORT', env.PI_SUPERAGENT_PANEL_PORT)
   const keepWorktrees = positiveNumber('PI_SUPERAGENT_KEEP_WORKTREES', env.PI_SUPERAGENT_KEEP_WORKTREES)
+  const minFreeGb = positiveNumber('PI_SUPERAGENT_MIN_FREE_GB', env.PI_SUPERAGENT_MIN_FREE_GB)
   const workerTokenFile = env.PI_SUPERAGENT_WORKER_TOKEN_FILE?.trim()
   const claimsFile = env.PI_SUPERAGENT_CLAIMS_FILE?.trim()
   const workerStartMs = positiveNumber('PI_SUPERAGENT_WORKER_START_MS', env.PI_SUPERAGENT_WORKER_START_MS)
@@ -1674,6 +1995,7 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(panelPort === undefined ? {} : { panelPort }),
     ...(keepWorktrees === undefined ? {} : { keepWorktrees: Math.floor(keepWorktrees) }),
     ...(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB) === undefined ? {} : { workBudgetGb: Math.floor(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB)!) }),
+    ...(minFreeGb === undefined ? {} : { minFreeGb: Math.floor(minFreeGb) }),
     ...(workerTokenFile ? { workerTokenFile } : {}),
     ...(claimsFile ? { claimsFile } : {}),
     ...(workerStartMs ? { workerStartMs } : {}),

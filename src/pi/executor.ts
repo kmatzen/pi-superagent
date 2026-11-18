@@ -46,6 +46,8 @@ export interface ExecutorOptions {
   briefFor(ticket: Ticket, assignment: Assignment): string
   /** A router with no cap forks until the box dies. */
   maxConcurrent?: number
+  /** True while a new worker must not start (the disk is nearly full): queued launches wait, running ones are untouched. */
+  launchBlocked?(): boolean
   /** Render one Input into prompt text. Trigger inputs need the trigger's text, which the engine keeps
    *  in the store, not on the ticket: the deployment owns that lookup. Undefined = not worker-visible. */
   renderInput(input: TicketInput): string | undefined
@@ -380,7 +382,7 @@ export class PiExecutor {
   idle(): Promise<void> { return this.tail }
 
   /** The slot gate the head of the launch queue stands in: closed, no launch can start on this pass. */
-  private get gateClosed(): boolean { return this.running >= this.capacity }
+  private get gateClosed(): boolean { return this.running >= this.capacity || this.options.launchBlocked?.() === true }
 
   /**
    * Wait for the queued launches to run, but at most `budgetMs` of wall clock, and say which of the two
