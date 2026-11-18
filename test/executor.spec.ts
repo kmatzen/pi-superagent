@@ -23,7 +23,7 @@ class FakeSession implements WorkerSession {
 
 interface Call { fn: string; args: unknown[] }
 
-function fixture(extra: { maxConcurrent?: number; slotPollMs?: number; follow?: (t: Ticket, urls: readonly string[]) => readonly string[];
+function fixture(extra: { maxConcurrent?: number; slotPollMs?: number; launchBlocked?: () => boolean; follow?: (t: Ticket, urls: readonly string[]) => readonly string[];
                           reportDropped?: (fields: Record<string, unknown>) => void;
                           stillWanted?: (t: Ticket, a: Assignment) => Ticket | undefined } = {},
                  fail: { launch?: string; report?: string } = {}) {
@@ -92,6 +92,22 @@ describe('PiExecutor', () => {
     await new Promise(resolve => setTimeout(resolve, 30))
     expect(f.sessions).toHaveLength(1)
     f.executor.stop(ticket({ id: 'T1' }), assignment('A1'), 'done')
+    await f.executor.idle()
+    expect(f.sessions).toHaveLength(2)
+  })
+
+  it('a nearly full disk holds new launches, leaves running workers alone, and the queue starts once it clears', async () => {
+    // 2026-11-18: the box reached 0 bytes with 8 workers running and 68 queued; every launch is a clone plus an install.
+    let full = false
+    const f = fixture({ maxConcurrent: 4, slotPollMs: 5, launchBlocked: () => full })
+    f.executor.start(ticket({ id: 'T1' }), assignment('A1'))
+    await f.executor.idle()
+    full = true
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(f.sessions, 'a free slot does not open the gate while the disk is full').toHaveLength(1)
+    expect(f.sessions[0]!.disposed, 'the running worker is not touched').toBe(0)
+    full = false
     await f.executor.idle()
     expect(f.sessions).toHaveLength(2)
   })

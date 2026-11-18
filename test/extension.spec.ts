@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import superagent, { activationRefusal, createRouterExtension, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import superagent, { activationRefusal, clearCaches, createRouterExtension, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
@@ -2128,6 +2128,17 @@ describe('the sweep of settled checkouts', () => {
       expect(await sweepWorktrees(root, new Set(), 0)).toMatchObject({ removed: 2, bare: 1, empty: 1 })
       expect(readdirSync(root)).toEqual([])
     } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('clears the shared caches with their own tools, and says which ones it could not', async () => {
+    // 2026-11-18: the uv cache was 32 of the 47 GB that refilled the box, outside the work root this sweep reads.
+    const ran: string[] = []
+    const said = await clearCaches(async (bin, args) => {
+      ran.push([bin, ...args].join(' '))
+      if (bin === 'npm') throw Object.assign(new Error('spawn npm ENOENT'), { code: 'ENOENT' })
+    })
+    expect(ran).toEqual(['uv cache clean', 'npm cache clean --force'])
+    expect(said).toEqual(['uv: cleared', 'npm: not installed'])
   })
 
   it('a full disk drops the checkout of an idle open ticket and keeps what it reported', async () => {

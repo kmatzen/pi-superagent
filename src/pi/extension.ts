@@ -744,6 +744,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       + kept.map(w => `- ${w.at.slice(0, 16).replace('T', ' ')} UTC, ${w.author}: ${w.text.replace(/\s*\n\s*/g, ' ')}`).join('\n')
   }
 
+  let diskCritical = false
   const executor = new PiExecutor(engine, {
     launch: async ({ ticket, report }) => {
       const channel = ticket.channels[0]
@@ -858,6 +859,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       return undefined
     },
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
+    launchBlocked: () => diskCritical,
   })
   executorRef = executor
 
@@ -1095,7 +1097,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     }
     outbox.flush()
     // The disk floor is checked every beat, and swept only when breached: the startup pass only runs at startup.
-    void pressureSweep()
+    void checkDisk()
     // The launches this pass queued get a bounded start, and no more. `executor.idle()` is the launch queue's
     // tail and that queue is gated on a free worker slot, so awaiting it made the loop enterable only when the
     // fleet went quiet — hourly, at 20 workers against a cap of 8. That is the stall #303 was filed for.
@@ -1198,18 +1200,37 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const liveTickets = (): ReadonlySet<string> => new Set(executor.workers().map(w => w.ticketId))
   let sweeping = false
   let lastPressureSweep = 0
+  // One statfs per beat. Below half the floor no new worker starts: on 2026-11-18 the box reached 0 bytes with 8
+  // workers running and 68 queued, and every launch is a clone plus an install. Launches resume once a sweep frees it.
+  const checkDisk = async (): Promise<void> => {
+    const min = minFreeBytes(cfg)
+    if (min <= 0) return
+    const free = await freeBytesOf(cfg.worktreeRoot)
+    const critical = free < min / 2
+    if (critical !== diskCritical) {
+      diskCritical = critical
+      log.line(critical ? 'warn' : 'info', critical ? 'disk.launches_paused' : 'disk.launches_resumed',
+        { freeGb: Math.round(free / 1024 ** 3), floorGb: Math.round(min / 1024 ** 3) })
+    }
+    if (free < min) await pressureSweep()
+  }
   const pressureSweep = async (): Promise<void> => {
     const min = minFreeBytes(cfg)
-    if (sweeping || min <= 0 || Date.now() - lastPressureSweep < PRESSURE_SWEEP_MS) return
-    if (await freeBytesOf(cfg.worktreeRoot) >= min) return
+    if (sweeping || Date.now() - lastPressureSweep < PRESSURE_SWEEP_MS) return
     sweeping = true
     const began = Date.now()
     lastPressureSweep = began
     try {
+      // Caches first: they are rebuilt by the next install, and they were 32 of the 47 GB that refilled the box
+      // on 2026-11-18 — outside the work root, where the checkout sweep below never looks.
+      const before = await freeBytesOf(cfg.worktreeRoot)
+      const caches = await clearCaches()
+      const afterCaches = await freeBytesOf(cfg.worktreeRoot)
       const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)),
         cfg.keepWorktrees ?? 20, (cfg.workBudgetGb ?? 200) * 1024 ** 3, deps.sizeOf, { minFreeBytes: min, live: liveTickets() })
       log.line('info', 'worktree.pressure_sweep', {
         ...swept, keptWorkIds: swept.keptWorkIds.slice(0, 8), floorGb: Math.round(min / 1024 ** 3),
+        beforeGb: Math.round(before / 1024 ** 3), cachesFreedGb: Math.round((afterCaches - before) / 1024 ** 3), caches,
         seconds: Math.round((Date.now() - began) / 1000),
         note: swept.keptWorkIds.length ? 'checkouts with commits on no remote, uncommitted edits or a stash are never deleted' : undefined,
       })
@@ -1492,6 +1513,22 @@ export const freeBytesOf = async (path: string): Promise<number> => {
 }
 
 export const minFreeBytes = (cfg: { minFreeGb?: number }): number => (cfg.minFreeGb ?? MIN_FREE_DEFAULT_GB) * 1024 ** 3
+
+/** Rebuildable caches every worker shares through the operator's HOME, cleared by their own tools: `uv cache clean`
+ *  waits for an install in flight instead of cutting it, and a venv keeps the files it hard-linked from the cache. */
+export const PRESSURE_CACHES: ReadonlyArray<readonly [string, ...string[]]> = [['uv', 'cache', 'clean'], ['npm', 'cache', 'clean', '--force']]
+
+/** A missing tool, or a cache still busy at the timeout, waits for the next window; each outcome is said, never silent. */
+export async function clearCaches(run: (bin: string, args: string[], o: { timeout: number }) => Promise<unknown> = runGit,
+                                  commands = PRESSURE_CACHES): Promise<string[]> {
+  const said: string[] = []
+  for (const [bin, ...args] of commands) {
+    try { await run(bin, args, { timeout: 10 * 60_000 }); said.push(`${bin}: cleared`) } catch (error) {
+      said.push(`${bin}: ${(error as { code?: unknown }).code === 'ENOENT' ? 'not installed' : String(error).slice(0, 80)}`)
+    }
+  }
+  return said
+}
 
 export interface SweepPressure {
   /** Keep at least this many bytes free on the work root's filesystem; 0 switches the pass off. */

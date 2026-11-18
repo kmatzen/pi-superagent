@@ -245,6 +245,16 @@ tracked files, a stash and a live worker's checkout are never touched. Untracked
 models deliberately do not count as work: they are most of a 2 GB ML workspace, and they are rebuilt, not
 recovered. `worktree.pressure_sweep` reports what went, by how much, and the free space left after.
 
+**Under pressure, clear the shared caches first, and stop launching (2026-11-18).** The pass above was written
+and never deployed, and it would not have saved the box: it refilled to 0 bytes ten hours after a cleanup, and
+32 of the 47 GB was the uv package cache in the operator's HOME, which every worker shares and no sweep read.
+Below the floor the router now runs `uv cache clean` and `npm cache clean --force` before touching any checkout:
+the tools wait for an install in flight instead of cutting it, and a venv keeps every file it hard-linked out of
+the cache, so the only cost is a re-download. Below half the floor the executor starts no new worker: a launch is
+a clone plus an install, and 68 were queued when the disk hit 0. Running workers are never stopped for disk; the
+pause lifts on the first tick above half the floor (`disk.launches_paused` / `disk.launches_resumed`). The brief
+also tells workers what never belongs on the box: model weights, datasets, checkpoints, and output left in /tmp.
+
 **Skip, never sweep, a non-directory in the work root (2026-11-11).** A stray log file there made the sweep
 `readdirSync` a file; the sweep runs after every intake, its rejection was unhandled, and every tick died for
 25 minutes. Files in the root are counted as strays, logged once, and left alone.
