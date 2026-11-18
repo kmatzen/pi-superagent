@@ -2311,15 +2311,23 @@ describe('the sweep of settled checkouts', () => {
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
 
-  it('a clone with a second worktree is kept whole: deleting either side breaks the other', async () => {
+  it('a clone and its worktrees inside one workspace go together; a worktree in another workspace keeps both', async () => {
+    // 2026-11-18: 39 of the checkouts the sweep kept were a worker's own worktrees/<repo>/<branch>.
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-wt-'))
     try {
-      const main = seedNested(root, 'eeee2222ffff', true)
-      git(main, 'worktree', 'add', '-q', join(root, 'eeee2222ffff', 'worktrees', 'side'), '-b', 'side')
-      const swept = await sweepWorktrees(root, new Set(['eeee2222ffff']), 20, Infinity, async () => 0,
+      const own = seedNested(root, 'eeee2222ffff', true)
+      git(own, 'worktree', 'add', '-q', join(root, 'eeee2222ffff', 'worktrees', 'side'), '-b', 'side')
+      const shared = seedNested(root, 'aaaa3333bbbb', true)
+      mkdirSync(join(root, 'cccc4444dddd'))
+      git(shared, 'worktree', 'add', '-q', join(root, 'cccc4444dddd', 'side'), '-b', 'side')
+      const opened = new Set(['eeee2222ffff', 'aaaa3333bbbb', 'cccc4444dddd'])
+      const swept = await sweepWorktrees(root, opened, 20, Infinity, async () => 0,
         { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
-      expect(swept).toMatchObject({ clonesDropped: 0, keptWorkIds: ['eeee2222ffff'] })
-      expect(existsSync(join(root, 'eeee2222ffff', 'worktrees', 'side', 'f'))).toBe(true)
+      expect(existsSync(join(root, 'eeee2222ffff', 'repo')), 'its own worktree goes with it').toBe(false)
+      expect(existsSync(join(root, 'eeee2222ffff', 'worktrees', 'side')), 'and the worktree too').toBe(false)
+      expect(existsSync(join(root, 'aaaa3333bbbb', 'repo', 'f')), 'another workspace works from this clone').toBe(true)
+      expect(existsSync(join(root, 'cccc4444dddd', 'side', 'f')), 'whose main repository lives elsewhere').toBe(true)
+      expect([...swept.keptWorkIds].sort()).toEqual(['aaaa3333bbbb', 'cccc4444dddd'])
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
 
