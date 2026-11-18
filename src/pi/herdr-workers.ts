@@ -276,6 +276,15 @@ export class HerdrWorkers {
    *  checkout out from under any of them. */
   openTickets(): Set<string> { return new Set(this.records().map(r => r.ticketId)) }
 
+  /** Tickets whose agent herdr reports working now; an unreadable herdr answers every open record, the safe side. */
+  async workingTickets(): Promise<Set<string>> {
+    const records = this.records()
+    try {
+      const working = new Set((await this.options.herdr.tabList()).filter(t => t.agentStatus === 'working').map(t => t.tabId))
+      return new Set(records.filter(r => working.has(r.tabId)).map(r => r.ticketId))
+    } catch { return new Set(records.map(r => r.ticketId)) }
+  }
+
   private records(ended = false): WorkerRecord[] {
     if (!existsSync(this.root)) return []
     return readdirSync(this.root)
