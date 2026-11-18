@@ -43,4 +43,10 @@ describe('how work reaches a repository', () => {
     expect(pullBrief('o/r#7')).toMatch(/comments on the code numbered: answer every number[\s\S]*list each number with what you did/)
     expect(pullBrief('o/r#7')).toMatch(/several pull requests,\s+in one repository or across several, list every one in pullRequests in the order a person should merge them/)
   })
+
+  it('tells a worker the disk is shared and what never belongs on it', () => {
+    const brief = briefFor({ id: 'T3', title: 'x', channels: [] } as unknown as Ticket, '/wt/T3')
+    expect(brief).toMatch(/never download model weights, datasets or checkpoints\s+onto it/)
+    expect(brief).toMatch(/before a ready\s+report delete what you made that is not code/)
+  })
 })

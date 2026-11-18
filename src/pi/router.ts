@@ -155,6 +155,10 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   'This machine is shared: budget CPU and memory. Run builds and tests sequentially, cap parallel jobs',
   '(make -j4, pytest -n4, not an unbounded fan-out), avoid pulling huge caches, and stop every process',
   'you started before you report.',
+  'Its disk is shared and small, and it filled to 0 bytes twice: never download model weights, datasets or checkpoints',
+  'onto it — that work runs on a Pluto pod. Write test and build output inside your workspace, not /tmp, and before a ready',
+  'report delete what you made that is not code (outputs, downloads, a .venv you no longer need). The router clears shared',
+  'caches and idle checkouts when the disk runs low, and starts no new worker while it is nearly full.',
   'Waiting on CI: poll it one step per command (`gh pr checks`, then `sleep 60` at most, and again), never one long',
   'wait: a person\'s review reaches you only between commands, and the guard refuses longer waits.',
 ].join('\n')
