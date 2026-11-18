@@ -255,6 +255,14 @@ a clone plus an install, and 68 were queued when the disk hit 0. Running workers
 pause lifts on the first tick above half the floor (`disk.launches_paused` / `disk.launches_resumed`). The brief
 also tells workers what never belongs on the box: model weights, datasets, checkpoints, and output left in /tmp.
 
+**A worker's scratch lives in its workspace, not /tmp (2026-11-18).** /tmp on the fleet box is a 512 MB tmpfs, and
+10,740 worker leftovers (export tarballs, scratch clones, test directories) filled it while the big disk had 17 GB
+free, so every write to /tmp failed. Each worker now starts with `TMPDIR=<workspace>/.tmp`: on the big disk, ignored
+by git through its own `*` .gitignore, and removed by the pressure pass once no worker holds the ticket. For tools
+that hard-code /tmp, a nearly full /tmp (under 10% free) loses this user's entries untouched for six hours, at most
+every 15 minutes (`tmp.pressure_sweep`). "Live" for every disk pass now also means any worker record that has not
+ended, tracked by this router or not, so a tab the router lost is never swept out from under its agent.
+
 **Skip, never sweep, a non-directory in the work root (2026-11-11).** A stray log file there made the sweep
 `readdirSync` a file; the sweep runs after every intake, its rejection was unhandled, and every tick died for
 25 minutes. Files in the root are counted as strays, logged once, and left alone.

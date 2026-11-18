@@ -47,6 +47,7 @@ describe('how work reaches a repository', () => {
   it('tells a worker the disk is shared and what never belongs on it', () => {
     const brief = briefFor({ id: 'T3', title: 'x', channels: [] } as unknown as Ticket, '/wt/T3')
     expect(brief).toMatch(/never download model weights, datasets or checkpoints\s+onto it/)
-    expect(brief).toMatch(/before a ready\s+report delete what you made that is not code/)
+    expect(brief).toMatch(/Before a ready report delete what you made that is not code/)
+    expect(brief).toMatch(/Write scratch to \$TMPDIR, which is inside your workspace, never to \/tmp/)
   })
 })

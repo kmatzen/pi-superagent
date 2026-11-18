@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import superagent, { activationRefusal, clearCaches, createRouterExtension, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
+import superagent, { activationRefusal, clearCaches, createRouterExtension, sweepTmp, workerTmp, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
@@ -2139,6 +2139,32 @@ describe('the sweep of settled checkouts', () => {
     })
     expect(ran).toEqual(['uv cache clean', 'npm cache clean --force'])
     expect(said).toEqual(['uv: cleared', 'npm: not installed'])
+  })
+
+  it('a worker\'s scratch lives in its workspace, out of git status, and goes when nobody works the ticket', async () => {
+    // 2026-11-18: /tmp on the box is a 512 MB tmpfs, and 10,740 worker leftovers filled it.
+    const root = mkdtempSync(join(tmpdir(), 'sa-sweep-scratch-'))
+    try {
+      const repo = seedNested(root, 'abab1212cdcd', true)
+      const scratch = workerTmp(join(root, 'abab1212cdcd', 'repo'))
+      writeFileSync(join(scratch, 'frames.tar.gz'), 'x')
+      expect(git(repo, 'status', '--porcelain').stdout, 'a checkout with scratch in it is still clean').toBe('')
+      writeFileSync(join(workerTmp(join(root, 'abab1212cdcd')), 'big.bin'), 'x')
+      await sweepWorktrees(root, new Set(['abab1212cdcd']), 20, Number.MAX_SAFE_INTEGER, async () => 0,
+        { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
+      expect(existsSync(join(root, 'abab1212cdcd', '.tmp')), 'idle scratch is gone').toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('a nearly full /tmp loses our entries untouched for six hours, and keeps fresh ones', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sa-tmp-'))
+    try {
+      mkdirSync(join(dir, 'scene3d-old')); writeFileSync(join(dir, 'scene3d-old', 'f'), 'x')
+      writeFileSync(join(dir, 'parfait-refresh.tar.gz'), 'x')
+      aged(join(dir, 'scene3d-old'), 1)
+      expect(await sweepTmp(dir)).toEqual({ removed: 1, kept: 1 })
+      expect(readdirSync(dir)).toEqual(['parfait-refresh.tar.gz'])
+    } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
   it('a full disk drops the checkout of an idle open ticket and keeps what it reported', async () => {
