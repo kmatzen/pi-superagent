@@ -273,6 +273,11 @@ commits on no remote, every pass now asks GitHub, as the account workers push wi
 branch of the same name; `identical` or `ahead` is pushed. No branch, no GitHub remote, a 404 or any other error
 keeps the checkout. Uncommitted edits, a stash, new files and a second worktree still keep it either way.
 
+**Never delete a clone another workspace borrows from (2026-11-18).** Two clones on the box read `bad object HEAD`:
+each had been made with `clone --reference` against another ticket's clone (`objects/info/alternates`), and a sweep
+had deleted that source. Every pass now reads the alternates of every checkout first and keeps any workspace another
+workspace borrows objects from (`lent` in the sweep's log line), comparing real paths, since git records them that way.
+
 **Still short of the floor, a parked worker's venv goes (2026-11-18).** After every idle workspace was swept the box
 held 12 GB free against 10 GB write bursts, and parked workers' environments held 14.9 GB of unique blocks, 12.4 GB
 in one caramel venv. Under the floor the pass now also drops the `.venv` of a ticket whose worker is live but not

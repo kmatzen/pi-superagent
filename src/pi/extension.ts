@@ -1,7 +1,7 @@
 /** The package entry point: the router in the session the start script launches, the worker role inside a
  *  worker, and inert everywhere else. */
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { rm, statfs } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { execFile } from 'node:child_process'
@@ -1514,6 +1514,8 @@ export interface SweepReport {
   clonesDropped: number
   /** `.venv` directories dropped from workspaces kept for their work: rebuilt from the lock file, never work. */
   venvsDropped: number
+  /** Workspaces kept because another workspace's clone borrows their git objects. */
+  lent: number
   /** Free GB on the work root's filesystem at the end of a pressure pass; absent when that pass never ran. */
   freeGb?: number
 }
@@ -1620,9 +1622,12 @@ const WAITING = new Set([...SHELLS, 'pi', 'tmux', 'herdr', 'sleep', 'tee'])
  *  under a tool call's shell or on its own after that shell exited. Linux `/proc`; elsewhere, none. */
 export function ticketsInUse(root: string, proc = '/proc'): Set<string> {
   const used = new Set<string>()
-  const prefix = `${root.replace(/\/$/, '')}/`
+  // /proc answers real paths; a command line may carry the configured one.
+  const prefixes = [...new Set([root, (() => { try { return realpathSync(root) } catch { return root } })()])].map(r => `${r.replace(/\/$/, '')}/`)
   const note = (text: string): void => {
-    for (let i = text.indexOf(prefix); i >= 0; i = text.indexOf(prefix, i + 1)) used.add(text.slice(i + prefix.length).split(/[/\s\0]/)[0]!)
+    for (const prefix of prefixes) {
+      for (let i = text.indexOf(prefix); i >= 0; i = text.indexOf(prefix, i + 1)) used.add(text.slice(i + prefix.length).split(/[/\s\0]/)[0]!)
+    }
   }
   let pids: string[] = []
   try { pids = readdirSync(proc).filter(p => /^\d+$/.test(p)) } catch { return used }
@@ -1674,6 +1679,27 @@ async function holdsWork(checkouts: readonly string[], pushed?: (checkout: strin
   return false
 }
 
+/** Workspaces another workspace's clone borrows git objects from (`objects/info/alternates`, as `clone --reference`
+ *  writes): deleting one breaks the borrower. On 2026-11-18 two clones on the box read `bad object HEAD` that way. */
+export function lenders(root: string, names: readonly string[]): Set<string> {
+  const lent = new Set<string>()
+  const real = (path: string): string => { try { return realpathSync(path) } catch { return resolve(path) } }
+  const prefix = `${real(root)}/`
+  for (const name of names) {
+    for (const c of checkoutsIn(join(root, name))) {
+      const objects = join(c, '.git', 'objects')
+      let lines: string[] = []
+      try { lines = readFileSync(join(objects, 'info', 'alternates'), 'utf8').split('\n').map(l => l.trim()).filter(Boolean) } catch { continue }
+      for (const line of lines) {
+        const target = real(resolve(objects, line))
+        const owner = target.startsWith(prefix) ? target.slice(prefix.length).split('/')[0] : undefined
+        if (owner && owner !== name) lent.add(owner)
+      }
+    }
+  }
+  return lent
+}
+
 /** Deleting a checkout must never delete work: commits on no remote, uncommitted edits, a stash, or a new file git
  *  does not ignore (an agent's uncommitted script or note, and the agent may come back for it). Ignored files — the
  *  .venv, build output, downloaded models — do not count: they are rebuilt. A git that cannot answer is unsafe, and
@@ -1721,11 +1747,13 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
                                      pressure: SweepPressure = {}): Promise<SweepReport> {
   // Asked at each delete: the sweep runs beside the passes, and a ticket can reopen while it runs.
   const isOpen = (name: string): boolean => (typeof open === 'function' ? open() : open).has(name)
-  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0, venvsDropped: 0 }
+  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0, venvsDropped: 0, lent: 0 }
   let names: string[]
   try { names = readdirSync(root) } catch { return report }
   const dirs = names.filter(name => isDirectory(join(root, name)))
   report.strays = names.length - dirs.length
+  const lent = lenders(root, dirs)
+  const borrowedFrom = (name: string): boolean => { if (!lent.has(name)) return false; report.lent++; return true }
   const settled = dirs
     .filter(name => !isOpen(name))
     .map(name => ({ name, at: statSync(join(root, name)).mtimeMs }))
@@ -1738,7 +1766,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
       if (readdirSync(dir).length === 0) report.empty++; else report.bare++
     }
     if (await holdsWork(checkouts, pressure.pushed)) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
-    if (isOpen(entry.name)) continue
+    if (isOpen(entry.name) || borrowedFrom(entry.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
   }
   // The count is not the cost: measured 2026-11-11, the kept set was 58 GB because one build tree is 15 GB.
@@ -1752,7 +1780,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
     const dir = join(root, e.name)
     if (await holdsWork(checkoutsIn(dir), pressure.pushed)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
     const size = await sizeOf(dir)
-    if (isOpen(e.name)) continue
+    if (isOpen(e.name) || borrowedFrom(e.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++; bytes -= size } catch { /* next sweep's problem */ }
   }
   // Free space, not the count, is what kills a box. The two passes above touch settled tickets only, and 42 of
@@ -1781,6 +1809,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
         report.keptWork++; report.keptWorkIds.push(e.name)
         continue
       }
+      if (borrowedFrom(e.name)) continue
       for (const c of checkouts) {
         try { await rm(c, { recursive: true, force: true }); report.clonesDropped++ } catch { /* busy: the next sweep */ }
       }
