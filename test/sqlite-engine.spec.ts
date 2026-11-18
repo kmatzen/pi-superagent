@@ -1648,6 +1648,33 @@ describe('release, stop and attach doors (audit 2026-11-11)', () => {
     expect(fresh.assignments).toHaveLength(2)
     expect(h.delivered).toContainEqual([ticketId, input.id])
   })
+  it('calls a worker back on the event it handed its slot over for, and a blocked worker on nobody', () => {
+    // The brief tells a worker whose CI runs to report waiting and end its turn, freeing its session and its launch slot
+    // (operator, 2026-11-16: it polled CI inside the turn, so every CI wait held a slot). The handoff is worthless unless
+    // the event it named calls a worker back; `blocked` still waits for a person alone.
+    for (const [state, wakes] of [['waiting', true], ['blocked', false]] as const) {
+      const h = harness()
+      const ticketId = accepted(h).ticketId!
+      h.engine.report(ticketId, { state, summary: 'CI is running on the branch.', ...(state === 'blocked' ? { question: 'Merge it?' } : {}) })
+      h.engine.release(ticketId, h.repo.tickets.get(ticketId)!.assignments.at(-1)!.id)
+      h.engine.receive(trigger('2', { actor: { source: 'chat', id: 'ci-bot' }, human: false, text: 'CI passed' })); h.pump()
+      expect(h.repo.tickets.get(ticketId)!.assignments, state).toHaveLength(wakes ? 2 : 1)
+    }
+  })
+  it('bounds the machine wake at three per handoff streak, and a person still opens the door', () => {
+    // #205 (2026-11-09) was woken by every check that finished and reported 48 times in 2h13m, which is what a bot that
+    // comments on every push does. This cannot strand a ticket: the wake-up the worker scheduled is a person's input.
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    for (let look = 0; look < 4; look++) {
+      h.engine.report(ticketId, { state: 'waiting', summary: `CI is still running (look ${look}).` })
+      h.engine.release(ticketId, h.repo.tickets.get(ticketId)!.assignments.at(-1)!.id)
+      h.engine.receive(trigger(`${look + 2}`, { actor: { source: 'chat', id: 'ci-bot' }, human: false, text: `check ${look}` })); h.pump()
+    }
+    expect(h.repo.tickets.get(ticketId)!.assignments, 'three bot wakes, no fourth').toHaveLength(4)
+    h.engine.receive(trigger('9', { text: 'merge it now' })); h.pump()
+    expect(h.repo.tickets.get(ticketId)!.assignments, 'a person opens it').toHaveLength(5)
+  })
   it('refuses to stop a ticket that has already ended, instead of silently doing nothing', () => {
     const h = harness()
     const ticketId = accepted(h).ticketId!

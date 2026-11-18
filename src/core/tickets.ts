@@ -21,6 +21,17 @@ const readBefore = (input: Extract<TicketInput, { kind: 'trigger' }>, until: str
 const STATUS_REQUEST = 'Report the current ticket status with orchestrator_report. This is a status-only request: do not resume implementation or perform external actions.'
 
 /**
+ * Consecutive `waiting` handoffs a ticket may be woken on for, and no more. Bound, not tuning: #205 (2026-11-09) was woken
+ * by every check that finished and reported 48 times in 2h13m, which is what a bot that comments on every push does.
+ */
+const MACHINE_WAKE_CAP = 3
+const machineHandoffs = (ticket: Ticket): number => {
+  let seen = 0
+  for (let i = ticket.assignments.length - 1; i >= 0 && ticket.assignments[i]?.report?.state === 'waiting'; i--) seen += 1
+  return seen
+}
+
+/**
  * Manages each ticket's lifecycle: creates the ticket for an accept decision with its Mandate, Subscriptions, and first
  * Assignment, binds and attaches Threads, adds Inputs, resumes, retries, restarts, and ends tickets, and drops Subscriptions.
  * Coordinates with Replies for the acknowledgement an accept carries and with Executor to start, deliver to, and stop assignments.
@@ -284,6 +295,7 @@ export class Tickets extends EnginePart {
    * and no Decision, since nothing new is authorized. One whose Mandate the current Policy no longer holds stays ended and
    * takes nothing (see `refuse`). While processing is paused the message waits, and the first pass after the pause resumes
    * the ticket under the Policy then. Reads the ticket afresh, so it is idempotent and leaves an already-resumed ticket alone.
+   * One machine event opens the same door: the thread of a worker that handed its slot over with `waiting` (see below).
    */
   wake(ticketId: string): void {
     const ticket = this.repo.tickets.get(ticketId)
@@ -292,13 +304,19 @@ export class Tickets extends EnginePart {
     // request that starts the next worker, and nothing else is listening for it. Of the stopped ones, a stop that
     // withdrew the Mandate (a person's, the loop guard's) has no door; the conversation stop does.
     const last = latestAssignment(ticket)
-    if (liveTicket(ticket) && !(last?.state === 'ended' && last.endedReason === 'released')) return
+    const released = last?.state === 'ended' && last.endedReason === 'released'
+    if (liveTicket(ticket) && !released) return
     if (mandateWithdrawn(ticket)) return
     const policy = this.policy()
     if (policy.paused) return
     if (!policy.revalidate(ticket.mandate)) { this.refuse(ticket); return }
     // Only a human's message resumes an ended ticket; bot/CI triggers wait alongside inputs from before the ticket ended.
-    const first = ticket.undelivered.map(id => ticket.inputs.find(input => input.id === id)).find(input => input?.kind === 'trigger' && input.human)
+    // The one machine door: a worker that reported `waiting` gave up its session and slot to watch CI, a build or a deploy
+    // (operator, 2026-11-16: the brief told workers to poll CI inside the turn, so every CI wait held a launch slot), and the
+    // event it handed over for is what calls it back. A cap trip strands nothing: the wake-up it scheduled is a person's input.
+    const machine = released && last?.report?.state === 'waiting' && machineHandoffs(ticket) <= MACHINE_WAKE_CAP
+    const first = ticket.undelivered.map(id => ticket.inputs.find(input => input.id === id))
+      .find(input => input?.kind === 'trigger' && (input.human || machine))
     if (first?.kind !== 'trigger') return
     const at = this.now()
     delete ticket.ended; ticket.updatedAt = at
