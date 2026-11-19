@@ -29,6 +29,15 @@ export interface IssueState {
 export const PRIORITY_LABEL = 'priority:high'
 /** One priority launch per pass: 38 pending tickets share 4 slots, and a priority lane that takes them all is a new starvation. */
 export const PRIORITY_GRANTS_PER_POLL = 1
+type WonSlot = 'priority' | 'unanswered' | 'oldest-starved'
+/** Why a thread took the slot, named for the operator: the label wins (`priority`); in the standing queue a
+ *  thread with undelivered operator input is the parked-thread relaunch (`unanswered`, measured 2026-11-19:
+ *  #593 relaunched on undelivered replies), and a plain win by age is `oldest-starved`. The names report the
+ *  ranking — label first, then oldest updated — they never change it. */
+export const wonSlotReason = (priority: boolean, hasUndeliveredInput: boolean): WonSlot =>
+  priority ? 'priority' : hasUndeliveredInput ? 'unanswered' : 'oldest-starved'
+/** kv key: thread key → the reason it last won a slot, so the panel row can say it after the log scrolled. */
+export const WON_SLOT_KEY = 'router:wonslot'
 const priorityOf = (issue: IssueState): boolean => !!issue.labels?.includes(PRIORITY_LABEL)
 export const byPriorityThenOldest = (issues: readonly IssueState[]): IssueState[] =>
   [...issues].sort((a, b) =>

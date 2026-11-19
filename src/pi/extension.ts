@@ -11,7 +11,7 @@ const runGit = promisify(execFile)
 import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type ThreadRef, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
-import {GithubSource, REPLY_MARKER, type GithubApi, type IssueState} from './source-github.ts'
+import {GithubSource, REPLY_MARKER, WON_SLOT_KEY, wonSlotReason, type GithubApi, type IssueState} from './source-github.ts'
 import { ghApi, ghCall, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type PullRef, type PullState, type ReconcileReport } from './pulls.ts'
@@ -285,7 +285,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
           const next = regrantPlan(repos.kv.get<RegrantCounters>(REGRANT_KEY), key, day, priority ? PRIORITY_REGRANT_CAP : REGRANT_CAP)
           if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day }); return false }
           repos.kv.set(REGRANT_KEY, next)
-          log.line('info', 'regrant.granted', { thread: key, issue, ticket: ask?.id, day, wonSlot: priority ? 'priority' : 'queue' })
+          const wonSlot = wonSlotReason(priority, (ask?.undelivered.length ?? 0) > 0)
+          repos.kv.set(WON_SLOT_KEY, { ...(repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {}), [key]: wonSlot })
+          log.line('info', 'regrant.granted', { thread: key, issue, ticket: ask?.id, day, wonSlot })
           return ask?.assignments.at(-1)?.id ?? `${day}.${next.perIssue[key]}`
         },
       }, repos.kv)
