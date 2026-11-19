@@ -1,0 +1,206 @@
+/** Panel and management API over the engine's own store: the panel can show no count the API denies. */
+import { readFileSync } from 'node:fs'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import type { Engine, Ticket } from '../core/index.ts'
+import type { SqliteRepositories } from './store.ts'
+import type { SessionAssessor } from './assessor.ts'
+import type { RouterConfig } from './router.ts'
+import { threadUrl } from './pulls.ts'
+
+export interface PanelSource {
+  repos: SqliteRepositories
+  engine: Engine
+  assessor: SessionAssessor
+  config: RouterConfig
+  load(): { running: number; parked: number; queued: number; maxWorkers: number; starved?: number; oldestStarvedH?: number; unanswered?: number }
+  /** The router's live workers: which ticket, where, and when each last spoke. */
+  workers(): Array<{ ticketId: string; sessionId: string; workspace: string; lastEventAt: string; events: number; quietSeconds: number; watch?: string; busy?: boolean }>
+  /** The panel shares the router's event loop, so a slow request is evidence of starvation, not noise. */
+  log(level: 'info' | 'warn' | 'error', event: string, fields?: Record<string, unknown>): void
+  /** The same document `superagent status` reads, so the panel and the exit code cannot disagree. */
+  health(): Record<string, unknown>
+  isPaused(): boolean
+  setPaused(v: boolean): void
+  /** Required on every POST: a localhost bind stops remote callers, not local ones. */
+  token?(): string
+  now(): string
+}
+
+const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
+const day = 86_400_000
+const within = (at: string, ms: number, now: string): boolean => Date.parse(at) >= Date.parse(now) - ms
+
+/** A ticket's home is its GitHub issue page. */
+export const issueUrl = (t: Ticket, repo?: string): string => {
+  const c = t.channels[0]
+  return (c?.source === 'github' && threadUrl(c.thread, repo ?? '')) || ''
+}
+
+const waitingOn = (t: Ticket): string => {
+  const a = t.assignments.at(-1)
+  if (t.attention) return `a person: ${(t.attention as { question?: string }).question ?? ''}`.trim()
+  const review = (t.follows ?? []).filter(f => f.own && !f.closed).map(f => f.thread.replace(/^github:/, ''))
+  if (a?.report?.state === 'ready' && review.length) return `review of ${review.join(', ')}`
+  if (a?.report?.state === 'waiting') return 'a trigger'
+  if (a?.state === 'running') return 'its worker'
+  if (a?.state === 'pending' || !a) return 'the router'
+  return 'the operator'
+}
+
+export function readModel(src: PanelSource) {
+  const now = src.now()
+  const tickets = src.repos.tickets.list()
+  // Newest first: list() is insertion order, and the operator opens this panel for the ticket that just
+  // landed. The ended list below says the same thing about its own order.
+  const open = tickets.filter(t => !t.ended).reverse()
+  const threads = src.repos.threads.list()
+  const decisions = threads.flatMap(t => src.repos.decisions.byThread(t.key))
+  const filtered = threads.flatMap(t => src.repos.triggersOfThread(t.ref))
+    .map(tr => ({ trigger: tr, disposition: src.repos.triggers.disposition(tr.id) }))
+  const recent = filtered.filter(f => within(f.trigger.at, day, now))
+  return {
+    now,
+    paused: src.isPaused(),
+    health: src.health(),
+    load: src.load(),
+    needsPerson: open.filter(t => t.attention).map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', question: (t.attention as { question?: string }).question ?? '', at: t.assignments.at(-1)?.report?.at ?? '', url: issueUrl(t, src.config.githubRepo) })),
+    open: open.map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', state: t.assignments.at(-1)?.state ?? 'queued', waitsFor: waitingOn(t),
+      issue: t.channels[0]?.source === 'github' ? t.channels[0].thread : '', url: issueUrl(t, src.config.githubRepo),
+      worker: (() => { const w = src.workers().find(w => w.ticketId === t.id); return w ? `${w.busy === false ? 'parked · ' : ''}watch ${w.watch || w.workspace} · ${w.events} events · quiet ${w.quietSeconds}s` : '' })() })),
+    workers: src.workers(),
+    // Newest first: list() is insertion order, so the panel reverses rather than the store lying about it.
+    ended: tickets.filter(t => t.ended).reverse().slice(0, 50).map(t => ({ id: t.id, title: t.title, outcome: t.ended!.outcome, at: t.ended!.at })),
+    counts: {
+      triggers24h: recent.length,
+      filtered24h: recent.filter(f => f.disposition?.filtered).length,
+      decisions24h: decisions.filter(d => within(d.at, day, now)).length,
+      evaluating: threads.filter(t => t.evaluating).length,
+      threads: threads.length,
+    },
+    evaluating: threads.filter(t => t.evaluating).map(t => ({ key: t.key, evalId: t.evaluating!.id, since: t.evaluating!.startedAt })),
+    waitingAssessment: src.assessor.waiting(),
+    recentDecisions: decisions.slice(-25).reverse().map(d => ({ id: d.id, at: d.at, kind: d.kind, reason: d.reason.map(r => r.code).join(','), rules: (d.audit?.rules as string[] | undefined) ?? [], ticket: d.ticketId ?? '' })),
+    policy: { version: src.config.policyVersion ?? 'v1', paused: src.isPaused() },
+    source: { repo: src.config.githubRepo ?? '' },
+  }
+}
+
+export type Model = ReturnType<typeof readModel>
+
+const page = (title: string, body: string): string => `<!doctype html><meta charset=utf-8>
+<title>${esc(title)}</title><style>
+body{font:14px/1.45 system-ui;margin:2rem auto;max-width:60rem;color:#111;background:#fbfbfa}
+nav a{margin-right:1rem}h1{font-size:1.3rem}h2{font-size:1.05rem;margin-top:2rem;border-bottom:1px solid #ddd}
+table{border-collapse:collapse;width:100%}td,th{padding:.3rem .5rem;border-bottom:1px solid #eee;text-align:left;vertical-align:top}
+.count{color:#666}.ask{background:#fff8dc;padding:.5rem;border-left:3px solid #c90}
+.muted{color:#666}code{background:#eee;padding:0 .2rem}
+</style>
+<nav><a href="#overview">Overview</a><a href="#source">Source</a><a href="#trigger">Trigger</a><a href="#eval">Eval</a><a href="#execution">Execution</a><a href="#settings">Settings</a></nav>
+<h1>${esc(title)}</h1>${body}`
+
+export function renderPanel(m: Model): string {
+  const quiet = (n: number, label: string): string => n === 0 ? '' : `<li>${n} ${esc(label)}</li>`
+  const asks = m.needsPerson.map(a => `<div class="ask">${a.url ? `<a href="${esc(a.url)}">${esc(a.thread)}</a>` : `<a href="/ticket?id=${encodeURIComponent(a.id)}">${esc(a.thread || a.id)}</a>`} — ${esc(a.question || 'needs a person')}<div class="muted">${esc(a.title)}</div></div>`).join('')
+    || '<p class="muted">Nothing needs you.</p>'
+  const rows = (rows: Record<string, unknown>[], cols: string[]): string => {
+    if (rows.length === 0) return '<p class="muted">none</p>'
+    const cell = (r: Record<string, unknown>, c: string): string =>
+      r.url ? `<a href="${esc(r.url)}">${esc(r[c])}</a>` : esc(r[c])
+    return `<table><tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${cols.map(c => `<td>${cell(r, c)}</td>`).join('')}</tr>`).join('')}</table>`
+  }
+  return page('superagent', `
+<section id="overview"><h2>Needs a person <span class="count">(${m.needsPerson.length})</span></h2>${asks}
+<ul class="count">${quiet(m.load.running, 'workers on a run')}${quiet(m.load.parked, 'workers parked between runs')}${quiet(m.load.starved ?? 0, `labelled asks waiting for a slot${m.load.oldestStarvedH ? `, oldest ${m.load.oldestStarvedH}h` : ''}`)}${quiet(m.load.unanswered ?? 0, 'labelled asks with nobody on them')}${quiet(m.counts.evaluating, 'evals in progress')}${quiet(m.counts.filtered24h, 'triggers filtered in 24 h')}${m.paused ? '<li><strong>processing is paused</strong></li>' : ''}</ul></section>
+<section id="source"><h2>Source <span class="count">(${m.source.repo ? `GitHub issues: ${esc(m.source.repo)}` : 'no source configured'})</span></h2>
+<p class="count">${m.counts.triggers24h} triggers in the last 24 h, ${m.counts.filtered24h} filtered, ${m.counts.threads} threads known.</p>
+</section>
+<section id="trigger"><h2>Trigger</h2>${rows(m.evaluating, ['key', 'evalId', 'since'])}
+<p class="count">Waiting on a judgement: ${m.waitingAssessment.length}</p></section>
+<section id="eval"><h2>Eval <span class="count">(${m.counts.decisions24h} in 24 h)</span></h2>${rows(m.recentDecisions, ['at', 'kind', 'reason', 'rules', 'ticket'])}</section>
+<section id="execution"><h2>Execution <span class="count">(${m.open.length} open, ${m.load.running}/${m.load.maxWorkers} working, ${m.load.parked} parked, ${m.load.queued} queued)</span></h2>
+${rows(m.open, ['thread', 'title', 'state', 'waitsFor', 'worker'])}
+<h2>Ended</h2>${rows(m.ended, ['id', 'title', 'outcome', 'at'])}</section>
+<section id="settings"><h2>Settings</h2><p class="count">policy ${esc(m.policy.version)} · paused=${m.paused} · state ${esc(process.env.PI_SUPERAGENT_STATE ?? '')}</p>
+<p class="muted">Settings live in config.env in the state directory; restart to apply them. POST /api/executor/pause pauses processing.</p></section>`)
+}
+
+const json = (res: import('node:http').ServerResponse, code: number, body: unknown): void => {
+  res.writeHead(code, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(body))
+}
+
+export function createPanelServer(src: PanelSource): { server: Server; url(port: number): string } {
+  const serve = (req: IncomingMessage, res: ServerResponse): void => {
+    const began = Date.now()
+    res.on('finish', () => {
+      const ms = Date.now() - began
+      if (ms > 1000) src.log('warn', 'panel.slow', { ms, path: req.url ?? '/', status: res.statusCode })
+    })
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const host = String(req.headers.host ?? '')
+    if (!/^127\.0\.0\.1:\d+$|^localhost:\d+$/.test(host)) { json(res, 403, { error: 'host must be 127.0.0.1 or localhost' }); return }
+    if (url.pathname.startsWith('/api/') && req.headers['x-superagent-request'] !== '1') { json(res, 403, { error: 'missing x-superagent-request: 1' }); return }
+    if (req.method === 'POST' && src.token && req.headers['x-superagent-token'] !== src.token()) {
+      json(res, 403, { error: 'a POST needs the panel token in x-superagent-token' }); return
+    }
+    const m = readModel(src)
+    if (url.pathname === '/api/state') return json(res, 200, { paused: m.paused, load: m.load, counts: m.counts, health: m.health, workers: m.workers })
+    if (url.pathname === '/api/settings') return json(res, 200, { policyVersion: m.policy.version, paused: m.paused, revision: 1 })
+    if (url.pathname === '/api/sources') return json(res, 200, [{ id: 'github', state: m.source.repo ? 'ready' : 'off', stats: { triggers24h: m.counts.triggers24h, filtered24h: m.counts.filtered24h } }])
+    if (url.pathname === '/api/tickets') return json(res, 200, m.open)
+    if (url.pathname === '/api/decisions') return json(res, 200, m.recentDecisions)
+    if (url.pathname === '/api/executor/pause' && req.method === 'POST') {
+      let body = ''
+      req.on('data', c => { body += c })
+      req.on('end', () => {
+        // An unparseable body is the caller's mistake, not the router's: this handler runs outside the
+        // request's try, so a throw here is an uncaught exception and the process dies with the panel's workers.
+        let paused: boolean
+        try { paused = Boolean(JSON.parse(body || '{}').paused) } catch { return json(res, 400, { error: 'body must be JSON, e.g. {"paused":true}' }) }
+        src.setPaused(paused)
+        json(res, 200, { paused })
+      })
+      return
+    }
+    const ticket = url.searchParams.get('id')
+    const stopping = /^\/api\/tickets\/([^/]+)\/stop$/.exec(url.pathname)
+    if (stopping && req.method === 'POST') {
+      const id = decodeURIComponent(stopping[1]!)
+      if (!src.repos.tickets.get(id)) return json(res, 404, { error: 'no such ticket' })
+      let body = ''
+      req.on('data', c => { body += c })
+      req.on('end', () => {
+        // A body the caller cannot format is the caller's mistake, and the stop is what was asked for: the
+        // default reason stands, because refusing a stop over a broken string would put the lever out of reach.
+        let reason = 'stopped by the operator'
+        try { reason = String(JSON.parse(body || '{}').reason || reason).slice(0, 400) } catch { /* the default */ }
+        try {
+          src.engine.stopTicket(id, reason)
+          json(res, 200, { stopped: id, reason })
+        } catch (error) {
+          json(res, 409, { error: String(error instanceof Error ? error.message : error) })
+        }
+      })
+      return
+    }
+    if (url.pathname === '/api/ticket' && ticket) return json(res, 200, src.repos.tickets.get(ticket) ?? { error: 'no such ticket' })
+    if (url.pathname === '/ticket' && ticket) {
+      const t = src.repos.tickets.get(ticket)
+      return void res.writeHead(200, { 'content-type': 'text/html' }).end(page(`ticket ${ticket}`, t ? `<pre>${esc(JSON.stringify(t, null, 2))}</pre>` : 'no such ticket'))
+    }
+    if (url.pathname === '/') return void res.writeHead(200, { 'content-type': 'text/html' }).end(renderPanel(m))
+    json(res, 404, { error: 'not found' })
+  }
+  const server = createServer((req, res) => {
+    try {
+      serve(req, res)
+    } catch (error) {
+      // A read that fails is a failed page, not a dead router: the panel runs in the router's process, and on
+      // 2026-11-11 a full /tmp made one page view throw SQLITE_FULL and stopped the whole fleet.
+      src.log('error', 'panel.failed', { path: req.url ?? '/', error: String(error).slice(0, 200) })
+      if (res.headersSent) res.end()
+      else json(res, 500, { error: 'the panel could not read the router state; the router is still running' })
+    }
+  })
+  return { server, url: port => `http://127.0.0.1:${port}` }
+}

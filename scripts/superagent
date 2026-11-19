@@ -1,0 +1,549 @@
+#!/usr/bin/env bash
+# superagent — start/stop/restart/status/remedy for the resident router session, which runs as a pi in herdr.
+#
+# The exit codes of `status` are a contract, because a scheduled health check reads them, and each one names
+# the remedy the check should apply:
+#   0  running and healthy, or stopped on purpose  -> do nothing
+#   1  not running, running twice, or not answering -> start it
+#   2  running and not beating: the tick loop is stalled -> restart it (a restart clears a wedged loop)
+#   3  running and waiting for setup                 -> do nothing, and tell a person (a restart will not fix it)
+#   4  running, but a part reports an error          -> do nothing, and tell a person (a restart will not fix it)
+# `remedy` is that mapping as a command, for the job that runs on a schedule, and it exits with the code the
+# router reports AFTER the remedy: 0 recovered, 1 the remedy did not bring the router back. Each code keeps one
+# meaning, so a scheduled check can act on it without reading prose.
+set -uo pipefail
+
+usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] [--allow-dirty] {init OWNER/REPO|start|stop|stop-ticket ID [REASON]|restart|status|remedy|backup}"; }
+
+# Flags come first because every path below derives from the state directory: parsed after them, --state
+# moved the router's tab but left its stop marker, its place file and its settings in the default one.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session) SESSION_FLAG="$2"; shift 2 ;;
+    --state) STATE_FLAG="$2"; shift 2 ;;
+    --respect-stop) RESPECT_STOP=1; shift ;;
+    --allow-dirty) ALLOW_DIRTY=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    init)
+      [ "$#" -eq 2 ] && [[ "$2" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$ ]] && [[ "${2#*/}" != "." && "${2#*/}" != ".." ]] || { usage >&2; exit 2; }
+      CMD=init; INIT_REPO="$2"; shift 2 ;;
+    start|stop|restart|status|remedy|backup) CMD="$1"; shift ;;
+    stop-ticket)
+      # Parsed with the verbs, not in the dispatch: the loop below shifts every known verb, so a verb it does
+      # not know arrives here with its arguments already eaten.
+      CMD=stop-ticket
+      ST_ID="${2:-}"; shift 2
+      ST_REASON="$*"; shift ;;
+    intake)
+      # Removed with the labels it wrote (operator, 2026-11-10: "These labels are obsolete"). Said out loud and
+      # non-zero, so a stale habit cannot read as a request that went through.
+      echo "superagent intake is gone with the labels: the router takes every open issue that is not an ask on its own." >&2
+      exit 2 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+: "${CMD:=status}"
+
+STATE="${STATE_FLAG:-${PI_SUPERAGENT_STATE:-$HOME/.pi/superagent}}"
+# Deployment settings live with the state, so the health check's restart and a hand restart start the same
+# router (the GitHub source was on or off depending on whose shell started it). The caller's env still wins.
+if [ -f "$STATE/config.env" ]; then
+  while IFS='=' read -r key value; do
+    case "$key" in ''|\#*) continue ;; esac
+    # A file edited by hand: a CRLF line ending put a \r in every value, and spaces around the = killed the
+    # start with a bad substitution (audit 2026-11-11). Values are literal, so trimming changes no meaning.
+    key="$(printf '%s' "$key" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    value="$(printf '%s' "$value" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    case "$key" in
+      # Only the router's settings are read: a foreign key (NODE_OPTIONS=..., PATH=...) in the operator's
+      # 0600 file must not reach the environment every child of this script inherits (audit 2026-11-11).
+      PI_SUPERAGENT_*) [ -n "${!key+x}" ] || export "$key=$value" ;;
+      *) echo "superagent: ignoring '$key' in $STATE/config.env: only PI_SUPERAGENT_* settings are read" >&2 ;;
+    esac
+  done < "$STATE/config.env"
+fi
+# Every pi session lives in herdr, the router included: it is the agent named $SESSION in this workspace,
+# next to the workers it starts. No herdr, no router: the health check retries until herdr is back.
+SESSION="${SESSION_FLAG:-${PI_SUPERAGENT_SESSION:-superagent}}"
+HERDR_BIN="${PI_SUPERAGENT_HERDR:-$(command -v herdr || echo herdr)}"
+WORKSPACE_LABEL="${PI_SUPERAGENT_HERDR_WORKSPACE:-superagent}"
+WORKTREES="${PI_SUPERAGENT_WORKTREES:-$STATE/work}"
+STOP_MARKER="$STATE/stopped"
+ROUTER_PLACE="$STATE/router.herdr"
+# When the health check last restarted the router, in epoch seconds. A restart is the remedy for a stall, and
+# the cooldown is what keeps it from becoming a five-minute restart loop on a fault a restart cannot fix.
+RESTART_MARKER="$STATE/watchdog-restart"
+RESTART_COOLDOWN_MIN="${PI_SUPERAGENT_RESTART_COOLDOWN_MIN:-30}"
+case "$RESTART_COOLDOWN_MIN" in ''|*[!0-9]*) RESTART_COOLDOWN_MIN=30 ;; esac
+GRACE="${PI_SUPERAGENT_GRACE:-30}"
+# How long start waits for the router to write its ready file. A router that never got there is not healthy.
+READY_WAIT="${PI_SUPERAGENT_READY_WAIT:-60}"
+# 0 reads as "do not wait" and would make every start report failure, so the floor is one second.
+[ "$READY_WAIT" -lt 1 ] 2>/dev/null && READY_WAIT=1
+# The panel is the operator's view of the engine (upstream's docs/005-panel.md: does anything need me, is
+# it healthy, what is the history of one piece of work). Loopback only; the API refuses a caller that does
+# not say what it is, and any non-local Host.
+PANEL_PORT="${PI_SUPERAGENT_PANEL_PORT:-8788}"
+# The checkout this script was started from: the router's code, its .git/config, and the thing a deploy pulls.
+# Follow symlinks first: a `superagent` on PATH is usually a LINK (npm's global install leaves one in its bin
+# directory, and linking the script out of a checkout is the documented way to run it from a checkout), so
+# BASH_SOURCE names the link and a REPO_ROOT built from its dirname is the directory holding the link. Measured
+# through a link into a checkout whose config held a token: `start` exited 0, because the scan looked in the
+# link's own directory, found no checkout there, and printed nothing. A guard that reports a leaking box clean
+# is worse than no guard, so the link is followed to the file it points at before the directory is taken.
+script_realpath() {
+  local path="$1" link
+  while [ -L "$path" ]; do
+    link="$(readlink "$path")" || break
+    [ "${link#/}" = "$link" ] && link="$(dirname "$path")/$link"
+    path="$link"
+  done
+  printf '%s\n' "$path"
+}
+REPO_ROOT="$(cd "$(dirname "$(script_realpath "${BASH_SOURCE[0]}")")/.." && pwd -P)"
+# The router's judge runs through pi's SDK, and pi hands its own to the extension: inside pi, importing the
+# package name resolves to the running pi wherever it is installed. PI_SUPERAGENT_SDK_PATH, an entry file,
+# overrides that and passes through with the other settings.
+# pi with no session argument can open the session picker and sit there ("Press any key to continue"),
+# and a router parked on the picker answers nothing: every assessment expired as `timeout` (188 of them,
+# measured on the panel) because sendUserMessage had no running session to turn. One stable id, created
+# on first start, also names the router: the extension refuses to be the router in any process whose
+# command line lacks it.
+SESSION_ID="${PI_SUPERAGENT_SESSION_ID:-}"
+if [ "$CMD" = init ]; then
+  for bin in node git gh pi "$HERDR_BIN"; do
+    command -v "$bin" >/dev/null || { echo "Install $bin before running init." >&2; exit 1; }
+  done
+  node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 19) ? 0 : 1)' || {
+    echo "Node 22.19 or later is required." >&2; exit 1;
+  }
+  permission="$(gh repo view "github.com/$INIT_REPO" --json viewerPermission --jq .viewerPermission)" || exit 1
+  case "$permission" in ADMIN|MAINTAIN|WRITE) ;; *) echo "The signed-in GitHub account needs write access to $INIT_REPO." >&2; exit 1 ;; esac
+  if [ -n "${PI_SUPERAGENT_GITHUB_REPO:-}" ] && [ "$PI_SUPERAGENT_GITHUB_REPO" != "$INIT_REPO" ]; then
+    echo "Already configured for $PI_SUPERAGENT_GITHUB_REPO. Choose a separate --state directory and clear any repository override." >&2; exit 1
+  fi
+  (umask 077; mkdir -p "$STATE" && set -C && printf 'PI_SUPERAGENT_GITHUB_REPO=%s\n' "$INIT_REPO" > "$STATE/config.env") 2>/dev/null || {
+    if ! grep -Fxq "PI_SUPERAGENT_GITHUB_REPO=$INIT_REPO" "$STATE/config.env" 2>/dev/null; then
+      echo "Could not create $STATE/config.env. For an existing config, set PI_SUPERAGENT_GITHUB_REPO there." >&2; exit 1
+    fi
+  }
+  echo "Configured $INIT_REPO in $STATE/config.env. Start herdr, then run this command with start."
+  exit 0
+fi
+mkdir -p "$STATE" "$WORKTREES"
+
+# herdr answers in JSON; node is already a dependency of pi, so it reads the fields.
+field() { node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{let v=JSON.parse(d);for(const k of process.argv.slice(1))v=v?.[k];process.stdout.write(v==null?"":String(v))}catch{}})' "$@"; }
+# A single-quoted word for a pane's shell: the pane runs its own shell, and a state path containing a single
+# quote used to end the word — and inject into that shell (audit 2026-11-11).
+sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+workspace_id() {
+  "$HERDR_BIN" workspace list 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const w=(JSON.parse(d).result?.workspaces??[]).find(w=>w.label===process.argv[1]);process.stdout.write(w?w.workspace_id:"")})' "$WORKSPACE_LABEL"
+}
+herdr_up() { "$HERDR_BIN" workspace list >/dev/null 2>&1; }
+running() { "$HERDR_BIN" agent get "$SESSION" >/dev/null 2>&1; }
+place() { [ -f "$ROUTER_PLACE" ] && sed -n "s/^$1=//p" "$ROUTER_PLACE"; }
+
+# A remote URL that carries its credential (`https://user:token@github.com/…`) is a live secret in a file git
+# writes 0644: every user and every process on the box reads it, and the first `git remote -v`, `git config
+# --list`, failed push or verbose `ls-remote` a worker prints carries it into a transcript, a board row, an
+# issue body. Measured on the deployment box (issue #314): the watched checkout held a 40-character `ghp_`
+# classic token with `repo` scope — read/write on every repository the account reaches — in `-rw-r--r--
+# .git/config`, with ~20 worker sessions per run able to print it. The router's own checkout and the operator's
+# watched ones refuse the start; a ticket checkout under the state dir is cleaned instead (clean_credential).
+# Findings are masked here on purpose: a guard that prints the token to find the token has published it.
+CREDENTIAL_IN_URL='://[^/[:space:]]*:[^/[:space:]]*@|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}'
+mask_credential() { sed -E 's#(://[^/@[:space:]]*:)[^/@[:space:]]*(@)#\1***\2#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}#\1***#g'; }
+file_mode() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null || echo '?'; }
+
+# The config files that name a checkout's remotes. A linked worktree — 2 of the 86 directories under the live
+# worktree root — keeps its own `.git` as a FILE pointing at <repo>/.git/worktrees/<name>, and its remotes live
+# in the COMMON dir's config, so scanning `<checkout>/.git/config` walks straight past it. Same for a submodule.
+# Every file printed exists; a path that is not a checkout prints nothing.
+checkout_config_files() {
+  local dir="$1" gitdir common
+  if [ -d "$dir/.git" ]; then gitdir="$dir/.git"
+  elif [ -f "$dir/.git" ]; then
+    gitdir="$(sed -n 's/^gitdir:[[:space:]]*//p' "$dir/.git" | head -1)"
+    [ -n "$gitdir" ] || return 0
+    [ "${gitdir#/}" = "$gitdir" ] && gitdir="$(cd "$dir" 2>/dev/null && cd "$gitdir" 2>/dev/null && pwd)"
+  elif [ -f "$dir/HEAD" ] && [ -d "$dir/objects" ]; then gitdir="$dir"
+  else return 0; fi
+  [ -n "$gitdir" ] && [ -f "$gitdir/config" ] && printf '%s\n' "$gitdir/config"
+  [ -f "$gitdir/commondir" ] || return 0
+  common="$(head -1 "$gitdir/commondir")"
+  [ -n "$common" ] || return 0
+  [ "${common#/}" = "$common" ] && common="$(cd "$gitdir" 2>/dev/null && cd "$common" 2>/dev/null && pwd)"
+  [ -n "$common" ] && [ -f "$common/config" ] && printf '%s\n' "$common/config"
+  return 0
+}
+
+# Every checkout this deployment reads: its own, the ones the operator named, and the ticket checkouts. The
+# ticket checkouts are counted one level past the ticket directory, because the ticket prompt tells a worker to
+# clone into its workspace and the clone lands at <worktrees>/<ticket>/repo/ — measured: 26 of the 29 live
+# checkouts are that shape. Stopping at <worktrees>/<ticket>/.git reports a leaking deployment clean.
+watched_checkouts() {
+  printf 'own %s\n' "$REPO_ROOT"
+  printf '%s\n' "${PI_SUPERAGENT_WATCHED_CHECKOUTS:-}" | tr ':,' '\n\n' | sed '/^$/d; s/^/own /'
+  local dir sub
+  for dir in "$WORKTREES"/*/; do
+    [ -d "$dir" ] || continue
+    if [ -e "${dir}.git" ]; then printf 'ticket %s\n' "${dir%/}"; continue; fi
+    for sub in "$dir"*/; do
+      [ -d "$sub" ] && [ -e "${sub}.git" ] && printf 'ticket %s\n' "${sub%/}"
+    done
+  done
+  return 0
+}
+
+# The router and every worker load this checkout's files as they are, so an uncommitted edit here goes live on the
+# next start, unreviewed and untested: on 2026-11-10 an edit to this script ran live and posted on the board.
+code_guard() {
+  [ -n "${ALLOW_DIRTY:-}${PI_SUPERAGENT_ALLOW_DIRTY:-}" ] && return 0
+  git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  local dirty
+  dirty="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no -- src scripts 2>/dev/null | head -5)"
+  [ -z "$dirty" ] && return 0
+  echo "the router was not started: $REPO_ROOT has uncommitted changes to the code it runs:" >&2
+  printf '%s\n' "$dirty" >&2
+  echo "commit them, or start anyway with --allow-dirty" >&2
+  return 1
+}
+
+# A worker pushes with the box's GitHub login, so a token one wrote into its own clone is removed rather than kept as a
+# reason to stay down: one leaked worker folder kept the router down 15 hours after a reboot (operator, 2026-11-15).
+# Only files under the state dir are the fleet's to edit; a ticket worktree linked to a repository elsewhere refuses.
+under_state() {
+  local dir state
+  dir="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || return 1
+  state="$(cd "$STATE" 2>/dev/null && pwd -P)" || return 1
+  case "$dir/" in "$state"/*) return 0 ;; *) return 1 ;; esac
+}
+clean_credential() {
+  local file="$1" tmp
+  tmp="$(mktemp)" || return 1
+  sed -E 's#://[^/@:[:space:]]*:[^/@[:space:]]*@#://#g; s#://(gh[pousr]_|github_pat_)[A-Za-z0-9_]+@#://#g' "$file" \
+    | { grep -vE 'gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}' || true; } > "$tmp"
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+  ! grep -qE "$CREDENTIAL_IN_URL" "$file"
+}
+git_credential_guard() {
+  local kind dir file hit bad=0 line seen=' '
+  while read -r kind dir; do
+    [ -n "$dir" ] || continue
+    while IFS= read -r file; do
+      case "$seen" in *" $file "*) continue ;; esac
+      seen="$seen$file "
+      hit="$(grep -m1 -nE "$CREDENTIAL_IN_URL" "$file" 2>/dev/null | mask_credential | cut -c1-200)"
+      [ -n "$hit" ] || continue
+      line="${hit%%:*}"
+      if [ "$kind" = ticket ] && under_state "$file" && clean_credential "$file"; then
+        printf 'superagent: removed a git credential from %s line %s (%s); workers push with the box'"'"'s GitHub login\n' "$file" "$line" "${hit#*:}" >&2
+        continue
+      fi
+      printf 'superagent: %s line %s carries a git credential in the clear, mode %s: %s\n' "$file" "$line" "$(file_mode "$file")" "${hit#*:}" >&2
+      printf '  every user on this box reads it and every `git remote -v` prints it. Fix: git -C %s remote set-url origin <the same URL with the user:token@ removed>, then supply the password from a 0600 file with a repo-local credential helper (docs/operator-guide.md).\n' "$dir" >&2
+      bad=1
+    done < <(checkout_config_files "$dir")
+  done < <(watched_checkouts)
+  return $bad
+}
+
+# The extension writes these two files; the script only reads them. A missing file is not an error: a session
+# that has not finished starting has written nothing yet, and that is code 0, not a failure. Prints "beat parts"
+# -- the tick block first, the other blocks second -- because the two faults want different remedies: a wedged
+# beat is cleared by a restart, an offline source is not. `node`, because health.json is JSON and a grep for
+# `"state": "error"` cannot say which block the line sits in.
+beat_and_parts() {
+  [ -f "$STATE/health.json" ] || { echo "0 0"; return; }
+  node -e 'const fs=require("fs");let beat=0,parts=0;try{const h=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));beat=h&&h.tick&&h.tick.state==="error"?1:0;parts=Object.keys(h||{}).filter(k=>k!=="runtime"&&k!=="tick"&&h[k]&&h[k].state==="error").length}catch{parts=1}console.log(beat,parts)' "$STATE/health.json" 2>/dev/null || echo "0 1"
+}
+# A health.json the router stopped writing is the same fault as a stalled tick, and the only form of it visible
+# when the router itself is the wedged thing: the loop that publishes this file is the loop that died, and a
+# pass blocked synchronously cannot report its own stall. 15 minutes is 30 beats at the 30 s default, generous
+# enough that one slow pass cannot fake it. A router paused on purpose keeps writing (the beat publishes a
+# paused line every interval), so stale means the process, not an intentional pause.
+stale_health() {
+  [ -f "$STATE/health.json" ] || return 1
+  [ -n "$(find "$STATE/health.json" -mmin +"${PI_SUPERAGENT_HEALTH_STALE_MIN:-15}" -print 2>/dev/null)" ]
+}
+# `node`, because the two stat dialects disagree: GNU reads `-c`, BSD reads `-f`, and a probe that picks the
+# wrong one prints filesystem info where a number belongs. The router needs node to run at all.
+health_age_min() { node -e 'const s=require("fs").statSync(process.argv[1]);console.log(Math.floor((Date.now()-s.mtimeMs)/60000))' "$STATE/health.json" 2>/dev/null || echo '?'; }
+setup_needed() { [ -f "$STATE/setup.json" ] && grep -q '"problem": *{' "$STATE/setup.json" 2>/dev/null; }
+
+start() {
+  # A deployment that stores its credential in a world-readable URL is not a deployment to bring up: the
+  # router's own workers are the readers. Refuse before herdr, the port and the tab, so the fix is the first
+  # thing the operator reads and nothing is half-started.
+  code_guard || return 1
+  git_credential_guard || { echo "the router was not started: a watched checkout keeps its git credential in the remote URL" >&2; return 1; }
+  if ! herdr_up; then
+    echo "herdr is not reachable: the router runs only in herdr, so it was not started" >&2
+    return 1
+  fi
+  if running; then
+    echo "already running: herdr agent $SESSION" >&2
+    return 1
+  fi
+  rm -f "$STOP_MARKER"
+  # The pid that bound the panel, as the running router recorded it. Read once, before the loop: a file read
+  # inside the kill loop changes shape when the process it names dies.
+  RECORDED_PANEL_PID="$(cat "$STATE/panel.pid" 2>/dev/null)"
+  export RECORDED_PANEL_PID
+  if [ -z "$SESSION_ID" ]; then
+    [ -f "$STATE/session-id" ] || uuidgen | tr 'A-Z' 'a-z' > "$STATE/session-id"
+    SESSION_ID="$(cat "$STATE/session-id")"
+  fi
+  # A router that outlived its session may still hold the panel's port. Free it (SIGTERM, then SIGKILL
+  # after 5 s) so the new panel binds where people look for it; workers never hold the port.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    nc -z 127.0.0.1 "$PANEL_PORT" 2>/dev/null || break
+    # Listeners only, and `-a` is load-bearing: without it lsof ORs the port match with the state match and
+    # answers with every listening socket on the box. Clients are not the panel — measured 2026-11-09, a client
+    # connected to the panel made `start` refuse with "belongs to a process that is not this router".
+    for pid in $(lsof -nP -a -ti "tcp:${PANEL_PORT}" -sTCP:LISTEN 2>/dev/null); do
+      # Ours by two proofs, and the second is deliberately the narrowest question there is: the environment names
+      # the state directory this router serves, or this exact pid is the one the router wrote when it bound the
+      # panel. The environment is unreadable on macOS for a router, which rewrites its process title — that is
+      # what made `restart` refuse to start our own fleet. A client of the panel is never the recorded pid,
+      # because the pid belongs to the process that bound the socket, not to anyone connected to it.
+      if ! ps eww -p "$pid" -o command= 2>/dev/null | grep -qF "PI_SUPERAGENT_STATE=$STATE" \
+        && [ "${RECORDED_PANEL_PID:-}" != "$pid" ]; then
+        echo "superagent: port $PANEL_PORT belongs to a process that is not this router (pid $pid: $(ps -p "$pid" -o command= 2>/dev/null | cut -c1-60)); move it, or set PI_SUPERAGENT_PANEL_PORT" >&2
+        return 1
+      fi
+      kill "$pid" 2>/dev/null || true
+      [ "${_}" -gt 10 ] && kill -9 "$pid" 2>/dev/null || true
+    done
+    sleep 0.5
+  done
+  if nc -z 127.0.0.1 "$PANEL_PORT" 2>/dev/null; then
+    # Name the port and the pid(s) holding it: "pid(s): 4242" reads as "something else on this box owns it",
+    # where "refusing to start" alone reads as "the commit broke the start script".
+    echo "superagent: port $PANEL_PORT is still busy after 10s (pid(s): $(lsof -ti "tcp:${PANEL_PORT}" 2>/dev/null | tr '\n' ' ')); refusing to start a session pi would crash on. Move it with PI_SUPERAGENT_PANEL_PORT." >&2
+    lsof -nP -i "tcp:${PANEL_PORT}" >&2 || true
+    return 1
+  fi
+  local ws; ws="$(workspace_id)"
+  if [ -z "$ws" ]; then
+    local made; made="$("$HERDR_BIN" workspace create --label "$WORKSPACE_LABEL" --cwd "$STATE" --no-focus)" || return 1
+    ws="$(printf '%s' "$made" | field result workspace workspace_id)"
+    "$HERDR_BIN" tab rename "$(printf '%s' "$made" | field result tab tab_id)" "engine log" >/dev/null 2>&1 || true
+    "$HERDR_BIN" pane run "$(printf '%s' "$made" | field result root_pane pane_id)" "tail -n 40 -F $(sh_quote "$STATE/engine.log")" >/dev/null 2>&1 || true
+  fi
+  local env=(
+    --env PI_SUPERAGENT_ROLE=router --env "PI_SUPERAGENT_STATE=$STATE"
+    --env "PI_SUPERAGENT_WORKTREES=$WORKTREES" --env "PI_SUPERAGENT_PANEL_PORT=$PANEL_PORT"
+    --env "PI_SUPERAGENT_SESSION_ID=$SESSION_ID"
+    --env "PI_SUPERAGENT_HERDR_BIN=$HERDR_BIN" --env "PI_SUPERAGENT_HERDR_WORKSPACE=$WORKSPACE_LABEL"
+  )
+  # herdr starts the tab from its own environment, not this one: a setting reaches the router only by name.
+  local key
+  # Every setting reaches the router by name, so a knob added to config.env works the day it is written;
+  # the old fixed list is how a documented setting silently did nothing.
+  local name
+  while IFS= read -r name; do
+    [ -n "${!name:-}" ] && env+=(--env "$name=${!name}")
+  done < <(compgen -v PI_SUPERAGENT_ | grep -vE '^PI_SUPERAGENT_(ROLE|STATE|WORKTREES|PANEL_PORT|SESSION_ID|HERDR_BIN|HERDR_WORKSPACE)$')
+  local tab; tab="$("$HERDR_BIN" tab create --workspace "$ws" --cwd "$STATE" --label engine "${env[@]}" --no-focus)" || return 1
+  local pane_id tab_id
+  pane_id="$(printf '%s' "$tab" | field result root_pane pane_id)"
+  tab_id="$(printf '%s' "$tab" | field result tab tab_id)"
+  printf 'pane=%s\ntab=%s\nworkspace=%s\n' "$pane_id" "$tab_id" "$ws" > "$ROUTER_PLACE"
+  local out tries=0
+  # A new tab's shell takes a moment to reach its prompt, and herdr starts an agent only at a prompt.
+  until out="$("$HERDR_BIN" agent start "$SESSION" --kind pi --pane "$pane_id" --timeout 120000 -- --session-id "$SESSION_ID" 2>&1)"; do
+    if printf '%s' "$out" | grep -q agent_pane_busy && [ "$tries" -lt 30 ]; then tries=$((tries+1)); sleep 1; continue; fi
+    # Waiting on a startup prompt is a router that exists: the operator answers it in its tab.
+    if printf '%s' "$out" | grep -q agent_not_ready; then
+      echo "the router is waiting on a prompt in its herdr tab ($tab_id)" >&2
+      break
+    fi
+    echo "the router did not start in herdr: $out" >&2
+    "$HERDR_BIN" tab close "$tab_id" >/dev/null 2>&1 || true
+    return 1
+  done
+  local waited=0
+  while [ "$waited" -lt "$READY_WAIT" ]; do
+    running || { echo "the router left its herdr tab during startup ($tab_id)" >&2; return 1; }
+    [ -f "$STATE/ready" ] && break
+    sleep 1; waited=$((waited+1))
+  done
+  # 0 means running AND healthy, and the scheduled check acts on that: a session that exists and never
+  # reported ready is code 1, so the check restarts it instead of admiring a herdr tab forever.
+  if [ ! -f "$STATE/ready" ]; then
+    echo "the router did not report ready within ${waited}s (herdr tab $tab_id)" >&2
+    return 1
+  fi
+  status
+}
+
+stop() {
+  running || { echo "not running"; rm -f "$STOP_MARKER"; return 0; }
+  : > "$STOP_MARKER"
+  # esc ends a running turn; in pi, ctrl+c clears the editor and a second ctrl+c exits.
+  "$HERDR_BIN" agent send-keys "$SESSION" esc >/dev/null 2>&1
+  "$HERDR_BIN" agent send-keys "$SESSION" ctrl+c ctrl+c >/dev/null 2>&1
+  local waited=0
+  while running && [ "$waited" -lt "$GRACE" ]; do sleep 1; waited=$((waited+1)); done
+  local tab_id; tab_id="$(place tab)"
+  if running; then
+    # Workers are their own pi sessions in herdr and survive this; only the router's tab goes.
+    echo "the router did not exit in ${GRACE}s; closing its herdr tab" >&2
+  fi
+  [ -n "$tab_id" ] && "$HERDR_BIN" tab close "$tab_id" >/dev/null 2>&1
+  rm -f "$ROUTER_PLACE"
+  echo "stopped after ${waited}s"
+}
+
+status() {
+  if ! running; then
+    if [ -f "$STOP_MARKER" ]; then echo "stopped by request (manual stop marker present)"; return 0; fi
+    herdr_up || { echo "not running: herdr is not reachable" >&2; return 1; }
+    echo "not running: superagent start"; return 1
+  fi
+  if setup_needed; then
+    echo "running, waiting for setup: $(tr -d '\n' < "$STATE/setup.json" | cut -c1-200)" >&2
+    return 3
+  fi
+  local bp beat parts
+  bp="$(beat_and_parts)"; beat="${bp% *}"; parts="${bp#* }"
+  # Code 2 is the stall in both of its forms: the beat's own block says it, and a health.json nobody rewrote
+  # is the same fault seen from outside -- the loop that publishes the file is the loop that died, and a
+  # router wedged inside a pass cannot report its own stall. Both are code 2 because a restart fixes both.
+  if stale_health; then
+    echo "running and not beating: health.json is $(health_age_min) min old: the tick loop that writes it is not running; $(tr -d '\n' < "$STATE/health.json" | cut -c1-200)" >&2
+    return 2
+  fi
+  if [ "${beat:-0}" -gt 0 ]; then
+    echo "running and not beating: $(tr -d '\n' < "$STATE/health.json" | cut -c1-200)" >&2
+    return 2
+  fi
+  if [ "${parts:-0}" -gt 0 ]; then
+    echo "running with ${parts} failing part(s): $(tr -d '\n' < "$STATE/health.json" | cut -c1-200)" >&2
+    return 4
+  fi
+  echo "running: herdr agent $SESSION in workspace $WORKSPACE_LABEL, state $STATE"
+}
+
+# A restart is mechanical, and `stop` writes the manual-stop marker as a matter of record. A start that then
+# fails would leave the box reading as "the operator stopped this on purpose", which silences the health check
+# over a router that is simply down -- so the marker a restart's own stop wrote is taken back before it starts.
+restart_router() {
+  local was_manual=0
+  [ -f "$STOP_MARKER" ] && was_manual=1
+  stop
+  [ "$was_manual" -eq 0 ] && rm -f "$STOP_MARKER"
+  start
+}
+
+# The remedy for a stall, and the only one: `start` refuses a router that is running, so a health job built on
+# `status || start` printed "already running" every five minutes forever over a router that was up and not
+# beating. A restart costs the router's tab and nothing else -- the workers are their own herdr sessions and the
+# new router adopts them -- so it is allowed here, once per cooldown, so a fault a restart cannot fix cannot
+# restart the router for the rest of the day.
+restart_on_stall() {
+  local why="$1" now last
+  now="$(date +%s)"
+  last="$(cat "$RESTART_MARKER" 2>/dev/null || true)"
+  if [ -n "$last" ] && [ $(( now - ${last:-0} )) -lt $(( RESTART_COOLDOWN_MIN * 60 )) ] 2>/dev/null; then
+    echo "health: $why; restart suppressed, the last one was $(( (now - last) / 60 )) min ago (cooldown ${RESTART_COOLDOWN_MIN} min)"
+    return 0
+  fi
+  printf '%s\n' "$now" > "$RESTART_MARKER"   # before the restart: one that hangs cannot invite another
+  echo "health: $why; restarting the router"
+  restart_router
+  remedy_report
+}
+
+# A remedy exits with the status code the router reports AFTER the remedy, so the job's own exit code reads as
+# the state it left behind: 0 is recovered, 1 is a remedy that did not bring the router back. Code 2 can appear
+# here on the pass that restarted the router, because the new router has not written its first health.json yet
+# and this job runs every 300 s: the next pass reads 0, and the cooldown keeps this pass from restarting twice.
+remedy_report() {
+  local out rc
+  out="$(status 2>&1)"; rc=$?
+  echo "health: after the remedy: $out"
+  return "$rc"
+}
+
+# remedy is what the scheduled health job runs: read the contract, apply the remedy, say what was done. A
+# deliberate stop is always respected here, flag or no flag: this is the automated caller, and a manual stop
+# stays manual until a person starts the router again.
+remedy() {
+  if [ -f "$STOP_MARKER" ]; then echo "health: manual stop marker present, leaving the router stopped"; return 0; fi
+  local out rc
+  out="$(status 2>&1)"; rc=$?
+  case "$rc" in
+    0) # A healthy beat ends the cooldown. A loop that dies in the boot right after a watchdog restart used to
+       # lock the remedy out for the full cooldown: the 2026-11-11 outage lasted 25 min for exactly that reason.
+       rm -f "$RESTART_MARKER"
+       echo "health: $out; nothing to do" ;;
+    1) echo "health: $out; starting the router"; start; remedy_report ;;
+    2) restart_on_stall "$out" ;;
+    *) echo "health: $out; nothing to do, a restart will not fix it" ;;
+  esac
+}
+
+
+# Stop ONE ticket from the command line. The panel already had this lever and the engine always did; the
+# operator's shell did not, so a duplicate worker on a live job could not be retired without opening a browser.
+# The reason goes to the ticket record, because a stop with no reason is a mystery for the next reader.
+stop_ticket() {
+  local id="${1:-}" reason; shift || true
+  reason="$*"
+  [ -n "$id" ] || { echo "usage: superagent stop-ticket <ticket-id> [reason]"; return 2; }
+  [ -n "$reason" ] || reason="stopped from the command line by $(id -un)"
+  local port token
+  port="$(cat "$STATE/panel.port" 2>/dev/null)"
+  token="$(cat "$STATE/panel-token" 2>/dev/null)"
+  if [ -z "$port" ] || [ -z "$token" ]; then
+    echo "stop-ticket: no panel to ask (run 'superagent start' with a panelPort, and the port lands in $STATE/panel.port)"; return 1
+  fi
+  local out
+  out="$(curl -sS -m 15 -X POST -H "x-superagent-request: 1" -H "x-superagent-token: $token" -H 'content-type: application/json' \
+    --data "$(python3 -c 'import json,sys; print(json.dumps({"reason": sys.argv[1]}))' "$reason")" \
+    "http://127.0.0.1:$port/api/tickets/$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$id")/stop" 2>&1)"
+  echo "$out"
+  case "$out" in *'"stopped"'*) return 0 ;; *) return 1 ;; esac
+}
+
+# One sqlite-safe copy of the engine's memory per day, kept in the state directory's archive. A box that dies
+# with the disk takes the queue, the seen set and the outbox with it; a fresh clone of the repo rebuilds the code
+# in a minute, and this file is the only copy of what the fleet was doing.
+backup() {
+  local db="$STATE/tickets.db" day dest
+  [ -f "$db" ] || { echo "backup: no $db, nothing to back up"; return 0; }
+  day="$(date -u +%Y%m%d)"; dest="$STATE/archive/tickets-$day.db"
+  mkdir -p "$STATE/archive"
+  if [ -f "$dest" ]; then echo "backup: today's copy exists: $dest"; return 0; fi
+  if ! python3 - "$db" "$dest" <<'PYEOF'
+import sqlite3, sys
+src, dest = sys.argv[1], sys.argv[2]
+dst = sqlite3.connect(dest)
+sqlite3.connect(src, uri=True).backup(dst)
+ok = dst.execute("pragma integrity_check").fetchone()[0]
+dst.close()
+sys.exit(0 if ok == "ok" else 1)
+PYEOF
+  then rm -f "$dest"; echo "backup: the copy failed its integrity check, keeping only the last good one" >&2; return 1; fi
+  ls -1t "$STATE"/archive/tickets-*.db 2>/dev/null | tail -n +15 | while read -r old; do rm -f "$old"; done
+  echo "backup: wrote $dest ($(du -h "$dest" | cut -f1))"
+}
+
+case "${CMD:-status}" in
+  start)
+    if [ -n "${RESPECT_STOP:-}" ] && [ -f "$STOP_MARKER" ]; then echo "left stopped: manual stop marker present"; exit 0; fi
+    start ;;
+  stop) stop ;;
+  stop-ticket) stop_ticket "$ST_ID" "$ST_REASON" ;;
+  restart)
+    if [ -n "${RESPECT_STOP:-}" ] && [ -f "$STOP_MARKER" ]; then echo "left stopped: manual stop marker present"; exit 0; fi
+    restart_router ;;
+  status) status ;;
+  remedy) remedy ;;
+  backup) backup ;;
+  *) usage >&2; exit 2 ;;
+esac

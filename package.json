@@ -1,0 +1,73 @@
+{
+  "name": "pi-superagent",
+  "version": "0.2.0",
+  "description": "Open a GitHub issue; a pi worker does the work and replies there. The dsh-superagent ticket engine bound to pi, herdr, GitHub and SQLite.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kmatzen/pi-superagent.git"
+  },
+  "homepage": "https://github.com/kmatzen/pi-superagent#readme",
+  "bugs": {
+    "url": "https://github.com/kmatzen/pi-superagent/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "src/core/index.ts",
+  "exports": {
+    ".": "./src/core/index.ts",
+    "./pi": "./src/pi/extension.ts"
+  },
+  "bin": {
+    "superagent": "./scripts/superagent"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test",
+    "check:packed": "scripts/check-packed",
+    "prepublishOnly": "npm run check && npm run check:packed"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.0.0"
+  },
+  "files": [
+    "src",
+    "scripts/superagent",
+    "docs",
+    "formal",
+    "launchd",
+    "config.example.env",
+    "README.md",
+    "ADAPTATION.md",
+    "NOTICE",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "github-issues",
+    "coding-agent",
+    "agents",
+    "orchestration",
+    "herdr"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/pi/extension.ts"
+    ]
+  }
+}
