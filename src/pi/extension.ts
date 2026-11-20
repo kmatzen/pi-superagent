@@ -14,7 +14,7 @@ import { SqliteRepositories } from './store.ts'
 import {GithubSource, PRIORITY_GRANTS_PER_POLL, REPLY_MARKER, WON_SLOT_KEY, wonSlotReason, type GithubApi, type IssueState} from './source-github.ts'
 import { ghApi, ghCall, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
-import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type PullRef, type PullState, type ReconcileReport } from './pulls.ts'
+import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, wakeOnChecks, type ChecksState, type CheckWakePorts, type PullApi, type PullRef, type PullState, type ReconcileReport } from './pulls.ts'
 import { PullTracker } from './tracker.ts'
 import { CommentOutbox } from './outbox.ts'
 import { IssueCloser } from './issue-closer.ts'
@@ -498,6 +498,65 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // at a set time, and the router keeps that appointment without a session or a slot held in between.
   const WAKES = 'router:wakes'
   const wakes = (): Record<string, { at: string; note: string }> => repos.kv.get<Record<string, { at: string; note: string }>>(WAKES) ?? {}
+
+  // agent-inbox#667: the event that replaces the timer above. A worker that reported `waiting` scheduled a check at
+  // HH:MM; when the router already knows that outcome it calls the worker back now and spends the timer — 82 of 155
+  // status reports in one 24 h window were a session spent re-reading a check that had finished an hour earlier.
+  // The rules are `wakeOnChecks` in pulls.ts; this is its ports: the wake table, the fired journal, the recruit.
+  const CHECK_EVENTS = 'router:check-wakes'
+  const firedChecks = (): Record<string, string> => repos.kv.get<Record<string, string>>(CHECK_EVENTS) ?? {}
+  const checkWakePorts: CheckWakePorts = {
+    scheduled: ticketId => wakes()[ticketId]?.at,
+    spend: ticketId => {
+      const rows = wakes()
+      delete rows[ticketId]
+      repos.kv.set(WAKES, rows)
+    },
+    fired: (ticketId, sha, reason) => Boolean(firedChecks()[`${ticketId}:${sha}:${reason}`]),
+    mark: (ticketId, sha, reason) => {
+      const fired = firedChecks()
+      fired[`${ticketId}:${sha}:${reason}`] = deps.now ? deps.now() : new Date().toISOString()
+      // Without a bound this journal of every head SHA ever settled grows for the life of the database.
+      for (const stale of Object.keys(fired).sort().slice(0, Math.max(0, Object.keys(fired).length - 500))) delete fired[stale]
+      repos.kv.set(CHECK_EVENTS, fired)
+    },
+    recruit: (ticket, pull, checks, reason, scheduledAt) => {
+      const channel = ticket.channels[0]
+      if (!channel) return
+      const short = checks.sha.slice(0, 10)
+      const command = `gh pr checks --repo ${pull.repo} ${pull.number}`
+      const news = reason === 'checks_failed'
+        ? `The checks on ${pullUrl(pull)} finished FAILED at head ${short}. Read them with \`${command}\`, fix what they name, push, and report.`
+        : `The checks on ${pullUrl(pull)} finished PASSED at head ${short}, and auto-merge is not armed, so a person has `
+          + 'to merge it. Report the result, or make the follow-on change the pull request needs.'
+      const note = wakes()[ticket.id]?.note ?? ''
+      engine.receive({
+        id: `wake:${ticket.id}:checks:${checks.sha}:${reason}`, source: channel.source,
+        threads: [{ source: channel.source, id: channel.thread }],
+        actor: { source: channel.source, id: 'router' }, human: true,
+        at: deps.now ? deps.now() : new Date().toISOString(),
+        text: `Event, not a timer: ${news}\n\nThe last worker on this ticket asked for a check at ${scheduledAt.slice(11, 16)} UTC, and said:\n\n${note}`,
+        channel, meta: { via: 'checks', author: '' },
+      })
+    },
+    log: (ticketId, reason, url) => log.line('info', 'wake.event', { ticket: ticketId, reason, url }),
+  }
+  // A worker that reports `waiting` after its CI already went red must not wait for its own timer: the outcome sits
+  // in the states the last pull read left behind, so the wake fires the moment the timer is scheduled.
+  const wakeFromKnownChecks = (ticketId: string): void => {
+    const ticket = repos.tickets.get(ticketId)
+    if (!ticket || ticket.ended) return
+    for (const follow of ticket.follows ?? []) {
+      if (follow.closed || !follow.thread.startsWith('github:')) continue
+      const id = follow.thread.slice('github:'.length)
+      const state = pullStates.get(id)
+      const checks = state?.checks
+      const pull = parseThread(id, home)
+      if (!checks || !pull || checks.state === 'pending' || checks.state === 'none') continue
+      wakeOnChecks([ticket], { source: 'github', id }, pull, checks, state, checkWakePorts)
+      return
+    }
+  }
   const scheduleWake = (ticketId: string, run: ReportedRun): void => {
     const rows = wakes()
     if (!run.wakeAt && !rows[ticketId]) return
@@ -505,6 +564,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     else delete rows[ticketId]
     repos.kv.set(WAKES, rows)
     log.line('info', run.wakeAt ? 'wake.scheduled' : 'wake.cleared', { ticket: ticketId, ...(run.wakeAt ? { at: run.wakeAt } : {}) })
+    if (run.wakeAt) wakeFromKnownChecks(ticketId)
   }
   const fireWakes = (): void => {
     const rows = wakes()
@@ -582,7 +642,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const author = String(trigger.meta?.author ?? trigger.actor?.id ?? '')
       if (author && isListed(author, new Set([cfg.githubSelf ?? cfg.self, ...(cfg.bots ?? [])]))) return false
       // 'label' is how a grant was spelled by triggers stored before the labels were deleted (2026-11-11).
-      return !['grant', 'label'].includes(String(trigger.meta?.via ?? 'comment'))
+      // 'checks' is this router's own event wake, not speech: a red build must not renew the ticket's licence to recruit.
+      return !['grant', 'label', 'checks'].includes(String(trigger.meta?.via ?? 'comment'))
     })
   const capRepeats = (ticket: Ticket, run: ReportedRun): void => {
     const cap = cfg.reportCap ?? 3
@@ -672,6 +733,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       pullStates.set(thread.id, after)
       for (const stale of [...pullStates.keys()].slice(0, Math.max(0, pullStates.size - 500))) pullStates.delete(stale)
       repos.kv.set(PULL_STATES, Object.fromEntries(pullStates))
+    },
+    // Remembered for the schedule-time wake above, and handed to every ticket that follows this thread and asked for a check.
+    checksSettled: (thread, pull, checks, state) => {
+      const before = pullStates.get(thread.id)
+      pullStates.delete(thread.id)
+      pullStates.set(thread.id, { ...before, ...state, checks })
+      for (const stale of [...pullStates.keys()].slice(0, Math.max(0, pullStates.size - 500))) pullStates.delete(stale)
+      repos.kv.set(PULL_STATES, Object.fromEntries(pullStates))
+      wakeOnChecks(repos.tickets.open(), thread, pull, checks, state, checkWakePorts)
     },
     closed: (thread, pull, outcome, at, state) => {
       const key = `github:${thread.id}`
