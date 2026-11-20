@@ -102,7 +102,7 @@ describe('ghApi', () => {
     }]))
     expect(await ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [] }).issues('open')).toEqual([
       { issue: 3, title: 'DO: the thing', body: '', author: 'octocat', association: 'OWNER',
-        createdAt: '2026-11-05T09:00:00Z', updatedAt: '2026-11-05T10:00:00Z' },
+        createdAt: '2026-11-05T09:00:00Z', updatedAt: '2026-11-05T10:00:00Z', labels: ['agent-ready'] },
     ])
   })
 
@@ -113,7 +113,7 @@ describe('ghApi', () => {
     ]))
     expect(await ghApi({ repo: 'o/r', bin: gh.bin, followed: () => [] }).issues('open')).toEqual([
       { issue: 3, title: 'DO: x', body: 'the details', author: 'octocat', association: 'NONE',
-        createdAt: '2026-11-05T09:00:00Z', updatedAt: '2026-11-05T10:00:00Z' },
+        createdAt: '2026-11-05T09:00:00Z', updatedAt: '2026-11-05T10:00:00Z', labels: [] },
     ])
   })
 
