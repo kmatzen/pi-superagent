@@ -236,6 +236,18 @@ instructions ask them to limit parallel jobs and clean up any processes they sta
 goes quiet for 15 minutes, it appears under *Needs a person* on the panel. A long build can be
 quiet, too. Take a look in the tab before interrupting it.
 
+Label an open issue `priority:high` to put it in the next free slot. Queue order is priority
+first, then oldest updated, and one priority launch per poll, because 38 pending tickets sharing
+4 slots starves just as well in a priority lane that takes them all. The label never bypasses the
+worker cap: it ranks the queue, it does not add a worker, and the daily relaunch cap stays two per
+thread. Every grant line in `engine.log` names the lane that won — `wonSlot: priority`,
+`wonSlot: oldest-starved` (queue win by age) or `wonSlot: unanswered` (the thread has operator
+input no worker delivered) — and the panel's ticket row repeats it under *wonSlot*. Measured
+2026-11-19, the reason the label exists: parking four tickets freed all four slots, and the router
+refilled them in 45 seconds with the oldest asks. Parking is not a stop either, so answer or
+withdraw the replies on a thread you want to keep parked: a parked thread with unanswered operator
+input re-earns a worker up to twice a day, labelled or not.
+
 ## When something goes wrong
 
 **No acknowledgement after a few minutes.** Run `superagent status`, then inspect the most recent

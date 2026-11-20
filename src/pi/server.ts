@@ -6,6 +6,7 @@ import type { SqliteRepositories } from './store.ts'
 import type { SessionAssessor } from './assessor.ts'
 import type { RouterConfig } from './router.ts'
 import { threadUrl } from './pulls.ts'
+import { WON_SLOT_KEY } from './source-github.ts'
 
 export interface PanelSource {
   repos: SqliteRepositories
@@ -64,7 +65,7 @@ export function readModel(src: PanelSource) {
     health: src.health(),
     load: src.load(),
     needsPerson: open.filter(t => t.attention).map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', question: (t.attention as { question?: string }).question ?? '', at: t.assignments.at(-1)?.report?.at ?? '', url: issueUrl(t, src.config.githubRepo) })),
-    open: open.map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', state: t.assignments.at(-1)?.state ?? 'queued', waitsFor: waitingOn(t),
+    open: open.map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', state: t.assignments.at(-1)?.state ?? 'queued', wonSlot: (src.repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {})[t.channels[0]?.thread ?? ''] ?? '', waitsFor: waitingOn(t),
       issue: t.channels[0]?.source === 'github' ? t.channels[0].thread : '', url: issueUrl(t, src.config.githubRepo),
       worker: (() => { const w = src.workers().find(w => w.ticketId === t.id); return w ? `${w.busy === false ? 'parked · ' : ''}watch ${w.watch || w.workspace} · ${w.events} events · quiet ${w.quietSeconds}s` : '' })() })),
     workers: src.workers(),
@@ -118,7 +119,7 @@ export function renderPanel(m: Model): string {
 <p class="count">Waiting on a judgement: ${m.waitingAssessment.length}</p></section>
 <section id="eval"><h2>Eval <span class="count">(${m.counts.decisions24h} in 24 h)</span></h2>${rows(m.recentDecisions, ['at', 'kind', 'reason', 'rules', 'ticket'])}</section>
 <section id="execution"><h2>Execution <span class="count">(${m.open.length} open, ${m.load.running}/${m.load.maxWorkers} working, ${m.load.parked} parked, ${m.load.queued} queued)</span></h2>
-${rows(m.open, ['thread', 'title', 'state', 'waitsFor', 'worker'])}
+${rows(m.open, ['thread', 'title', 'state', 'wonSlot', 'waitsFor', 'worker'])}
 <h2>Ended</h2>${rows(m.ended, ['id', 'title', 'outcome', 'at'])}</section>
 <section id="settings"><h2>Settings</h2><p class="count">policy ${esc(m.policy.version)} · paused=${m.paused} · state ${esc(process.env.PI_SUPERAGENT_STATE ?? '')}</p>
 <p class="muted">Settings live in config.env in the state directory; restart to apply them. POST /api/executor/pause pauses processing.</p></section>`)
