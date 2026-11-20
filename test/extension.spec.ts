@@ -2520,6 +2520,36 @@ describe('the tick keeps its cadence', () => {
     release()
   }, 30_000)
 
+  it('the label that won the slot says so, and the lane passes the queue that is already waiting', async () => {
+    // agent-inbox#660: the launch lane is the operator's lever, so it has to be visible in the log and beat
+    // the ask that queued first. Measured on the box 2026-11-20 09:53: six labelled threads sat behind 27
+    // queued launches with all six slots busy, and every free slot went to the oldest by arrival order.
+    const feed: { issues: IssueState[]; comments: IssueComment[] } = { issues: [], comments: [] }
+    const ask = (n: string, labels: string[] = []) => {
+      feed.issues.push({ issue: Number(n), title: 'DO: the thing', author: 'pi-superagent', labels,
+        association: 'OWNER', createdAt: '2026-11-04T09:00:00Z', updatedAt: '2026-11-05T09:00:00Z' })
+      feed.comments.push({ issue: Number(n), author: 'octocat', association: 'OWNER', at: '2026-11-05T09:00:00Z', body: `do the thing ${n}` })
+    }
+    const f = fixture(true, undefined, undefined, undefined, {
+      tickMs: 5, maxConcurrent: 1,
+      githubApi: { issues: async () => [...feed.issues], comments: async () => [...feed.comments], postComment: async () => {} },
+    })
+    for (const [n, labels] of [['541', []], ['542', []], ['543', ['priority:high']]] as Array<[string, string[]]>) {
+      ask(n, labels)
+      await f.running.tick()
+      f.decide('accept')
+      await f.running.tick()
+    }
+    expect(f.workers.length, 'one slot, so the two later launches wait for it').toBe(1)
+    expect(f.running.load().queued).toBe(2)
+    f.workers[0]!.report!({ state: 'ready', summary: 'did the thing' })
+    await until(() => f.workers.length === 2, 3_000)
+    expect(f.workers[1]!.prompts.join('\n'), 'the flagged ask took the freed slot, not the ask that queued first').toContain('543')
+    const trail = trailOf(f.dir)
+    expect(trail, 'and the win names its lane').toMatch(/launch\.granted ticket=\S+ thread=#543 lane=priority wonSlot=priority/)
+    expect(trail).toMatch(/launch\.granted ticket=\S+ thread=#541 lane=queue wonSlot=oldest-starved/)
+  }, 30_000)
+
   it('a pass that never finishes is abandoned, and the beat survives it', async () => {
     let release!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })

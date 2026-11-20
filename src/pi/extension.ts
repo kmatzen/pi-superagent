@@ -11,7 +11,7 @@ const runGit = promisify(execFile)
 import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type ThreadRef, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
-import {GithubSource, REPLY_MARKER, type GithubApi, type IssueState} from './source-github.ts'
+import {GithubSource, PRIORITY_GRANTS_PER_POLL, REPLY_MARKER, WON_SLOT_KEY, wonSlotReason, type GithubApi, type IssueState} from './source-github.ts'
 import { ghApi, ghCall, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type PullRef, type PullState, type ReconcileReport } from './pulls.ts'
@@ -273,7 +273,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         onOpen: (open) => { openBoard = open },
         // The standing queue, given its launch back: the source offers every open issue that is not an ask to
         // the operator, this decides whether the work qualifies, and the counter decides how often.
-        regrant: (issue, key) => {
+        regrant: (issue, key, priority = false) => {
           const onThread = (t: Ticket): boolean => t.channels[0]?.thread === key
           const ask = repos.tickets.open().find(onThread)
           // A new issue's request sits with the judge for a poll or two, and granting it then spent the day's cap.
@@ -283,7 +283,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
           const next = regrantPlan(repos.kv.get<RegrantCounters>(REGRANT_KEY), key, day)
           if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day }); return false }
           repos.kv.set(REGRANT_KEY, next)
-          log.line('info', 'regrant.granted', { thread: key, issue, ticket: ask?.id, day })
+          const wonSlot = wonSlotReason(priority, (ask?.undelivered.length ?? 0) > 0)
+          repos.kv.set(WON_SLOT_KEY, { ...(repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {}), [key]: wonSlot })
+          log.line('info', 'regrant.granted', { thread: key, issue, ticket: ask?.id, day, wonSlot })
           return ask?.assignments.at(-1)?.id ?? `${day}.${next.perIssue[key]}`
         },
       }, repos.kv)
@@ -865,6 +867,16 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     },
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
     launchBlocked: () => diskCritical,
+    // The label is the operator saying "this one next", and it rides the poll's own board read: no new GitHub request.
+    priorityOf: ticket => github?.isPriority(ticket.channels[0]?.thread ?? '') === true,
+    priorityPerTick: PRIORITY_GRANTS_PER_POLL,
+    laneWon: (ticket, _assignment, lane) => {
+      const key = ticket.channels[0]?.thread ?? ''
+      const wonSlot = wonSlotReason(lane === 'priority',
+        (repos.tickets.open().find(t => t.id === ticket.id)?.undelivered.length ?? 0) > 0)
+      repos.kv.set(WON_SLOT_KEY, { ...(repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {}), [key]: wonSlot })
+      log.line('info', 'launch.granted', { ticket: ticket.id, thread: key, lane, wonSlot })
+    },
   })
   executorRef = executor
 

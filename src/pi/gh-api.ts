@@ -146,7 +146,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
 
     async issues(state) {
       // GitHub pages at 100; an unpaginated read hides every issue past the newest page, forever.
-      const rows: Array<{ number: number; title: string; body?: string | null; user?: { login: string }; author_association?: string; created_at: string; updated_at: string; pull_request?: unknown }> = []
+      const rows: Array<{ number: number; title: string; body?: string | null; user?: { login: string }; author_association?: string; created_at: string; updated_at: string; pull_request?: unknown; labels?: Array<{ name?: string }> }> = []
       for (let page = 1; ; page += 1) {
         const got = JSON.parse((await call(['api', `repos/${options.repo}/issues?state=${state}&per_page=100&page=${page}`])) || '[]')
         rows.push(...got)
@@ -156,6 +156,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       return rows.filter(r => !r.pull_request).map(r => ({
         issue: r.number, title: r.title, body: r.body ?? '',
         author: r.user?.login ?? 'anonymous', association: associationOf(r), createdAt: r.created_at, updatedAt: r.updated_at,
+        labels: (r.labels ?? []).map(l => l.name ?? '').filter(Boolean),
       }))
     },
 
