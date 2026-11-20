@@ -21,7 +21,27 @@ export interface IssueState {
   association: string
   createdAt: string
   updatedAt: string
+  /** Labels as GitHub spells them. Only `PRIORITY_LABEL` is read: the 2026-11-10 ruling deleted every other label. */
+  labels?: string[]
 }
+
+/** The one label the router obeys: the operator put this issue in the next free worker slot. */
+export const PRIORITY_LABEL = 'priority:high'
+/** One priority launch per pass: 38 pending tickets share 4 slots, and a priority lane that takes them all is a new starvation. */
+export const PRIORITY_GRANTS_PER_POLL = 1
+type WonSlot = 'priority' | 'unanswered' | 'oldest-starved'
+/** Why a thread took the slot, named for the operator: the label wins (`priority`); in the standing queue a
+ *  thread with undelivered operator input is the parked-thread relaunch (`unanswered`, measured 2026-11-19:
+ *  #593 relaunched on undelivered replies), and a plain win by age is `oldest-starved`. The names report the
+ *  ranking — label first, then oldest updated — they never change it. */
+export const wonSlotReason = (priority: boolean, hasUndeliveredInput: boolean): WonSlot =>
+  priority ? 'priority' : hasUndeliveredInput ? 'unanswered' : 'oldest-starved'
+/** kv key: thread key → the reason it last won a slot, so the panel row can say it after the log scrolled. */
+export const WON_SLOT_KEY = 'router:wonslot'
+const priorityOf = (issue: IssueState): boolean => !!issue.labels?.includes(PRIORITY_LABEL)
+export const byPriorityThenOldest = (issues: readonly IssueState[]): IssueState[] =>
+  [...issues].sort((a, b) =>
+    (Number(priorityOf(b)) - Number(priorityOf(a))) || a.updatedAt.localeCompare(b.updatedAt))
 
 export interface GithubApi {
   comments(since?: string): Promise<IssueComment[]>
@@ -65,8 +85,9 @@ export interface GithubSourceOptions {
    * on it, is work. The router answers yes within a cap and says no after it, and the counter lives in the
    * router's store. No label marks it: labels are gone (operator, 2026-11-10, "These labels are obsolete").
    * A string names the grant: trigger ids are kept forever, so a second grant of an untouched issue needs a new name.
+   * `priority` says the issue carries `PRIORITY_LABEL`, so the router can log why that thread won the slot.
    */
-  regrant?: (issue: number, key: string) => boolean | string
+  regrant?: (issue: number, key: string, priority?: boolean) => boolean | string
   /** The open board on every poll: the router publishes how much open work waits for a slot, and nobody
    *  downstream may re-read GitHub to find out. */
   onOpen?: (open: readonly IssueState[]) => void
@@ -185,7 +206,9 @@ export class GithubSource {
       const state = misses > MISSING_POLLS ? 'closed' : this.api.issueState ? await this.api.issueState(Number(key.slice(1))) : 'closed'
       if (state === 'closed') { seen.delete(key); this.missing.delete(key) } else this.missing.set(key, misses)
     }
-    for (const issue of open) {
+    // Queue order, not listing order: a free slot goes to `priority:high` first, then to the oldest ask.
+    let priorityGrants = 0
+    for (const issue of byPriorityThenOldest(open)) {
       const key = `#${issue.issue}`
       if (!seen.has(key)) {
         seen.add(key)
@@ -197,8 +220,12 @@ export class GithubSource {
       } else if (this.options.regrant && this.isHuman(issue.author)) {
         // A standing ask is any open issue a person or an agent filed. The ROUTER decides, because it is
         // the only party that knows whether a worker is or was on this thread; the counter there caps the loop.
-        const grant = this.options.regrant(issue.issue, key)
-        if (grant) out.push(this.requestTrigger(issue, 'grant', key, typeof grant === 'string' ? grant : undefined))
+        const priority = priorityOf(issue)
+        if (priority && priorityGrants >= PRIORITY_GRANTS_PER_POLL) continue
+        const grant = this.options.regrant(issue.issue, key, priority)
+        if (!grant) continue
+        if (priority) priorityGrants += 1
+        out.push(this.requestTrigger(issue, 'grant', key, typeof grant === 'string' ? grant : undefined))
       }
     }
     // The cap is a decision, not an accident: past 4000 open issues the oldest key is forgotten, and an issue
