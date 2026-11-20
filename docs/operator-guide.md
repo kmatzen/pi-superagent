@@ -241,8 +241,8 @@ by that label first and oldest updated second, so a flagged thread whose worker 
 takes the slot the moment one frees, and one priority launch per tick, because 38 pending tickets
 sharing 4 slots starves just as well in a priority lane that takes them all — once the tick's one
 priority launch is out, the queue resumes its oldest-first order. The label never bypasses the
-worker cap: it ranks the queue, it does not add a worker, and the daily relaunch cap stays two per
-thread. Every launch line in `engine.log` names the lane that won — `wonSlot: priority`,
+worker cap: it ranks the queue, it does not add a worker, and the daily relaunch cap rises from two
+per thread to six. Every launch line in `engine.log` names the lane that won — `wonSlot: priority`,
 `wonSlot: oldest-starved` (queue win by age) or `wonSlot: unanswered` (the thread has operator
 input no worker delivered) — and the panel's ticket row repeats it under *wonSlot*. Measured
 2026-11-19, the reason the label exists: parking four tickets freed all four slots, and the router
