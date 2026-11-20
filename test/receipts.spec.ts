@@ -9,6 +9,14 @@ describe('what the thread reads when a run ends', () => {
       .toMatch(/\*\*Question:\*\* Stop it\?[\s\S]*Next check: a fresh worker looks at it at 20:15 UTC\./)
   })
 
+  it('a ticket whose CI the router can watch is woken by the checks, so the timer is only the backstop', () => {
+    const waiting = { state: 'waiting', summary: 'pushed, waiting on CI', wakeAt: '2026-11-12T20:15:00.000Z' }
+    const text = receiptText('#145', 'worker', waiting, false, undefined, true)
+    expect(text).toBe('#145 waiting: pushed, waiting on CI\n\nNext check: a fresh worker the moment its pull-request '
+      + 'checks finish; a timed backstop looks at it at 20:15 UTC if nothing fires.')
+    expect(text).not.toMatch(/Next check: a fresh worker looks at it at/)
+  })
+
   it('a result is one line: the thread, the state, the summary, and the end of the ticket', () => {
     const text = receiptText('#400', 'worker', { state: 'ready', summary: 'merged and deployed' })
     expect(text.startsWith('#400 ready: merged and deployed'), text).toBe(true)

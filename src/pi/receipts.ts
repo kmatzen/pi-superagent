@@ -32,7 +32,9 @@ function pullLines(urls: readonly string[], tracker?: string): string {
 const FINISHED = 'This ticket ends with the report: no pull request is open on it, so nothing runs it now, and this issue closes with it. '
   + 'A comment on the closed issue, or reopening it, starts the work again; nothing else does.'
 
-export function receiptText(thread: string, origin: ReportOrigin, run: ReportedRun, relaunched = false, tracker?: string): string {
+// checksPending (agent-inbox#667): a followed pull's checks are still running, so an event, not the timer, is the next check.
+export function receiptText(thread: string, origin: ReportOrigin, run: ReportedRun, relaunched = false, tracker?: string,
+  checksPending = false): string {
   const head = `${thread} ${run.state}: ${run.summary}`
   switch (origin) {
     case 'crash':
@@ -45,7 +47,9 @@ export function receiptText(thread: string, origin: ReportOrigin, run: ReportedR
       return `${thread}: the worker stopped without reporting a result.\n\n${STILL_OPEN}`
     case 'worker': {
       const pulls = run.pullRequests?.length ? pullLines(run.pullRequests, tracker) : ''
-      const next = run.wakeAt ? `\n\nNext check: a fresh worker looks at it at ${run.wakeAt.slice(11, 16)} UTC.` : ''
+      const next = !run.wakeAt ? '' : checksPending
+        ? `\n\nNext check: a fresh worker the moment its pull-request checks finish; a timed backstop looks at it at ${run.wakeAt.slice(11, 16)} UTC if nothing fires.`
+        : `\n\nNext check: a fresh worker looks at it at ${run.wakeAt.slice(11, 16)} UTC.`
       if (run.state === 'blocked') {
         return `${head}${pulls}\n\n${run.question ? `**Question:** ${run.question}\n\n` : ''}Reply here; the worker reads every comment.${next}`
       }
