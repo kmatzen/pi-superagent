@@ -400,6 +400,11 @@ export class PiExecutor {
    */
   private async pump(): Promise<void> {
     while (this.queue.length || this.lane.length) {
+      // A slot frees when a session ends, which needs the event loop. Awaiting an already-resolved promise
+      // never yields to it: the process spun at 100% with the panel dead as soon as a fifth ticket queued.
+      while (this.gateClosed) await new Promise(resolve => setTimeout(resolve, this.options.slotPollMs ?? 1000))
+      // Chosen with a slot in hand, not at enqueue: a job picked while the gate is closed cannot be overtaken,
+      // and at capacity the pump is parked on the gate holding the queue's head — the launch the label must pass.
       const fromLane = this.lane.length > 0 && this.priorityBudget > 0
       const job = (fromLane ? this.lane.shift() : this.queue.shift() ?? this.lane.shift())!
       if (fromLane) this.priorityBudget -= 1
@@ -407,9 +412,6 @@ export class PiExecutor {
         this.options.laneWon?.(job.ticket, job.assignment, fromLane ? 'priority' : 'queue')
       } catch { /* a log line about the win is not worth losing the launch */ }
       try {
-        // A slot frees when a session ends, which needs the event loop. Awaiting an already-resolved promise
-        // never yields to it: the process spun at 100% with the panel dead as soon as a fifth ticket queued.
-        while (this.gateClosed) await new Promise(resolve => setTimeout(resolve, this.options.slotPollMs ?? 1000))
         await job.run()
       } catch {
         // A launch that throws must skip nobody, and the count is not adjusted here: the `finally` runs on
