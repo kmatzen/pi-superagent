@@ -430,6 +430,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     if (ticket) void tracker.refresh(ticket)
   }
 
+  // agent-inbox#667: the router can see this ticket's CI, so its next check is the checks finishing, not a timer.
+  const checksPending = (ticket: Ticket): boolean => (ticket.follows ?? []).some(follow =>
+    !follow.closed && follow.thread.startsWith('github:')
+      && pullStates.get(follow.thread.slice('github:'.length))?.checks?.state === 'pending')
+
   // One message per assignment, ending and text; a failed launch drops the text, since it retries every poll.
   const announce = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun, relaunched: boolean): void => {
     const channel = ticket.channels[0]
@@ -437,7 +442,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const said = origin === 'launch' ? ''
       : createHash('sha1').update(JSON.stringify([run.state, run.summary, run.question ?? null, run.pullRequests ?? []])).digest('hex').slice(0, 12)
     outbox.send({ id: `report:${assignmentId}:${origin}:${said}`, channel, kind: 'reply', ticketId: ticket.id,
-      text: receiptText(channel.thread, origin, run, relaunched, tracker.url(ticket.id)) })
+      text: receiptText(channel.thread, origin, run, relaunched, tracker.url(ticket.id), checksPending(ticket)) })
   }
   // One fresh worker per crash, per ticket per process; the engine's retry requeues comments the dead one never read.
   const relaunched = new Set<string>()

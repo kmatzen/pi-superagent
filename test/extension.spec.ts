@@ -1326,6 +1326,24 @@ describe('a pull request per ticket', () => {
     expect(callsOf(f, '494').filter(c => c === 'close:494'), 'closed again').toHaveLength(2)
   })
 
+  it('a waiting ticket whose pull request is still building is told the checks, not the clock, wake it (agent-inbox#667)', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    await working(f, '496')
+    pulls.open('o/r', 90, { checks: { sha: 'abc12345678', state: 'pending' } })
+    f.workers[0]!.report!({ state: 'waiting', summary: 'Pushed the fix; CI is running.', pullRequests: ['https://github.com/o/r/pull/90'], wakeInMinutes: 30 })
+    await f.running.tick()
+    await f.running.tick()
+    f.addComment('496', 'octocat', 'Any news on the build?')
+    await f.running.tick()
+    await until(() => f.workers.length === 2)
+    f.workers[1]!.report!({ state: 'waiting', summary: 'CI is still running on the same commit.', wakeInMinutes: 30 })
+    await f.running.tick()
+    const last = f.feed.posts.filter(p => p.issue === 496).at(-1)!.body
+    expect(last).toMatch(/Next check: a fresh worker the moment its pull-request checks finish/)
+    expect(last, 'the timer is the backstop, not the plan').not.toMatch(/Next check: a fresh worker looks at it at/)
+  })
+
   it('a check the last worker asked for outlives the merge that ends its ticket, and the issue closes after it reports', async () => {
     // 2026-11-13, #387: the merge ended the ticket 14 minutes before its check of a prod deploy, and the router dropped the check.
     let now = Date.now()
