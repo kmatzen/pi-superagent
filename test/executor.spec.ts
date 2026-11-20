@@ -25,7 +25,9 @@ interface Call { fn: string; args: unknown[] }
 
 function fixture(extra: { maxConcurrent?: number; slotPollMs?: number; launchBlocked?: () => boolean; follow?: (t: Ticket, urls: readonly string[]) => readonly string[];
                           reportDropped?: (fields: Record<string, unknown>) => void;
-                          stillWanted?: (t: Ticket, a: Assignment) => Ticket | undefined } = {},
+                          stillWanted?: (t: Ticket, a: Assignment) => Ticket | undefined;
+                          priorityOf?: (t: Ticket) => boolean;
+                          laneWon?: (t: Ticket, a: Assignment, lane: 'priority' | 'queue') => void } = {},
                  fail: { launch?: string; report?: string } = {}) {
   const calls: Call[] = []
   const sessions: FakeSession[] = []
@@ -94,6 +96,54 @@ describe('PiExecutor', () => {
     f.executor.stop(ticket({ id: 'T1' }), assignment('A1'), 'done')
     await f.executor.idle()
     expect(f.sessions).toHaveLength(2)
+  })
+
+  it('a priority:high launch wins the free slot ahead of the queued work that arrived first', async () => {
+    // agent-inbox#660: the operator labels an ask urgent and it takes the next slot; age is the tie-break, not the rule.
+    const lanes: string[] = []
+    const f = fixture({ maxConcurrent: 1, slotPollMs: 5, priorityOf: t => t.id === 'T3',
+                        laneWon: (t, _a, lane) => lanes.push(`${t.id}:${lane}`) })
+    f.executor.start(ticket({ id: 'T1' }), assignment('A1'))
+    await f.executor.idle()
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    f.executor.start(ticket({ id: 'T3' }), assignment('A3'))
+    f.executor.stop(ticket({ id: 'T1' }), assignment('A1'), 'done')
+    // `idle()` waits for the whole queue, and the queue is behind a running worker: watch the starts instead.
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(f.calls_of('assignmentStarted').map(c => c.args[1])).toEqual(['A1', 'A3'])
+    f.executor.stop(ticket({ id: 'T3' }), assignment('A3'), 'done')
+    await f.executor.idle()
+    expect(f.calls_of('assignmentStarted').map(c => c.args[1])).toEqual(['A1', 'A3', 'A2'])
+    expect(lanes).toEqual(['T1:queue', 'T3:priority', 'T2:queue'])
+  })
+
+  it('one priority launch per tick: the second labelled thread waits behind the plain queue', async () => {
+    const f = fixture({ maxConcurrent: 1, slotPollMs: 5, priorityOf: t => t.id === 'T2' || t.id === 'T3' })
+    f.executor.start(ticket({ id: 'T1' }), assignment('A1'))
+    await f.executor.idle()
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    f.executor.start(ticket({ id: 'T3' }), assignment('A3'))
+    f.executor.start(ticket({ id: 'T4' }), assignment('A4'))
+    f.executor.stop(ticket({ id: 'T1' }), assignment('A1'), 'done')
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(f.calls_of('assignmentStarted').map(c => c.args[1])).toEqual(['A1', 'A2'])
+    f.executor.stop(ticket({ id: 'T2' }), assignment('A2'), 'done')
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(f.calls_of('assignmentStarted').map(c => c.args[1]), 'the lane is spent, so T4 goes first').toEqual(['A1', 'A2', 'A4'])
+    f.executor.stop(ticket({ id: 'T4' }), assignment('A4'), 'done')
+    await f.executor.idle()
+    // T2 took the lane; the lane's budget is spent, so the queue keeps its order and T3 waits its turn.
+    expect(f.calls_of('assignmentStarted').map(c => c.args[1])).toEqual(['A1', 'A2', 'A4', 'A3'])
+  })
+
+  it('the priority lane ranks the queue and never opens a slot', async () => {
+    const f = fixture({ maxConcurrent: 1, slotPollMs: 5, priorityOf: () => true })
+    f.executor.start(ticket({ id: 'T1' }), assignment('A1'))
+    await f.executor.idle()
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(f.sessions).toHaveLength(1)
+    expect(f.executor.running).toBe(1)
   })
 
   it('a nearly full disk holds new launches, leaves running workers alone, and the queue starts once it clears', async () => {

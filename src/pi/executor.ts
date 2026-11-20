@@ -67,6 +67,18 @@ export interface ExecutorOptions {
   follow?(ticket: Ticket, pullRequests: readonly string[]): readonly string[]
   /** The ticket as it stands when a queued launch gets its slot, or undefined when `assignment` no longer wants a worker. */
   stillWanted?(ticket: Ticket, assignment: Assignment): Ticket | undefined
+  /** True when the ticket's thread carries the board's `priority:high` label: its launch takes the priority lane. */
+  priorityOf?(ticket: Ticket): boolean
+  /** How many priority launches may jump the queue per tick. One, because a lane that takes every slot starves the board just as well. */
+  priorityPerTick?: number
+  /** Which lane a launch left the queue on, said as it takes the slot, so the deployment can log why that thread won it. */
+  laneWon?(ticket: Ticket, assignment: Assignment, lane: 'priority' | 'queue'): void
+}
+
+interface Launch {
+  run: () => Promise<void>
+  ticket: Ticket
+  assignment: Assignment
 }
 
 interface Live {
@@ -119,11 +131,20 @@ export class PiExecutor {
   private readonly launching = new Set<string>()
   /** Launches enqueued and not yet run. Measured, because a pass that waits on this needs to know its size. */
   private queued = 0
+  /** Launches in the order they arrived, which is board order (oldest ask first). */
+  private readonly queue: Launch[] = []
+  /** The `priority:high` launches, next in line: `priorityBudget` of them per tick, then the queue's turn. */
+  private readonly lane: Launch[] = []
+  private pumping = false
+  /** Priority launches this tick may still take the lane; refilled by `drain`, which runs once per tick. */
+  private priorityBudget: number
   /** When a launch last produced a live worker: a queue whose launches all fail moves, and starts nobody. */
   private startedAt = 0
 
   constructor(private readonly engine: EngineForExecutor, private readonly launcher: WorkerLauncher,
-              private readonly options: ExecutorOptions) {}
+              private readonly options: ExecutorOptions) {
+    this.priorityBudget = options.priorityPerTick ?? 1
+  }
 
   /** Workers on a run: the number the cap bounds. */
   get running(): number { return [...this.live.values()].filter(live => live.busy).length }
@@ -133,7 +154,10 @@ export class PiExecutor {
     const key = `${ticket.id}/${assignment.id}`
     if (this.launching.has(key) || this.live.get(ticket.id)?.assignmentId === assignment.id) return
     this.launching.add(key)
-    this.enqueue(async () => {
+    this.enqueue({
+      ticket,
+      assignment,
+      run: async () => {
       try {
         const current = this.options.stillWanted ? this.options.stillWanted(ticket, assignment) : ticket
         if (!current) return
@@ -152,7 +176,8 @@ export class PiExecutor {
       } finally {
         this.launching.delete(key)
       }
-    })
+      },
+    }, this.options.priorityOf?.(ticket) === true)
   }
 
   /** A worker already running that this process did not start (it outlived the previous router): bind it, and
@@ -356,19 +381,42 @@ export class PiExecutor {
   }
 
   // Launches are serialised behind each other: the cap bounds how many workers are on a run at once, and
-  // starting two sessions in one tick is how a router forks until the box dies.
-  private enqueue(run: () => Promise<void>): void {
+  // starting two sessions in one tick is how a router forks until the box dies. A `priority:high` launch goes
+  // in the lane, because a queue ordered only by age cannot hear the operator say "this one next".
+  private enqueue(launch: Launch, priority: boolean): void {
+    (priority ? this.lane : this.queue).push(launch)
     this.queued += 1
-    this.tail = this.tail.then(async () => {
-      // A slot frees when a session ends, which needs the event loop. Awaiting an already-resolved promise
-      // never yields to it: the process spun at 100% with the panel dead as soon as a fifth ticket queued.
-      while (this.gateClosed) await new Promise(resolve => setTimeout(resolve, this.options.slotPollMs ?? 1000))
-      try { await run() } finally { this.queued -= 1 }
-    }).catch(() => {
-      // A rejected tail skips every later launch; the only throw left here (a report on an ended ticket) is moot.
-      // The count is not adjusted here: the `finally` above runs on every path out of the launch, and counting a
-      // failure twice would report a queue as drained while a launch still waits in it.
-    })
+    if (this.pumping) return
+    this.pumping = true
+    // Deferred one microtask, as the promise chain this replaces was: the gate is only honest once the caller's
+    // pass has finished adding the launches it queued in the same pass.
+    this.tail = Promise.resolve().then(() => this.pump()).finally(() => { this.pumping = false })
+  }
+
+  /**
+   * The launch queue, drained one at a time. The lane goes first while this tick has budget, then the plain
+   * queue: one labelled thread wins the slot, the rest of the board is not starved behind it. Nothing here
+   * opens a slot — the gate below is the worker cap, and a priority launch waits on it like any other.
+   */
+  private async pump(): Promise<void> {
+    while (this.queue.length || this.lane.length) {
+      const fromLane = this.lane.length > 0 && this.priorityBudget > 0
+      const job = (fromLane ? this.lane.shift() : this.queue.shift() ?? this.lane.shift())!
+      if (fromLane) this.priorityBudget -= 1
+      try {
+        this.options.laneWon?.(job.ticket, job.assignment, fromLane ? 'priority' : 'queue')
+      } catch { /* a log line about the win is not worth losing the launch */ }
+      try {
+        // A slot frees when a session ends, which needs the event loop. Awaiting an already-resolved promise
+        // never yields to it: the process spun at 100% with the panel dead as soon as a fifth ticket queued.
+        while (this.gateClosed) await new Promise(resolve => setTimeout(resolve, this.options.slotPollMs ?? 1000))
+        await job.run()
+      } catch {
+        // A launch that throws must skip nobody, and the count is not adjusted here: the `finally` runs on
+        // every path out of the launch, so counting a failure twice would report a drained queue with a launch
+        // still in it.
+      } finally { this.queued -= 1 }
+    }
   }
 
   /**
@@ -397,6 +445,9 @@ export class PiExecutor {
    * every 30 s and rising back toward that stall as the board grows.
    */
   async drain(budgetMs: number): Promise<{ settled: boolean; pending: number }> {
+    // The lane's budget refills where a tick begins, before the early returns: the pass that frees a slot is
+    // not the pass that starts the launch, because the gate re-checks on its own timer.
+    this.priorityBudget = this.options.priorityPerTick ?? 1
     if (this.queued === 0) return { settled: true, pending: 0 }
     if (budgetMs <= 0) return { settled: false, pending: this.queued }
     if (this.gateClosed) return { settled: false, pending: this.queued }
