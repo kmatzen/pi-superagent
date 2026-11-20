@@ -19,7 +19,16 @@ export interface PullState {
   draft?: boolean
   mergeableState?: string
   mergedBy?: string
+  /** The commit the checks run on; it comes free with the pull read, and it is the key a check state belongs to. */
+  headSha?: string
+  /** Auto-merge is armed, so green checks land the pull request by themselves. */
+  autoMergeArmed?: boolean
+  /** The last check state this router saw and the SHA it belongs to: remembered so a finished CI cannot fire twice. */
+  checks?: { sha: string; state: ChecksState }
 }
+
+/** GitHub's rollup of a commit's checks. `none` = GitHub has no checks on it, so nothing will ever finish. */
+export type ChecksState = 'pending' | 'passed' | 'failed' | 'none'
 
 export interface ReviewComment { path: string; line?: number; body: string; url: string }
 
@@ -31,6 +40,8 @@ export interface PullApi {
   reviews(repo: string, number: number): Promise<PrReview[]>
   /** One review's comments on the code. */
   reviewComments?(repo: string, number: number, reviewId: number): Promise<ReviewComment[]>
+  /** The combined check state of one commit, asked only for a head whose state is not already known. */
+  checks?(repo: string, sha: string): Promise<ChecksState>
 }
 
 // URLs only: `#5` or `owner/repo#5` may be an issue, whose thread never merges, so its ticket would wait forever.
@@ -94,6 +105,10 @@ export interface FollowerOptions {
   reopened(thread: ThreadRef, pull: PullRef): number
   receive(trigger: Trigger): void
   warn(event: string, fields: Record<string, unknown>): void
+  /** A followed pull request's checks reached a final state on a head SHA (agent-inbox#667). Detection lives in the
+   *  pass that already reads the pull; who the outcome is for is the caller's, because only a ticket that asked for
+   *  a check gets a session — CI churn recruited one worker 48 times on ticket #205. */
+  checksSettled?(thread: ThreadRef, pull: PullRef, checks: { sha: string; state: ChecksState }, state: PullState): void
   now?: () => number
   /** How often a pull request outside the watched repository is read: three calls each time, against GitHub's hourly limit. */
   everyMs?: number
@@ -124,6 +139,46 @@ export interface FollowerOptions {
 // the pass is ~31 sequential round trips, which is the 12.1 s above. Scale it with the fan-out, and clamp at 16
 // because this box is shared with the workers every `gh` call competes with.
 const readsAtOnce = (due: number): number => Math.min(16, Math.max(4, Math.ceil(due / 8)))
+
+/** What a finished rollup means for a ticket that is waiting on it (agent-inbox#667). */
+export type CheckReason = 'checks_failed' | 'checks_passed'
+
+export interface CheckWakePorts {
+  /** The time this ticket's worker asked for a check, undefined when it asked for nothing. */
+  scheduled(ticketId: string): string | undefined
+  /** The event is the check, so the timer goes. */
+  spend(ticketId: string): void
+  /** This ticket already got this news on this head SHA, so it is not recruited twice. */
+  fired(ticketId: string, sha: string, reason: CheckReason): boolean
+  mark(ticketId: string, sha: string, reason: CheckReason): void
+  recruit(ticket: Ticket, pull: PullRef, checks: { sha: string; state: ChecksState }, reason: CheckReason, scheduledAt: string): void
+  log(ticketId: string, reason: CheckReason, url: string): void
+}
+
+/**
+ * Hand a finished check state to the tickets waiting on it, returning how many it called back. The operator's rules
+ * (agent-inbox#667) live here and nowhere else, and the timer a woken ticket had scheduled is spent, so the
+ * fallback is left for what no event can see: a Pluto job, a person.
+ */
+export function wakeOnChecks(tickets: readonly Ticket[], thread: ThreadRef, pull: PullRef,
+                             checks: { sha: string; state: ChecksState }, state: PullState, ports: CheckWakePorts): number {
+  const reason: CheckReason | undefined = checks.state === 'failed' ? 'checks_failed'
+    : checks.state === 'passed' && !state.autoMergeArmed ? 'checks_passed' : undefined
+  if (!reason) return 0
+  const key = `github:${thread.id}`
+  let woke = 0
+  for (const ticket of tickets) {
+    if (ticket.ended || !ticket.follows?.some(f => f.thread === key && !f.closed)) continue
+    const at = ports.scheduled(ticket.id)
+    if (!at || ports.fired(ticket.id, checks.sha, reason)) continue
+    ports.mark(ticket.id, checks.sha, reason)
+    ports.spend(ticket.id)
+    ports.recruit(ticket, pull, checks, reason, at)
+    ports.log(ticket.id, reason, pullUrl(pull))
+    woke += 1
+  }
+  return woke
+}
 
 /** What one pass did, so the tick's log line can name its own cost. */
 export interface ReconcileReport {
@@ -160,6 +215,8 @@ export class PullFollower {
   /** Threads whose recorded close this process has already re-checked. A close is a fact about the past, so one
    *  look per start is enough to catch the ones a failed read wrote; re-checking them every poll would buy nothing. */
   private readonly probed = new Set<string>()
+  /** Threads whose failed check read is already complained about: once, not every poll. */
+  private readonly unreadChecks = new Set<string>()
 
   constructor(private readonly options: FollowerOptions) {}
 
@@ -297,6 +354,7 @@ export class PullFollower {
     // Open: any ticket holding a close on this thread holds one that never happened.
     this.heal(id, pull)
     await this.conflict(id, pull, state, now)
+    await this.checks(id, pull, state)
     // The reopened follow is in `followed` from the next pass; reading its talk here as well would read it twice.
     if (reopen || local) return
     await this.listen(id, pull, state.createdAt)
@@ -320,6 +378,34 @@ export class PullFollower {
       'GitHub reports this pull request no longer merges cleanly: it has a merge conflict against its base. '
         + 'Rebase or merge the base branch, resolve the conflict, push the branch, and report the new head.',
       'conflict', `conflict:${id}:${now}`))
+  }
+
+  /** Checks of the head commit, asked at most once per SHA once they are final: 41 follows read every 120 s is
+   *  already 1230 GitHub reads an hour, so a check read on every pass spends the hourly limit on pulls that
+   *  finished yesterday (measured 2026-11-10, #303). The last state is the position store, not memory, so a
+   *  restart cannot re-ask a finished SHA and fire its wake a second time. */
+  private async checks(id: string, pull: PullRef, state: PullState): Promise<void> {
+    const read = this.options.api.checks
+    const sha = state.headSha
+    if (!read || !sha) return
+    const key = `pulls:${id}:checks`
+    const seen = this.options.positions.get<{ sha: string; state: ChecksState }>(key)
+    if (seen && seen.sha === sha && seen.state !== 'pending') return
+    let latest: ChecksState
+    try {
+      latest = await read.call(this.options.api, pull.repo, sha)
+    } catch (error) {
+      if (!this.unreadChecks.has(id)) {
+        this.unreadChecks.add(id)
+        this.options.warn('pull.checks_unreadable', { thread: id, sha: sha.slice(0, 10), error: String(error).slice(0, 200) })
+      }
+      return
+    }
+    if (this.unreadChecks.delete(id)) this.options.warn('pull.checks_readable', { thread: id })
+    this.options.positions.set(key, { sha, state: latest })
+    // `pending` is not an outcome, and `none` is an outcome that never arrives: both keep the ticket's timer.
+    if (latest === 'pending' || latest === 'none') return
+    this.options.checksSettled?.({ source: 'github', id }, pull, { sha, state: latest }, state)
   }
 
   private async listen(id: string, pull: PullRef, createdAt: string): Promise<void> {

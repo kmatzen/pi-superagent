@@ -250,6 +250,16 @@ refilled them in 45 seconds with the oldest asks. Parking is not a stop either, 
 withdraw the replies on a thread you want to keep parked: a parked thread with unanswered operator
 input re-earns a worker up to twice a day, labelled or not.
 
+A worker that reports `waiting` names a time for the next check, and the router keeps that appointment
+(`wake.scheduled`, then `wake.fired`). When what it waits for is a pull request the router already
+reads, the event fires first (`wake.event ticket=… reason=checks_failed|checks_passed`) and the
+appointment is spent. Red checks wake it at once; green with auto-merge armed wake nobody, because the
+merge ends the ticket; green with no auto-merge wakes it, since a person has to merge. The timer stays
+for what the router cannot see — a Pluto job, a person — and `node scripts/measure-timed-rechecks.mjs
+<owner/repo> <fromISO>` reports the share of status reports that end in a timed re-check. Measured
+2026-11-20, 82 of 155 reports in one 24 h window did just that, each a whole agent session spent
+re-reading a check that had finished an hour earlier, on a box with 33 tickets queued for 6 slots.
+
 ## When something goes wrong
 
 **No acknowledgement after a few minutes.** Run `superagent status`, then inspect the most recent
