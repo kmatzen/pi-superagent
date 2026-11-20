@@ -71,6 +71,9 @@ export const standingAskEntitled = (
 
 export const REGRANT_CAP = 2
 
+/** A labelled ask is an explicit operator request, so 6 a day (3x) where the queue gets 2: measured 2026-11-19, those 2 left 43 starved tickets and zero launches, and one launch per poll bounds the loop. */
+export const PRIORITY_REGRANT_CAP = 6
+
 /** May a thread be re-granted? An open ticket: by its work's state. No ticket ever: yes, it is starved work, unless
  *  its request is with the judge now. Only ended tickets: no, the work is decided (finished, awaiting its pull
  *  requests, or stopped) and would be duplicated. */
@@ -280,7 +283,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
           const judging = (): boolean => { const thread = repos.threads.get(`github:${key}`); return !!thread?.evaluating || !!thread?.pending.length }
           if (!regrantable(ask, () => repos.tickets.list().some(onThread), executor.workers(), judging)) return false
           const day = (deps.now ? deps.now() : new Date().toISOString()).slice(0, 10)
-          const next = regrantPlan(repos.kv.get<RegrantCounters>(REGRANT_KEY), key, day)
+          const next = regrantPlan(repos.kv.get<RegrantCounters>(REGRANT_KEY), key, day, priority ? PRIORITY_REGRANT_CAP : REGRANT_CAP)
           if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day }); return false }
           repos.kv.set(REGRANT_KEY, next)
           const wonSlot = wonSlotReason(priority, (ask?.undelivered.length ?? 0) > 0)
