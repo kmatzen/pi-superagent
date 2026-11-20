@@ -11,7 +11,7 @@ import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
 import type { PullApi, PullState } from '../src/pi/pulls.ts'
 import { paneKeysScrubbed, scrubPaneEnv } from './setup.ts'
 
-import { REGRANT_CAP, regrantable, regrantPlan, standingAskEntitled } from '../src/pi/extension.ts'
+import { PRIORITY_REGRANT_CAP, REGRANT_CAP, regrantable, regrantPlan, standingAskEntitled } from '../src/pi/extension.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ext-')); dirs.push(d); return d }
@@ -2667,6 +2667,20 @@ describe('the standing queue re-grant', () => {
     expect(regrantPlan(counters, '#214', '2026-11-11'), 'the day rolls and the ask may launch again')
       .toMatchObject({ day: '2026-11-11', perIssue: { '#214': 1 } })
     expect(REGRANT_CAP, 'two per issue per day, the number in the design note').toBe(2)
+  })
+
+  it('gives a labelled ask three times the queue, because the label is the operator asking', () => {
+    // The 2026-11-19 queue: 43 starved tickets and zero launches on a daily cap of two.
+    let counters = regrantPlan(undefined, '#214', day, PRIORITY_REGRANT_CAP)
+    for (let n = 2; n <= PRIORITY_REGRANT_CAP; n++) {
+      expect(counters, `grant ${n} of ${PRIORITY_REGRANT_CAP} is granted`).toBeTruthy()
+      counters = regrantPlan(counters, '#214', day, PRIORITY_REGRANT_CAP)
+    }
+    expect(counters?.perIssue['#214'], 'the sixth lands').toBe(PRIORITY_REGRANT_CAP)
+    expect(regrantPlan(counters, '#214', day, PRIORITY_REGRANT_CAP), 'the seventh is the cap').toBeUndefined()
+    expect(regrantPlan(counters, '#214', day), 'and the unlabelled ask is capped at its second by the same counters')
+      .toBeUndefined()
+    expect(PRIORITY_REGRANT_CAP, 'three times the queue, the number in the guide').toBe(REGRANT_CAP * 3)
   })
 })
 
