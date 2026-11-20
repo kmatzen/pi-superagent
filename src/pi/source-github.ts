@@ -132,6 +132,8 @@ export class GithubSource {
    *  produced are in the engine — commit-at-emit + crash = cursor past a request never accepted. */
   private staged: Array<[string, unknown]> = []
   private lastOpen: ReadonlySet<string> | undefined
+  /** The board's `priority:high` threads as of the last poll, taken from the listing that poll already makes. */
+  private priorityThreads: ReadonlySet<string> = new Set()
   /** Polls in a row a seen issue has been missing from the open listing without GitHub saying it closed. */
   private readonly missing = new Map<string, number>()
 
@@ -141,6 +143,9 @@ export class GithubSource {
   /** Threads open as of the last poll ('#N', issues and pull requests): absence is how GitHub says
    *  a conversation ended — merged, closed, or deleted all look the same from here, and all mean stop. */
   openThreads(): ReadonlySet<string> | undefined { return this.lastOpen }
+
+  /** A thread the board labels `priority:high`. The answer is the poll's own listing, so ranking costs no request. */
+  isPriority(thread: string): boolean { return this.priorityThreads.has(thread) }
 
   /** One thread's state, asked of GitHub directly. 'unknown' when the read failed: a ticket stays alive on an
    *  unreadable answer, because the inference this replaces stopped a live ticket whose issue was open. */
@@ -185,6 +190,7 @@ export class GithubSource {
     const open = await this.api.issues('open')
     const pulls = this.api.pullsOpen ? await this.api.pullsOpen() : []
     this.lastOpen = new Set<string>([...open.map(i => `#${i.issue}`), ...pulls.map(n => `#${n}`)])
+    this.priorityThreads = new Set(open.filter(priorityOf).map(i => `#${i.issue}`))
     const seen = new Set(stored ?? [])
     // Issues already open at the first look are history: the first version fired them all as requests.
     if (!stored) {
