@@ -1192,6 +1192,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const beganSweep = Date.now()
     const swept = await sweepWorktrees(cfg.worktreeRoot, () => new Set(repos.tickets.open().map(t => t.id)), cfg.keepWorktrees ?? 20,
       (cfg.workBudgetGb ?? 200) * 1024 ** 3, deps.sizeOf, { minFreeBytes: minFreeBytes(cfg), live: liveTickets(), pushed: onGithub })
+    if (swept.straysRemoved.length) {
+      log.line('info', 'worktree.strays_pruned', {
+        count: swept.straysRemoved.length, names: swept.straysRemoved.slice(0, 8),
+        root: cfg.worktreeRoot, note: 'worker scratch older than a day, deleted from the work root',
+      })
+    }
     if (swept.strays) log.line('warn', 'worktree.strays', { strays: swept.strays, root: cfg.worktreeRoot })
     if (swept.removed || swept.keptWork) {
       log.line('info', 'worktree.swept', {
@@ -1505,8 +1511,9 @@ export interface SweepReport {
   removed: number
   /** Settled checkouts kept because they hold commits that exist on no remote: deleting these deletes work. */
   keptWork: number
-  /** Files (not directories) in the work root: a stray log there once wedged every sweep, so they are counted and skipped. */
+  /** Non-directories the prune refused (young scratch, symlink, socket); zero on a healthy root. */
   strays: number
+  straysRemoved: string[]
   checkouts: number
   /** Settled workspaces with files and no checkout, and empty ones: the 43 GB is not all code. */
   bare: number
@@ -1746,16 +1753,46 @@ function isDirectory(path: string): boolean {
   try { return statSync(path).isDirectory() } catch { return false }
 }
 
+/** Idle age before a work-root scratch file is deleted: a day, not sweepTmp's 6 h, because a worker writes these as it runs. */
+export const STRAY_MAX_AGE_MS = 24 * 3_600_000
+
+/** Delete idle plain files from the work root, report the refusals. Skipping non-directories fixed the 2026-11-11
+ *  ENOTDIR crash but left them forever: the same four warned `worktree.strays` on every router start for days
+ *  (agent-inbox#887). Refusals keep the count, so the WARN still means something a person should look at. */
+export async function pruneRootScratch(root: string, now = Date.now(),
+                                       ageMs = STRAY_MAX_AGE_MS): Promise<{ removed: string[], kept: number }> {
+  const removed: string[] = []
+  let kept = 0
+  let names: string[]
+  try { names = readdirSync(root) } catch { return { removed, kept } }
+  for (const name of names) {
+    const path = join(root, name)
+    let st
+    try { st = lstatSync(path) } catch { kept++; continue }
+    if (st.isDirectory()) continue
+    if (!st.isFile() || now - st.mtimeMs < ageMs) { kept++; continue }
+    try { await rm(path, { force: true }); removed.push(name) } catch { kept++ }
+  }
+  return { removed, kept }
+}
+
 export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (() => ReadonlySet<string>), keep: number,
                                      maxBytes = 200 * 1024 ** 3, sizeOf: (dir: string) => Promise<number> = dirBytes,
                                      pressure: SweepPressure = {}): Promise<SweepReport> {
   // Asked at each delete: the sweep runs beside the passes, and a ticket can reopen while it runs.
   const isOpen = (name: string): boolean => (typeof open === 'function' ? open() : open).has(name)
-  const report: SweepReport = { removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0, venvsDropped: 0, lent: 0 }
+  const report: SweepReport = {
+    removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, straysRemoved: [], keptWorkIds: [],
+    clonesDropped: 0, venvsDropped: 0, lent: 0,
+  }
   let names: string[]
   try { names = readdirSync(root) } catch { return report }
   const dirs = names.filter(name => isDirectory(join(root, name)))
-  report.strays = names.length - dirs.length
+  // Pruned before the count below, so a merely dirty root stops warning.
+  const pruned = await pruneRootScratch(root)
+  report.straysRemoved = pruned.removed
+  report.strays = pruned.kept
+  names = names.filter(name => !report.straysRemoved.includes(name))
   const lent = lenders(root, dirs)
   const borrowedFrom = (name: string): boolean => { if (!lent.has(name)) return false; report.lent++; return true }
   const settled = dirs
