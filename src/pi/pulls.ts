@@ -119,6 +119,8 @@ export interface FollowerOptions {
    * failures in 4000 log lines, 42 on one thread, because a 404 is a permanent answer for a private
    * repository and the follower asked again every interval, and again after each of the day's 96 restarts.
    * The burn is what tripped the hourly API limit, and a tripped limit blinds the reads that DO matter.
+   * It is now also the gap between probes of a parked thread: the park itself is in the position store, so the
+   * restart that used to erase the backoff no longer re-asks the question.
    */
   cooldownMs?: number
   /** How often one stuck merge conflict is repeated to its ticket. Default 6 h. */
@@ -182,6 +184,27 @@ export function wakeOnChecks(tickets: readonly Ticket[], thread: ThreadRef, pull
   return woke
 }
 
+
+/**
+ * A state read that threw, in the position store, because the answer that causes it — a private repository this
+ * account cannot see, which GitHub answers 404 — outlives every restart. Measured 2026-11-19 → 11-21: the
+ * in-memory backoff this replaces cost one read and one WARN per unreadable thread per router start (92 WARNs in
+ * 24 h out of 7 threads and 25 starts), and reset to zero on the restart that ended the backoff.
+ */
+export interface UnreadableRead {
+  /** Consecutive failures: a read that works deletes this record, so the count is a streak, not a lifetime total. */
+  fails: number
+  /** Readable again at this pass time; 0 while the streak is short, because a blip is due on the next interval. */
+  nextProbeAt: number
+  /** The park was announced: the one escalation per park, so a probe that fails again says nothing. */
+  announced?: boolean
+}
+
+/** The streak that stops being read as a bad minute: three is a network, four is a repository this account cannot see. */
+export const PARK_AFTER_FAILURES = 4
+
+export const unreadableKey = (id: string): string => `pulls:${id}:unreadable`
+
 /** What one pass did, so the tick's log line can name its own cost. */
 export interface ReconcileReport {
   /** Pull requests past their budget when the pass started. */
@@ -203,16 +226,7 @@ const MACHINE_WRITTEN = /^\s*<!--[\s\S]*?-->/
 export class PullFollower {
   private readonly polled = new Map<string, number>()
   private readonly unreadable = new Set<string>()
-  /** Thread id -> the moment it may be read again. In memory on purpose: a restart re-asks once, and once is
-   *  what a repository that came back into sight deserves. */
-  private readonly cooldown = new Map<string, number>()
-  /** Consecutive failed reads per thread. The long backoff belongs to the PERMANENT answer (a private
-   *  repository this account cannot see), not to a network blip: a repo that comes back into sight mid-day
-   *  must be seen on the next interval: four consecutive failures is a permanent answer, three is a bad
-   *  minute. */
-  private readonly failures = new Map<string, number>()
-  /** Threads whose state read has already been complained about: a follow in a repository the account cannot see
-   *  fails every interval, and 720 identical lines a day is how the one real line gets buried. */
+  /** Threads whose blip has been complained about in this process; a parked thread is silent until it recovers. */
   private readonly unread = new Set<string>()
   /** Threads whose recorded close this process has already re-checked. A close is a fact about the past, so one
    *  look per start is enough to catch the ones a failed read wrote; re-checking them every poll would buy nothing. */
@@ -241,9 +255,9 @@ export class PullFollower {
       const local = id.startsWith('#')
       if (local && (!open || open.has(id))) continue
       if (!local && now - (this.polled.get(id) ?? -Infinity) < (this.options.everyMs ?? 120_000)) continue
-      // A thread in backoff is not due: the answer that put it there (a repository this account cannot read)
-      // does not change between passes, and asking again is the burn, not the fix.
-      if (!local && (this.cooldown.get(id) ?? 0) > now) continue
+      // A parked thread is not due: the answer that put it there (a repository this account cannot read) does not
+      // change between passes, and its one probe per `cooldownMs` is what notices access being granted.
+      if (!local && this.parked(id, now)) continue
       due.push({ id, pull, local })
     }
     // A follow recorded closed is not in `followed`, so nothing reads it again: a close a read *failed* to make —
@@ -264,7 +278,7 @@ export class PullFollower {
     }
     for (const [id, pull] of recorded) {
       this.probed.add(id)
-      if ((this.cooldown.get(id) ?? 0) > now) continue
+      if (this.parked(id, now)) continue
       // The watched repository answers this from the poll already in hand: a thread open there denies the close, so
       // that reopen costs no API call. Its absence proves nothing — the list answers issues, and a pull request
       // thread missing from it is not a closed pull request — so the rest are read, once each.
@@ -307,6 +321,45 @@ export class PullFollower {
     return { due: due.length, read, deferred: skipped + queue.length, atOnce }
   }
 
+  /** Parked = past the streak threshold and before its probe time. Both halves matter: the blips stay quick. */
+  private parked(id: string, now: number): boolean {
+    const rec = this.options.positions.get<UnreadableRead>(unreadableKey(id))
+    return (rec?.fails ?? 0) >= PARK_AFTER_FAILURES && (rec?.nextProbeAt ?? 0) > now
+  }
+
+  /**
+   * Count a failed state read, and say something twice at most: once per blip streak, once when the thread parks.
+   * Parked probes are silent because GitHub's 404 for a repository it cannot see is the same answer every probe.
+   */
+  private failed(id: string, local: boolean, now: number, error: unknown): void {
+    const key = unreadableKey(id)
+    const before = this.options.positions.get<UnreadableRead>(key)
+    const fails = (before?.fails ?? 0) + 1
+    const ms = this.options.cooldownMs ?? 30 * 60_000
+    // Parking costs one read per `cooldownMs` from here, so a repository granted mid-day is back within one probe.
+    const parked = !local && ms > 0 && fails >= PARK_AFTER_FAILURES
+    if (parked && !before?.announced) {
+      this.options.positions.set(key, { fails, nextProbeAt: now + ms, announced: true })
+      this.unread.add(id)
+      const target = parseThread(id, this.options.home)
+      this.options.warn('pull.thread_unreadable', {
+        thread: id, ...(target ? { url: pullUrl(target) } : {}), fails,
+        retryMinutes: Math.round(ms / 60_000), error: String(error).slice(0, 200),
+      })
+      return
+    }
+    this.options.positions.set(key, { fails, nextProbeAt: parked ? now + ms : 0, ...(before?.announced ? { announced: true } : {}) })
+    // A park already announced says nothing more, across restarts: the durable flag is what makes "one escalation"
+    // mean one, where the per-process set below only silences a blip for the process that saw it.
+    if (before?.announced || this.unread.has(id)) return
+    // Once per thread per process, with the backoff on the same line: the router already counts this event.
+    this.unread.add(id)
+    this.options.warn('pull.read_failed', {
+      thread: id, error: String(error).slice(0, 200), fails,
+      backoffMinutes: ms > 0 ? Math.round(ms / 60_000) : 0,
+    })
+  }
+
   /** The tickets holding a close on this thread that GitHub says is open get their wait back. */
   private heal(id: string, pull: PullRef): void {
     const thread = threadOfPull(pull, this.options.home)
@@ -328,23 +381,13 @@ export class PullFollower {
       // Unknown is not closed. Ending the wait on a read that failed posts "closed without merging, so this ticket
       // ends" on a pull request that is open and ready — measured 2026-11-09, twice in one day, on the router's
       // own fix, because its account cannot see the private repository that pull lives in.
-      const fails = (this.failures.get(id) ?? 0) + 1
-      this.failures.set(id, fails)
-      const ms = this.options.cooldownMs ?? 30 * 60_000
-      if (!local && ms > 0 && fails >= 4) this.cooldown.set(id, now + ms)
-      // Said once per thread, with the backoff on the same line: the router already counts this event, and a
-      // second event per failure doubles the noise for the one fact a reader needs.
-      if (!this.unread.has(id)) {
-        this.unread.add(id)
-        this.options.warn('pull.read_failed', {
-          thread: id, error: String(error).slice(0, 200), backoffMinutes: ms > 0 ? Math.round(ms / 60_000) : 0,
-        })
-      }
+      this.failed(id, local, now, error)
       return
     }
-    this.cooldown.delete(id)
-    this.failures.delete(id)
-    if (this.unread.delete(id)) this.options.warn('pull.read_readable', { thread: id })
+    // A read that worked ends the park, and says so: the silence before it is deliberate, so recovery is not.
+    const wasParked = (this.options.positions.get<UnreadableRead>(unreadableKey(id))?.fails ?? 0) >= PARK_AFTER_FAILURES
+    this.options.positions.delete?.(unreadableKey(id))
+    if (this.unread.delete(id) || wasParked) this.options.warn('pull.read_readable', { thread: id })
     if (state) this.options.observed?.({ source: 'github', id }, pull, state)
     // A pull request GitHub no longer has cannot be merged, so the ticket's wait ends here. `undefined` is GitHub's
     // answer for one *to a reader that can see the repository*: a repository this account cannot read throws above
