@@ -1773,8 +1773,8 @@ function checkoutsIn(dir: string, depth = 3): string[] {
 const realDirectory = (path: string): boolean => { try { return lstatSync(path).isDirectory() } catch { return false } }
 
 /** One checkout that holds work keeps the whole workspace: its clones may be each other's worktrees. */
-async function holdsWork(checkouts: readonly string[], pushed?: (checkout: string) => Promise<boolean>): Promise<boolean> {
-  for (const c of checkouts) if (await unsafeCheckout(c, pushed)) return true
+async function holdsWork(checkouts: readonly string[], pushed?: (checkout: string) => Promise<boolean>, home?: string): Promise<boolean> {
+  for (const c of checkouts) if (await unsafeCheckout(c, pushed, home)) return true
   return false
 }
 
@@ -1803,18 +1803,27 @@ export function lenders(root: string, names: readonly string[]): Set<string> {
  *  does not ignore (an agent's uncommitted script or note, and the agent may come back for it). Ignored files — the
  *  .venv, build output, downloaded models — do not count: they are rebuilt. A git that cannot answer is unsafe, and
  *  so is a repository with a second worktree: deleting either side breaks the other. */
-async function unsafeCheckout(dir: string, pushed?: (checkout: string) => Promise<boolean>): Promise<boolean> {
+async function unsafeCheckout(dir: string, pushed?: (checkout: string) => Promise<boolean>, home?: string): Promise<boolean> {
   if (await unpushedCommits(dir) > 0 && !(await pushed?.(dir))) return true
   for (const args of [['status', '--porcelain'], ['stash', 'list']]) {
     try {
       if ((await runGit('git', ['-C', dir, ...args], { timeout: 20_000 })).stdout.trim().length > 0) return true
     } catch { return true }
   }
+  // A worktree whose other half lives in another workspace breaks when this one goes. Inside the same workspace they
+  // go together: 39 of the checkouts the sweep kept on 2026-11-18 were a worker's own `worktrees/<repo>/<branch>`.
   try {
     const { stdout } = await runGit('git', ['-C', dir, 'worktree', 'list', '--porcelain'], { timeout: 20_000 })
-    if (stdout.split('\n').filter(l => l.startsWith('worktree ') && existsSync(l.slice(9))).length > 1) return true
+    const trees = stdout.split('\n').filter(l => l.startsWith('worktree ') && existsSync(l.slice(9))).map(l => l.slice(9))
+    if (home === undefined ? trees.length > 1 : trees.some(t => !within(t, home))) return true
   } catch { return true }
   return false
+}
+
+const within = (path: string, dir: string): boolean => {
+  const real = (p: string): string => { try { return realpathSync(p) } catch { return resolve(p) } }
+  const [p, d] = [real(path), real(dir)]
+  return p === d || p.startsWith(`${d}/`)
 }
 
 /**
@@ -1864,7 +1873,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
     if (!checkouts.length) {
       if (readdirSync(dir).length === 0) report.empty++; else report.bare++
     }
-    if (await holdsWork(checkouts, pressure.pushed)) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
+    if (await holdsWork(checkouts, pressure.pushed, dir)) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
     if (isOpen(entry.name) || borrowedFrom(entry.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
   }
@@ -1877,7 +1886,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
   for (const e of kept.filter(e => !isOpen(e.name)).sort((a, b) => a.at - b.at)) {
     if (bytes <= maxBytes) break
     const dir = join(root, e.name)
-    if (await holdsWork(checkoutsIn(dir), pressure.pushed)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
+    if (await holdsWork(checkoutsIn(dir), pressure.pushed, dir)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
     const size = await sizeOf(dir)
     if (isOpen(e.name) || borrowedFrom(e.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++; bytes -= size } catch { /* next sweep's problem */ }
@@ -1899,7 +1908,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
       await rm(join(root, e.name, WORKER_TMP), { recursive: true, force: true }).catch(() => {})
       const checkouts = checkoutsIn(join(root, e.name))
       if (!checkouts.length) continue
-      if (await holdsWork(checkouts, pressure.pushed)) {
+      if (await holdsWork(checkouts, pressure.pushed, join(root, e.name))) {
         // The work stays; its environments do not: a .venv is rebuilt from the lock file, and one was 7.6 GB.
         for (const c of checkouts) {
           if (!existsSync(join(c, '.venv'))) continue
