@@ -167,10 +167,16 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     scopesWork: () => options.scopesWork ?? false, capWorkerGroup: () => options.groupCap ?? true, ...(options.sizeOf ? { sizeOf: options.sizeOf } : {}) })
   live.push(running)
   // A deterministic stand-in for the model: the tests bind the wiring, not the judgement.
+  // pi reports a throwing tool as a failed result; the harness calls execute directly, so return the text.
   const decide = (kind: 'accept' | 'ignore') => {
     const evalId = /Assess eval (\S+)/.exec(judge.prompts.at(-1) ?? pi.sent.at(-1) ?? '')?.[1]
-    if (!evalId) return
-    invoke0(pi, 'ticket_decide', { evalId, kind, reason: kind === 'accept' ? 'the operator asked' : 'not a request', title: 'Ship tonight', scope: 'the named change', acknowledgement: 'on it' })
+    if (!evalId) return ''
+    try {
+      invoke0(pi, 'ticket_decide', { evalId, kind, reason: kind === 'accept' ? 'the operator asked' : 'not a request', title: 'Ship tonight', scope: 'the named change', acknowledgement: 'on it' })
+      return ''
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
   }
   const settleJudge = () => { for (const l of judgeListeners) l({ type: 'agent_settled' }) }
   // The Session's own events, so a test can die one: the pane closes, the process exits, a restart adopts a ticket whose session is gone.
@@ -1831,8 +1837,8 @@ describe('a pull request per ticket', () => {
     expect(ticket().ended).toMatchObject({ outcome: 'stopped' })
     expect(f.closes, 'a ticket waiting on CI keeps its issue open').toEqual([])
     // And the door is real: the stopped ticket does not resume, and the comment reaches the judge as a new ask.
-    // The judge answers one eval at a time, and the issue's own first-sight eval is still waiting on it.
-    f.decide('ignore')
+    // The eval the streak stopped on is finished, so an answer for it is refused out loud, not swallowed.
+    expect(f.decide('ignore')).toMatch(/has finished or a later eval replaced it/)
     await f.running.tick()
     f.addComment('508', 'octocat', 'CI is fixed now, take it again', new Date().toISOString())
     await f.running.tick()
