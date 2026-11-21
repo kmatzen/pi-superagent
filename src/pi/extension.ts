@@ -419,6 +419,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // Kept across restarts: rendered from an empty map, every status comment lost its titles and states for a pass.
   const PULL_STATES = 'router:pull-states'
   const pullStates = new Map<string, PullState>(Object.entries(repos.kv.get<Record<string, PullState>>(PULL_STATES) ?? {}))
+  // The follower's `checksSeen`: a running build, not an outcome, so it is stored and never wakes anybody.
+  const recordChecks = (id: string, checks: { sha: string; state: ChecksState }): void => {
+    const before = pullStates.get(id)
+    if (!before || (before.checks?.sha === checks.sha && before.checks.state === checks.state)) return
+    pullStates.delete(id)
+    pullStates.set(id, { ...before, checks })
+    for (const stale of [...pullStates.keys()].slice(0, Math.max(0, pullStates.size - 500))) pullStates.delete(stale)
+    repos.kv.set(PULL_STATES, Object.fromEntries(pullStates))
+  }
   const tracker = new PullTracker({
     kv: repos.kv, home: cfg.githubRepo ?? '', state: id => pullStates.get(id),
     ...(githubApi?.upsertComment ? { write: (issue: number, comment: number | undefined, body: string, repo?: string) => githubApi.upsertComment!(issue, comment, body, repo) } : {}),
@@ -434,7 +443,6 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const checksPending = (ticket: Ticket): boolean => (ticket.follows ?? []).some(follow =>
     !follow.closed && follow.thread.startsWith('github:')
       && pullStates.get(follow.thread.slice('github:'.length))?.checks?.state === 'pending')
-
   // One message per assignment, ending and text; a failed launch drops the text, since it retries every poll.
   const announce = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun, relaunched: boolean): void => {
     const channel = ticket.channels[0]
@@ -751,6 +759,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       repos.kv.set(PULL_STATES, Object.fromEntries(pullStates))
       wakeOnChecks(repos.tickets.open(), thread, pull, checks, state, checkWakePorts)
     },
+    checksSeen: (thread, _pull, checks) => recordChecks(thread.id, checks),
     closed: (thread, pull, outcome, at, state) => {
       const key = `github:${thread.id}`
       const waiting = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && !f.closed)).map(t => t.id)

@@ -41,6 +41,7 @@ function fixture(state: Partial<PullState> = {}, checks: ChecksState = 'pending'
     log: (t, reason) => { logged.push({ ticket: t, reason }) },
   }
   const tickets: Ticket[] = [ticket()]
+  const seen: Array<{ sha: string; state: ChecksState }> = []
   const follower = new PullFollower({
     home: 'o/r', api, openThreads: () => new Set(), positions, self: 'bot', everyMs: 0,
     receive: () => {},
@@ -48,8 +49,9 @@ function fixture(state: Partial<PullState> = {}, checks: ChecksState = 'pending'
     reopened: () => 0,
     closed: () => {},
     checksSettled: (thread, _pull, settled, pullState) => { wakeOnChecks(tickets, thread, PULL, settled, pullState, ports) },
+    checksSeen: (_thread, _pull, checks) => { seen.push(checks) },
   })
-  return { current, rollup, wakes, recruited, logged, ports, follower, tickets, waiting: (when = at('05:00')) => { wakes.t1 = { at: when } } }
+  return { current, rollup, wakes, recruited, logged, ports, follower, tickets, seen, waiting: (when = at('05:00')) => { wakes.t1 = { at: when } } }
 }
 
 describe('event wake on pull checks', () => {
@@ -66,6 +68,15 @@ describe('event wake on pull checks', () => {
     expect(f.wakes.t1).toBeUndefined()
     await f.follower.reconcile(f.tickets)
     expect(f.recruited).toHaveLength(1)
+  })
+
+  it('a build that is still running is published as pending, and recruits nobody: the receipt reads it (agent-inbox#667)', async () => {
+    const f = fixture()
+    f.waiting()
+    await f.follower.reconcile(f.tickets)
+    expect(f.seen, 'the running build reaches the caller').toEqual([{ sha: 'sha1', state: 'pending' }])
+    expect(f.recruited, 'a running build is not an outcome').toEqual([])
+    expect(f.wakes.t1?.at, 'the timer stays armed').toBe(at('05:00'))
   })
 
   it('green with auto-merge armed recruits nobody and leaves the ticket to its merge', async () => {
