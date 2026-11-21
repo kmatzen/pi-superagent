@@ -37,6 +37,9 @@ export const SILENT_NUDGE = 'You ended your turn without calling ticket_report, 
   + 'blocked (you need a person, with the question), or failed (what broke). One line is enough.'
 export const SILENT_NUDGE_FILE = 'zz-self-nudge.json'
 
+/** Nudges one worker gets for the outcome it forgot; past that, the next silence files the failure. */
+export const MAX_SELF_NUDGES = 2
+
 /** Written when a person types in the worker's tab: the router keeps a freed tab its person is still using. */
 export const PERSON_FILE = 'person.json'
 
@@ -151,6 +154,8 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   // One nudge per WORKER, not per run: a counter reset on agent_start lets a worker that finishes
   // silently be nudged forever, which is worse than parking it. Proved by test on the first attempt.
   let silentStreak = 0
+  let nudges = 0
+  let silentFiled = false
   const inflight = new Map<string, { file: string; text: string }>()
   // pi 1.5 marks a session busy only after its input handlers ran: a second send in one idle burst starts a
   // second run that pi kills on screen, never through this file, and the next settle deleted it unread (24
@@ -164,14 +169,28 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   })
   pi.on('agent_settled', (event) => {
     // Filed here, before the settle: only this process knows the order of a run's events for certain.
-    if (!reported && silentStreak === 0) {
+    const silent = !reported
+    if (silent && handedOver) {
+      // A hand-over report frees this session and the router reads nothing after it, so this run is the worker's
+      // own background task (a log tail, a finished pluto-run) waking a session that already answered: a nudge
+      // buys a report nobody reads, and the round after files a false "finished without calling ticket_report"
+      // over the real one. Measured 2026-11-14→21: all 46 workers with a REPEATED self-nudge had handed over,
+      // as had 165 of the 259 with a single one; the 87 left are the forgotten call this watches for.
+      append('events.jsonl', { type: 'silentAfterHandover' })
+    } else if (silent && silentStreak === 0 && nudges < MAX_SELF_NUDGES) {
       // The first silence is a forgotten call: ask for the outcome, file nothing.
       silentStreak = 1
+      nudges += 1
       writeFileSync(join(inbox, SILENT_NUDGE_FILE), JSON.stringify({ text: SILENT_NUDGE, mode: 'followUp' }))
       append('events.jsonl', { type: 'selfNudge' })
-    } else if (!reported) {
+    } else if (silent && silentStreak === 0) {
+      silentStreak = 1
+      append('events.jsonl', { type: 'selfNudgeExhausted', nudges })
+    } else if (silent && !silentFiled) {
+      // Once per worker: 12 landed in 3 workers in a week, and the second buries the first.
+      silentFiled = true
       append('reports.jsonl', { state: 'failed', summary: SILENT_FINISH, question: null, origin: 'silent' })
-    } else {
+    } else if (!silent) {
       silentStreak = 0
     }
     reported = false

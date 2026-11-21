@@ -290,12 +290,14 @@ describe('the worker role', () => {
   })
 
   it('a run that reported is not a silent finish, and the next silence is a nudge, not a report', () => {
+    // `failed` frees nobody, so this worker stays live and the streak applies; a hand-over report ends the
+    // session, and that silence is its own background task, not a forgotten call. Asserted on the freed worker below.
     const dir = tmp()
     const f = fakePi()
     workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: dir })
     const report = f.tools.find(t => t.name === 'ticket_report')!
     f.emit('agent_start')
-    report.execute('c1', { state: 'blocked', summary: 'needs a decision', question: 'Ship it?' })
+    report.execute('c1', { state: 'failed', summary: 'the build broke on a missing dependency' })
     f.emit('agent_start')
     f.emit('agent_settled')
     expect(lines(join(dir, 'reports.jsonl')).map(r => r.origin ?? 'worker'), 'a retry after a report files nothing').toEqual(['worker'])
@@ -304,6 +306,19 @@ describe('the worker role', () => {
     f.emit('agent_settled')
     expect(lines(join(dir, 'reports.jsonl')).length, 'the next silence nudges first').toBe(1)
     expect(existsSync(join(dir, 'inbox', SILENT_NUDGE_FILE)), 'and the nudge is queued').toBe(true)
+
+    // Measured 2026-11-14 to 21: all 46 workers that nudged more than once had already handed over.
+    const freed = tmp()
+    const g = fakePi()
+    workerRole(g.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: freed })
+    g.emit('agent_start')
+    g.tools.find(t => t.name === 'ticket_report')!.execute('c1', { state: 'ready', summary: 'done' })
+    g.emit('agent_start')
+    g.emit('agent_settled')
+    g.emit('agent_start')
+    g.emit('agent_settled')
+    expect(existsSync(join(freed, 'inbox', SILENT_NUDGE_FILE)), 'a freed session gets no nudge').toBe(false)
+    expect(lines(join(freed, 'events.jsonl')).map(e => e.type), 'and the log says why').toContain('silentAfterHandover')
   })
 
   it('delivers inputs from the router once the session runs, in the order written, the way the router asked', async () => {
