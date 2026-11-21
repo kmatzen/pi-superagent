@@ -70,7 +70,7 @@ describe('SessionAssessor', () => {
     expect(f.assessor.waiting()).toHaveLength(0)
   })
 
-  it('a timed-out eval is asked again, and a late answer for the dead one creates nothing', () => {
+  it('a timed-out eval is asked again, and a late answer for the dead one fails loudly and creates nothing', () => {
     const f = fixture(30_000)
     f.ask()
     const dead = f.delivered[0]!.evalId
@@ -78,8 +78,11 @@ describe('SessionAssessor', () => {
     // REQUEUES: a busy assessor does not lose the request, so a fresh eval is delivered.
     expect(f.delivered.map(d => d.evalId)).toHaveLength(2)
     expect(f.assessor.waiting().map(w => w.evalId)).toEqual([f.delivered[1]!.evalId])
-    f.assessor.decide(dead, { kind: 'accept', title: 'Late', scope: 's', reason: 'r' })
+    expect(() => f.assessor.decide(dead, { kind: 'accept', title: 'Late', scope: 's', reason: 'r' }))
+      .toThrow('has finished or a later eval replaced it')
     expect(f.repo.tickets.open()).toHaveLength(0)
+    f.assessor.decide(f.delivered[1]!.evalId, { kind: 'accept', title: 'On time', scope: 's', reason: 'r' })
+    expect(f.repo.tickets.open()).toHaveLength(1)
     // Two more expiries and the engine records it unavailable: the panel must show nobody waiting.
     f.tick(60)
     f.tick(60)
