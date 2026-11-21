@@ -104,6 +104,8 @@ const reviewsKey = (repo: string) => `source:github:${repo}:reviews`
 export interface PositionStore {
   get<T>(key: string): T | undefined
   set(key: string, value: unknown): void
+  /** Optional: the SQLite store has it, a test double often not. A park is forgotten once it no longer holds. */
+  delete?(key: string): void
 }
 
 const DAY_MS = 86_400_000
