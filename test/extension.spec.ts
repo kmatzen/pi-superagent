@@ -8,7 +8,7 @@ import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
 import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
-import type { PullApi, PullState } from '../src/pi/pulls.ts'
+import type { ChecksState, PullApi, PullState } from '../src/pi/pulls.ts'
 import { paneKeysScrubbed, scrubPaneEnv } from './setup.ts'
 
 import { PRIORITY_REGRANT_CAP, REGRANT_CAP, regrantable, regrantPlan, standingAskEntitled } from '../src/pi/extension.ts'
@@ -1255,13 +1255,16 @@ describe('a pull request per ticket', () => {
     const comments = new Map<string, IssueComment[]>()
     const created = new Date(Date.now() - 60_000).toISOString()
     const failing = new Set<string>()
+    const builds = new Map<string, ChecksState>()
     const api: PullApi = {
       pull: async (repo, n) => { if (failing.has(`${repo}#${n}`)) throw new Error('HTTP 502 Bad Gateway'); return states.get(`${repo}#${n}`) },
       comments: async (repo, n) => comments.get(`${repo}#${n}`) ?? [],
       reviews: async () => [],
+      checks: async (repo, sha) => builds.get(`${repo}@${sha}`) ?? 'none',
     }
     return {
       api, comments, states, failing,
+      build: (repo: string, sha: string, state: ChecksState) => { builds.set(`${repo}@${sha}`, state) },
       open: (repo: string, n: number, more: Partial<PullState> = {}) => states.set(`${repo}#${n}`, { open: true, merged: false, createdAt: created, ...more }),
       end: (repo: string, n: number, merged: boolean, closedAt = new Date().toISOString(), mergedBy?: string) =>
         states.set(`${repo}#${n}`, { open: false, merged, createdAt: created, closedAt, ...(mergedBy ? { mergedBy } : {}) }),
@@ -1324,6 +1327,24 @@ describe('a pull request per ticket', () => {
     await f.running.tick()
     expect(f.receipts('494')).toContain('#494 merged: https://github.com/o/r/pull/85, https://github.com/o/r/pull/86. This ticket is done.')
     expect(callsOf(f, '494').filter(c => c === 'close:494'), 'closed again').toHaveLength(2)
+  })
+
+  it('a build the router reads as running is what the receipt names, from the read alone (agent-inbox#667)', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    await working(f, '497')
+    pulls.open('o/r', 93, { headSha: 'sha-build' })
+    pulls.build('o/r', 'sha-build', 'pending')
+    f.workers[0]!.report!({ state: 'waiting', summary: 'Pushed the fix; CI is running.', pullRequests: ['https://github.com/o/r/pull/93'], wakeInMinutes: 30 })
+    await f.running.tick()
+    await f.running.tick()
+    f.addComment('497', 'octocat', 'Is it still building?')
+    await f.running.tick()
+    await until(() => f.workers.length === 2)
+    f.workers[1]!.report!({ state: 'waiting', summary: 'CI is still running on the same commit.', wakeInMinutes: 30 })
+    await f.running.tick()
+    const last = f.feed.posts.filter(p => p.issue === 497).at(-1)!.body
+    expect(last, 'the read of a running build, not a hand-written state, drives the wording').toMatch(/Next check: a fresh worker the moment its pull-request checks finish/)
   })
 
   it('a waiting ticket whose pull request is still building is told the checks, not the clock, wake it (agent-inbox#667)', async () => {

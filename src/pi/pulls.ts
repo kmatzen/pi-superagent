@@ -109,6 +109,8 @@ export interface FollowerOptions {
    *  pass that already reads the pull; who the outcome is for is the caller's, because only a ticket that asked for
    *  a check gets a session — CI churn recruited one worker 48 times on ticket #205. */
   checksSettled?(thread: ThreadRef, pull: PullRef, checks: { sha: string; state: ChecksState }, state: PullState): void
+  /** Every checks answer, `pending` included — only settled ones reach `checksSettled`, so nothing stored said `pending`. */
+  checksSeen?(thread: ThreadRef, pull: PullRef, checks: { sha: string; state: ChecksState }, state: PullState): void
   now?: () => number
   /** How often a pull request outside the watched repository is read: three calls each time, against GitHub's hourly limit. */
   everyMs?: number
@@ -403,6 +405,7 @@ export class PullFollower {
     }
     if (this.unreadChecks.delete(id)) this.options.warn('pull.checks_readable', { thread: id })
     this.options.positions.set(key, { sha, state: latest })
+    this.options.checksSeen?.({ source: 'github', id }, pull, { sha, state: latest }, state)
     // `pending` is not an outcome, and `none` is an outcome that never arrives: both keep the ticket's timer.
     if (latest === 'pending' || latest === 'none') return
     this.options.checksSettled?.({ source: 'github', id }, pull, { sha, state: latest }, state)
