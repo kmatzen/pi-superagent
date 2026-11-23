@@ -107,7 +107,9 @@ recovered within five minutes, and a restart costs the router's tab and nothing 
 their own sessions and the new router adopts them. Restarts are capped at one per
 `PI_SUPERAGENT_RESTART_COOLDOWN_MIN` (30), so a fault a restart cannot fix cannot restart the router forever —
 and a healthy beat clears that cap, because a loop that dies in the boot right after a watchdog restart used to
-be outside the remedy for the full cooldown (measured 2026-11-11: an outage lasted 25 minutes that way).
+be outside the remedy for the full cooldown (measured 2026-11-11: an outage lasted 25 minutes that way). Where
+a restart resumes a session too full to boot an engine, clearing that session id is part of the remedy, and
+"The tab is up and the engine is down" under "When something goes wrong" is that case.
 Install it once:
 
 ```sh
@@ -289,6 +291,27 @@ report attached: the process is alive in herdr, but the loop that rewrites that 
 running — a pass blocked synchronously cannot report its own stall. Restart it (`scripts/superagent restart`).
 A router paused on purpose keeps writing, one line per beat, so a pause never reads as stale; the dial is
 `PI_SUPERAGENT_HEALTH_STALE_MIN` (15).
+
+**The tab is up and the engine is down.** `superagent start` says `the router did not report ready within
+60s`, `status` says `running and not beating: health.json is N min old`, and `engine.log` holds no
+`router.start` stamped after the router's tab: pi is sitting in the tab and no engine was ever created in it,
+so `ready` is missing and `health.json` keeps the timestamp of the router that died. The cause is usually the
+session `start` resumes, the id in `<state>/session-id`: a pi session at the top of its context window has no
+room left for its startup turn, and the extension is never reached. herdr prints the number — `herdr agent get
+superagent` shows it as `tokens.context_usage`, and the tab header shows the same bar. A restart resumes the
+same session, so it reproduces the fault: measured 2026-11-23, four starts and two remedy passes reported the
+same two lines and nothing else. Clear the id and start fresh:
+
+```sh
+rm ~/.pi/superagent/session-id && superagent restart    # the next start writes a fresh id
+```
+
+That costs the router its chat log and nothing else: `tickets.db` is the engine's memory, the workers are
+their own sessions, and a fresh id is minted on the next start. `start` and `status` name this case when herdr
+reports the router's session at `PI_SUPERAGENT_CONTEXT_FULL_PCT` (80) percent or more, and `remedy` clears the
+id on that reading, so the restart it makes opens a fresh session. A boot that did write its `router.start`
+keeps its session id: that is the stall a restart does fix, and the router's history is not the price of
+fixing it.
 
 **The board is busy and nothing starts.** `tick n=…` carries `launchPending` (launches waiting for a free
 worker slot) and `open`/`running`/`parked`. Waiting launches are the queue doing its job, not a stall; the

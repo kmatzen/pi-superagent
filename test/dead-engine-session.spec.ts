@@ -56,6 +56,12 @@ const readIfExists = (file: string) => {
   try { return readFileSync(file, 'utf8') } catch { return '' }
 }
 
+/** engine.log.1: rotation moves a long boot's `router.start` out of the live file. */
+const logRouterStartRotated = (atMs: number) => appendFileSyncLine(
+  join(state, 'engine.log.1'),
+  `${new Date(atMs).toISOString()} INFO  router.start dataDir=${state} panelPort=8799\n`,
+)
+
 beforeEach(() => {
   const root = mkdtempSync(join(tmpdir(), 'pi-sa-dead-engine-')); dirs.push(root)
   state = join(root, 'state'); herdrDir = join(root, 'herdr')
@@ -108,6 +114,19 @@ describe('scripts/superagent: the tab is up and the engine is down', { timeout: 
     const before = sessionId()
     // A router.start stamped after this tab opened: a wedged loop, the fault a restart does fix.
     logRouterStart(Date.now())
+    stopTheBeat()
+    const r = run(['remedy'], { FAKE_HERDR_READY: join(state, 'ready'), FAKE_HERDR_CONTEXT: '97%' })
+    expect(r.stdout + r.stderr).not.toMatch(/cleared .*session-id/)
+    expect(sessionId()).toBe(before)
+    expect(resumedId()).toBe(before)
+  })
+
+  it('counts a router.start that the log rotation left in engine.log.1', () => {
+    expect(startRouter().status).toBe(0)
+    const before = sessionId()
+    // Measured on the live box: a 4-day boot rotates engine.log at 5 MB, so a healthy router's only
+    // `router.start` sits here, and reading the live file alone deletes that router's session next pass.
+    logRouterStartRotated(Date.now())
     stopTheBeat()
     const r = run(['remedy'], { FAKE_HERDR_READY: join(state, 'ready'), FAKE_HERDR_CONTEXT: '97%' })
     expect(r.stdout + r.stderr).not.toMatch(/cleared .*session-id/)

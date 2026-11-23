@@ -298,14 +298,17 @@ session_is_full() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) [ "$1" -ge "$CO
 # createRouterExtension writes, so a boot with no such line newer than its own tab is a tab with pi sitting
 # in it and no router. No tab, no verdict: a closed tab means `stop` ran or a person closed it, and there is
 # no live boot to read. The tab's mtime is the boot time because `start` writes the place file seconds
-# before it asks herdr to start pi; 2 s of slack covers a slow clock between the two.
+# before it asks herdr to start pi; 2 s of slack covers a slow clock between the two. Both log files are
+# read, because a busy router rotates engine.log at 5 MB and a long boot's `router.start` lands in
+# engine.log.1 — measured on the live box, where the running router's only `router.start` is in the rotated
+# file and a live-file-only scan reads a healthy 4-day router as an engine that never booted.
 boot_without_engine() {
   [ -f "$ROUTER_PLACE" ] || return 1
   node -e 'const fs=require("fs");let bootMs;try{bootMs=fs.statSync(process.argv[1]).mtimeMs}catch{process.exit(1)}
-let text="";try{text=fs.readFileSync(process.argv[2],"utf8")}catch{process.exit(0)}
+for(const file of process.argv.slice(2)){let text="";try{text=fs.readFileSync(file,"utf8")}catch{continue}
 for(const line of text.split("\n")){const m= /^(\S+)\s+\w+\s+router\.start(\s|$)/.exec(line);if(!m)continue;
-const t=Date.parse(m[1]);if(!Number.isNaN(t)&&t>=bootMs-2000)process.exit(1)}
-process.exit(0)' "$ROUTER_PLACE" "$STATE/engine.log"
+const t=Date.parse(m[1]);if(!Number.isNaN(t)&&t>=bootMs-2000)process.exit(1)}}
+process.exit(0)' "$ROUTER_PLACE" "$STATE/engine.log.1" "$STATE/engine.log"
 }
 
 # Say the case where a reader is already standing in front of a tab that is up: what is up, what is down, and
@@ -334,7 +337,7 @@ clear_full_session() {
   local pct; pct="$(router_context_pct)"
   session_is_full "$pct" || return 0
   rm -f "$STATE/session-id"
-  echo "health: the router resumed a session at ${pct}% context and booted no engine; cleared $STATE/session-id, so this start opens a fresh session"
+  echo "health: the router resumed a session at ${pct}% context and booted no engine; cleared $STATE/session-id, so the next start opens a fresh session"
   return 0
 }
 
