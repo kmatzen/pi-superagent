@@ -67,7 +67,19 @@ export function readModel(src: PanelSource) {
     paused: src.isPaused(),
     health: src.health(),
     load: src.load(),
-    needsPerson: open.filter(t => t.attention).map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', question: (t.attention as { question?: string }).question ?? '', at: t.assignments.at(-1)?.report?.at ?? '', url: issueUrl(t, src.config.githubRepo) })),
+    needsPerson: open.filter(t => t.attention).map(t => {
+      const r = t.assignments.at(-1)?.report
+      const summary = String(r?.summary ?? '')
+      return {
+        id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '',
+        question: (t.attention as { question?: string }).question ?? '',
+        summary,
+        // The router nudges when a worker goes silent; that is the router speaking, not the worker asking.
+        nudged: /^the worker (sent no event|has run)/.test(summary),
+        screen: `/worker?ticket=${encodeURIComponent(t.id)}`,
+        at: r?.at ?? '', url: issueUrl(t, src.config.githubRepo),
+      }
+    }),
     open: open.map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', state: t.assignments.at(-1)?.state ?? 'queued', waitsFor: waitingOn(t),
       screen: `/worker?ticket=${encodeURIComponent(t.id)}`,
       issue: t.channels[0]?.source === 'github' ? t.channels[0].thread : '', url: issueUrl(t, src.config.githubRepo),
@@ -100,12 +112,12 @@ table{border-collapse:collapse;width:100%}td,th{padding:.3rem .5rem;border-botto
 .count{color:#666}.ask{background:#fff8dc;padding:.5rem;border-left:3px solid #c90}
 .muted{color:#666}code{background:#eee;padding:0 .2rem}
 </style>
-<nav><a href="#overview">Overview</a><a href="#source">Source</a><a href="#trigger">Trigger</a><a href="#eval">Eval</a><a href="#execution">Execution</a><a href="#settings">Settings</a></nav>
+<nav><a href="#overview">Overview</a><a href="#source">Source</a><a href="#trigger">Trigger</a><a href="#eval">Eval</a><a href="#workers">Workers</a><a href="#execution">Execution</a><a href="#settings">Settings</a></nav>
 <h1>${esc(title)}</h1>${body}`
 
 export function renderPanel(m: Model): string {
   const quiet = (n: number, label: string): string => n === 0 ? '' : `<li>${n} ${esc(label)}</li>`
-  const asks = m.needsPerson.map(a => `<div class="ask">${a.url ? `<a href="${esc(a.url)}">${esc(a.thread)}</a>` : `<a href="/ticket?id=${encodeURIComponent(a.id)}">${esc(a.thread || a.id)}</a>`} — ${esc(a.question || 'needs a person')}<div class="muted">${esc(a.title)}</div></div>`).join('')
+  const asks = m.needsPerson.map(a => `<div class="ask">${a.url ? `<a href="${esc(a.url)}">${esc(a.thread)}</a>` : `<a href="/ticket?id=${encodeURIComponent(a.id)}">${esc(a.thread || a.id)}</a>`} — ${a.nudged ? `<strong>quiet, no question from the worker</strong>: ${esc(a.summary)}` : esc(a.question || a.summary || 'needs a person')}<div class="muted">${esc(a.title)} · <a href="${esc(a.screen)}">screen</a></div></div>`).join('')
     || '<p class="muted">Nothing needs you.</p>'
   const rows = (rows: Record<string, unknown>[], cols: string[]): string => {
     if (rows.length === 0) return '<p class="muted">none</p>'
@@ -123,6 +135,8 @@ export function renderPanel(m: Model): string {
 <section id="trigger"><h2>Trigger</h2>${rows(m.evaluating, ['key', 'evalId', 'since'])}
 <p class="count">Waiting on a judgement: ${m.waitingAssessment.length}</p></section>
 <section id="eval"><h2>Eval <span class="count">(${m.counts.decisions24h} in 24 h)</span></h2>${rows(m.recentDecisions, ['at', 'kind', 'reason', 'rules', 'ticket'])}</section>
+<section id="workers"><h2>Workers <span class="count">(${m.workers.length} with a tab: ${m.load.running} on a run, ${m.load.parked} parked)</span></h2>
+${rows(m.workers.map(w => ({ thread: w.ticketId.slice(0, 8), title: w.workspace.split('/').pop() ?? w.workspace, state: w.busy === false ? 'parked' : 'running', screen: `/worker?ticket=${encodeURIComponent(w.ticketId)}`, detail: `${w.watch || w.workspace} · ${w.events} events · quiet ${w.quietSeconds}s` })), ['thread', 'title', 'state', 'detail', 'screen'])}</section>
 <section id="execution"><h2>Execution <span class="count">(${m.open.length} open, ${m.load.running}/${m.load.maxWorkers} working, ${m.load.parked} parked, ${m.load.queued} queued)</span></h2>
 ${rows(m.open, ['thread', 'title', 'state', 'waitsFor', 'worker', 'screen'])}
 <h2>Ended</h2>${rows(m.ended, ['id', 'title', 'outcome', 'at'])}</section>

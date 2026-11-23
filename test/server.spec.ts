@@ -8,6 +8,28 @@ import { createPanelServer, type PanelSource } from '../src/pi/server.ts'
 import type { IssueComment, IssueState } from '../src/pi/source-github.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 
+async function serve(src: PanelSource): Promise<{ port: number; close: () => Promise<void> }> {
+const { server } = createPanelServer(src)
+await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+const port = (server.address() as net.AddressInfo).port
+return { port, close: () => new Promise<void>(resolve => server.close(() => resolve())) }
+}
+
+const source = (over: Record<string, unknown>): PanelSource => ({
+now: () => new Date().toISOString(),
+repos: { tickets: { list: () => [], get: () => undefined }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } },
+load: () => ({ running: 0, parked: 0, queued: 0, maxWorkers: 4 }),
+workers: () => [],
+log: () => {},
+health: () => ({}),
+isPaused: () => false,
+setPaused: () => {},
+token: () => 'sekret',
+config: { githubRepo: 'o/r' },
+assessor: { waiting: () => [] },
+...over,
+} as unknown as PanelSource)
+
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-panel-')); dirs.push(d); return d }
 // The POST routes take the panel secret from the state directory the router made on its first start.
@@ -297,26 +319,6 @@ describe('the panel under a failing store', () => {
 })
 
 describe('the panel worker screen', () => {
-  async function serve(src: PanelSource): Promise<{ port: number; close: () => Promise<void> }> {
-    const { server } = createPanelServer(src)
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as net.AddressInfo).port
-    return { port, close: () => new Promise<void>(resolve => server.close(() => resolve())) }
-  }
-  const source = (over: Record<string, unknown>): PanelSource => ({
-    now: () => new Date().toISOString(),
-    repos: { tickets: { list: () => [], get: () => undefined }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } },
-    load: () => ({ running: 0, parked: 0, queued: 0, maxWorkers: 4 }),
-    workers: () => [],
-    log: () => {},
-    health: () => ({}),
-    isPaused: () => false,
-    setPaused: () => {},
-    token: () => 'sekret',
-    config: { githubRepo: 'o/r' },
-    assessor: { waiting: () => [] },
-    ...over,
-  } as unknown as PanelSource)
   const hdr = (token?: string) => ({ host: '127.0.0.1', 'x-superagent-request': '1', ...(token ? { 'x-superagent-token': token } : {}) })
 
   it('reads a worker screen, and typing needs the panel token', async () => {
@@ -365,26 +367,6 @@ describe('the panel worker screen', () => {
 })
 
 describe('the panel behind a reverse proxy', () => {
-  async function serve(src: PanelSource): Promise<{ port: number; close: () => Promise<void> }> {
-    const { server } = createPanelServer(src)
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-    const port = (server.address() as net.AddressInfo).port
-    return { port, close: () => new Promise<void>(resolve => server.close(() => resolve())) }
-  }
-  const source = (over: Record<string, unknown>): PanelSource => ({
-    now: () => new Date().toISOString(),
-    repos: { tickets: { list: () => [], get: () => undefined }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } },
-    load: () => ({ running: 0, parked: 0, queued: 0, maxWorkers: 4 }),
-    workers: () => [],
-    log: () => {},
-    health: () => ({}),
-    isPaused: () => false,
-    setPaused: () => {},
-    token: () => 'sekret',
-    config: { githubRepo: 'o/r' },
-    assessor: { waiting: () => [] },
-    ...over,
-  } as unknown as PanelSource)
 
   it('answers the proxy name it was configured with, and no other name', async () => {
     const s = await serve(source({ config: { githubRepo: 'o/r', panelHosts: ['superagent.corp.adobe.com'] } }))
@@ -418,5 +400,40 @@ describe('the panel behind a reverse proxy', () => {
     const anon = await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: `127.0.0.1:${s.port}` } })
     expect(anon.status, 'unset means the localhost panel behaves exactly as before').toBe(200)
     await s.close()
+  })
+})
+
+describe('what the panel says a person is needed for', () => {
+  const ticket = (summary: string, question: string) => ({
+    id: 't1', title: 'Fix the mirror', channels: [{ source: 'github', thread: 'o/r#924' }],
+    assignments: [{ state: 'running', report: { state: 'blocked', summary, question, at: new Date().toISOString() } }],
+    attention: { question },
+  }) as never
+
+  const page = async (t: never) => {
+    const s = await serve(source({ repos: { tickets: { list: () => [t], get: () => t }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } } }))
+    const html = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
+    await s.close()
+    return html
+  }
+
+  it('names the router silence nudge as the router, not as a question from the worker', async () => {
+    const nudge = await page(ticket('the worker sent no event for 16 minutes in /work/t1', 'steer it, stop it, or accept the work it has done'))
+    expect(nudge, 'the operator reads why the row is there').toContain('quiet, no question from the worker')
+    expect(nudge).toContain('sent no event for 16 minutes')
+    const asked = await page(ticket('the prover is missing on the builder', 'should I install Lean 4.33.1 or skip the mirror?'))
+    expect(asked).toContain('should I install Lean 4.33.1 or skip the mirror?')
+    expect(asked).not.toContain('quiet, no question from the worker')
+  })
+
+  it('lists live workers with a screen link, and links the screen from each ask', async () => {
+    const s = await serve(source({ workers: () => [{ ticketId: 't9', sessionId: 's9', workspace: '/work/t9', startedAt: 'x', lastEventAt: 'y', events: 4, quietSeconds: 12, ageSeconds: 60, watch: 'o/r#9', busy: true }] }))
+    const html = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
+    expect(html).toContain('id="workers"')
+    expect(html).toContain('/worker?ticket=t9')
+    expect(html.match(/\/worker\?ticket=/g)?.length ?? 0).toBeGreaterThan(0)
+    await s.close()
+    const ask = await page(ticket('the prover is missing', 'install Lean?'))
+    expect(ask).toContain('/worker?ticket=t1')
   })
 })
