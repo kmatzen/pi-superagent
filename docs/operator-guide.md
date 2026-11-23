@@ -85,12 +85,27 @@ terminal, run `tail -F ~/.pi/superagent/engine.log`.
 
 ```sh
 superagent status    # 0 healthy · 1 down · 2 up and not beating · 3 waiting for setup · 4 a part is failing
-superagent remedy    # what the health job runs: 1 starts, 2 restarts, 0 and 3 and 4 do nothing
-superagent restart   # safe at any time: workers keep running and the new router adopts them
+                     #   · 5 an engine is running with no tab (a start would run a second one)
+superagent remedy    # what the health job runs: 1 starts, 2 and 5 restart, 0 and 3 and 4 do nothing
+superagent restart   # stops the engine and PROVES it stopped before starting a new one; workers keep running
 superagent stop      # leaves a marker, so the health check will not restart it
 superagent start     # clears the marker; refuses a checkout with uncommitted code (--allow-dirty overrides)
 superagent backup    # one sqlite-safe copy of tickets.db per day into <state>/archive, last 14 kept
 ```
+
+**`status` reports two things, in two words, because they fail apart.** `engine:` is the process that runs
+the router loop — its pid, when it booted, the repository it booted on, how old its `health.json` is. `tab:`
+is the herdr tab that shows it. A tab can be up with no engine behind it (pi booted, the supervisor never
+came up: code 2), and an engine can tick with no tab (herdr forgot the agent: code 5). Measured 2026-11-23
+19:15, the second one: `stop` answered "not running", `restart` opened a second tab, and the first engine
+kept the board repository from its own boot for an hour — the `PI_SUPERAGENT_GITHUB_REPO` written into
+`config.env` that day never took effect, because the router that answered was the old process. That is why
+`restart` now proves the stop: it waits for the engine's pid to be gone (SIGTERM, then SIGKILL) and for its
+panel port to be free, and it fails naming the pid it could not stop instead of starting a second engine
+over it. `start` refuses the same way, so a doubled router cannot be created by accident.
+
+Read `engine: up (pid …, booted …, githubRepo=…)` when a setting you changed has not taken effect: it names
+which engine you are talking to.
 
 In a checkout, the same script is `scripts/superagent`.
 
@@ -100,7 +115,9 @@ with the package, explains each setting and its default. Restart to apply a chan
 On macOS, the launchd job in [`launchd/`](../launchd/com.example.superagent-health.plist) runs
 `superagent remedy` every five minutes. It **starts** a router that is down (code 1) and **restarts** one that
 is up and not beating (code 2, the stalled tick loop), which is the fault a running router refuses to fix: the
-router is up, so `start` answers "already running" and the stall would stay loud and permanent. It does nothing
+router is up, so `start` answers "already running" and the stall would stay loud and permanent. It restarts
+the engine that ticks with no tab (code 5) the same way, because the remedy for that one is a start and a
+start over a live engine is the fault. It does nothing
 to a router that is healthy (0), waiting for setup (3), carrying a part a restart cannot fix (4), or stopped on
 purpose: `remedy` honours the stop marker on its own, so a deliberate stop stays deliberate. A parked loop is
 recovered within five minutes, and a restart costs the router's tab and nothing else, because the workers are
@@ -267,6 +284,12 @@ repositories every two minutes.
 
 **Status exits 2.** Read `~/.pi/superagent/health.json` to identify the failing component. For a
 GitHub source error, check `gh auth status`. The next successful poll clears the error.
+
+**Status exits 5, `engine: up …; tab: absent`.** The router's process is ticking and herdr has no agent for
+it, so `status` cannot ask herdr about it and `start` refuses to run a second one over it. `superagent
+restart` takes it back: it kills the engine, proves the pid is gone and the panel port is free, then starts
+one. If it names a pid it could not stop, that process is yours to end by hand — the restart stopped, and
+started, nothing.
 
 **Status exits 2 and `health.json` names a `tick`.** The loop is not beating: a pass has been running longer
 than `PI_SUPERAGENT_TICK_STALL_MS`, and `tick.stage` names where it is parked (`poll`, `reconcile`,

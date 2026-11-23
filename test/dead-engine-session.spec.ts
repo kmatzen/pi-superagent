@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
@@ -24,6 +24,8 @@ const run = (args: string[], extra: Record<string, string> = {}) => spawnSync(SC
     PI_SUPERAGENT_PANEL_PORT: '8799',
     // start refuses a dirty checkout, and the checkout under test carries the changes under test.
     PI_SUPERAGENT_ALLOW_DIRTY: '1',
+    // A started router needs an engine process: `status` counts engines by process, not by tab.
+    FAKE_HERDR_ENGINE: join(state, 'bin', 'pi'),
     FAKE_HERDR_DIR: herdrDir,
     ...extra,
   },
@@ -66,8 +68,17 @@ beforeEach(() => {
   const root = mkdtempSync(join(tmpdir(), 'pi-sa-dead-engine-')); dirs.push(root)
   state = join(root, 'state'); herdrDir = join(root, 'herdr')
   mkdirSync(state, { recursive: true }); mkdirSync(herdrDir, { recursive: true })
+  mkdirSync(join(state, 'bin'), { recursive: true })
+  copyFileSync('/bin/sleep', join(state, 'bin', 'pi'))
+  chmodSync(join(state, 'bin', 'pi'), 0o755)
 })
-afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
+afterAll(() => {
+  for (const d of dirs) {
+    // The fixture spawns the tab's engine detached; only the file it writes names it.
+    try { process.kill(Number(readFileSync(join(d, 'herdr', 'engine.pid'), 'utf8')), 'SIGKILL') } catch { /* never started */ }
+    rmSync(d, { recursive: true, force: true })
+  }
+})
 
 describe('scripts/superagent: the tab is up and the engine is down', { timeout: 60_000 }, () => {
   it('names the resumed full session when start never reaches ready', () => {

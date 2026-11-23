@@ -5,9 +5,11 @@
 # the remedy the check should apply:
 #   0  running and healthy, or stopped on purpose  -> do nothing
 #   1  not running, running twice, or not answering -> start it
-#   2  running and not beating: the tick loop is stalled -> restart it (a restart clears a wedged loop)
+#   2  running and not beating: the tick loop is stalled, or a tab with no engine behind it -> restart it
 #   3  running and waiting for setup                 -> do nothing, and tell a person (a restart will not fix it)
 #   4  running, but a part reports an error          -> do nothing, and tell a person (a restart will not fix it)
+#   5  an engine is running with no herdr tab         -> restart it (a START would run a SECOND engine on the
+#      old config, which is the fault, not the remedy)
 # `remedy` is that mapping as a command, for the job that runs on a schedule, and it exits with the code the
 # router reports AFTER the remedy: 0 recovered, 1 the remedy did not bring the router back. Each code keeps one
 # meaning, so a scheduled check can act on it without reading prose.
@@ -45,6 +47,10 @@ done
 : "${CMD:=status}"
 
 STATE="${STATE_FLAG:-${PI_SUPERAGENT_STATE:-$HOME/.pi/superagent}}"
+# The engine probe compares this path with the PI_SUPERAGENT_STATE the running engine carries in its own
+# environment, so a trailing slash on `--state /srv/superagent/` would name a deployment with no engine while
+# one ticks away, which is the fault this file exists to catch. Only the trailing slash goes; a bare "/" stays.
+case "$STATE" in ??*/) STATE="${STATE%/}" ;; esac
 # Deployment settings live with the state, so the health check's restart and a hand restart start the same
 # router (the GitHub source was on or off depending on whose shell started it). The caller's env still wins.
 if [ -f "$STATE/config.env" ]; then
@@ -143,6 +149,72 @@ workspace_id() {
 herdr_up() { "$HERDR_BIN" workspace list >/dev/null 2>&1; }
 running() { "$HERDR_BIN" agent get "$SESSION" >/dev/null 2>&1; }
 place() { [ -f "$ROUTER_PLACE" ] && sed -n "s/^$1=//p" "$ROUTER_PLACE"; }
+
+# ---- the engine, as distinct from its herdr tab -----------------------------------
+# `running` asks herdr about the TAB and proves nothing about the PROCESS. The two came apart on
+# 2026-11-23 19:15: herdr answered no agent named `superagent`, so `stop` printed "not running", `restart`
+# opened a second tab, and the first engine's process went on ticking on the config it had booted with an
+# hour earlier -- so the PI_SUPERAGENT_GITHUB_REPO the operator had just written into config.env never took
+# effect, and `status` called the box "running". Everything below answers one question without herdr: is a
+# process running the router loop for THIS state directory, and which pid is it?
+
+# A process its parent has not reaped answers `kill -0` for as long as nobody collects it, and survives
+# SIGKILL: its loop ended, so it is not the engine, and a proof that waits on a zombie never finishes.
+pid_live() {
+  local pid="$1" state
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  state="$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+  [ "${state#Z}" = "$state" ]
+}
+
+# The pids running the router loop for this state directory. Two sources, because each covers the other's
+# blind spot:
+#   * the pid the extension wrote when its panel bound (panel.pid) -- the precise one, and the only one a
+#     box with no /proc gives: a router rewrites its process title, so macOS `ps` shows no environment;
+#   * the process table, for an engine whose panel never bound (so no pid was recorded) and for one whose
+#     panel.pid has since been recycled to a stranger.
+# On Linux the process table is the authority, and the two tests in it are load-bearing together: pi rewrites
+# its own argv -- the live router's /proc/<pid>/cmdline is a padded "pi", with no session id in it -- so the
+# name is the only identity test available, and the environment alone over-matches, because the router's tab
+# shell (comm=sh) and the MCP servers pi spawns (comm=node, comm=scout) inherit PI_SUPERAGENT_ROLE=router and
+# PI_SUPERAGENT_STATE. Measured on the live router, 2026-11-23.
+engine_pids() {
+  local found='' pid d comm env
+  [ -f "$STATE/panel.pid" ] && pid="$(tr -dc '0-9' < "$STATE/panel.pid")"
+  if [ ! -d /proc ] && [ -n "${pid:-}" ] && pid_live "$pid"; then found="$pid"; fi
+  [ -d /proc ] || { [ -n "$found" ] && printf '%s\n' "$found"; return 0; }
+  for d in /proc/[0-9]*; do
+    pid="${d#/proc/}"
+    # The group carries the redirection: a process that exits between the glob and the read makes bash write
+    # its own error to the shell's stderr, where a `2>/dev/null` on the read command never applies -- and
+    # `status` prints that noise to an operator reading a health check.
+    { read -r comm < "$d/comm"; } 2>/dev/null || continue
+    [ "$comm" = "pi" ] || continue
+    pid_live "$pid" || continue
+    # The trailing newline is load-bearing: command substitution eats the one `tr` writes, so the last
+    # variable in the block has no terminator and every pattern below demands one on both sides.
+    env="$(tr '\0' '\n' < "$d/environ" 2>/dev/null)"$'\n'
+    case $'\n'"$env" in *$'\n'"PI_SUPERAGENT_ROLE=router"$'\n'*) ;; *) continue ;; esac
+    case $'\n'"$env" in *$'\n'"PI_SUPERAGENT_STATE=$STATE"$'\n'*) ;; *) continue ;; esac
+    found="${found:+$found$'\n'}$pid"
+  done
+  [ -n "$found" ] && printf '%s\n' "$found"
+  return 0
+}
+engine_list() { engine_pids | tr '\n' ' ' | sed 's/ *$//'; }
+# The panel is the engine's second fingerprint: a loop that has ended releases the port it bound.
+panel_busy() { nc -z 127.0.0.1 "$PANEL_PORT" 2>/dev/null; }
+panel_listener_pids() { lsof -nP -a -ti "tcp:${PANEL_PORT}" -sTCP:LISTEN 2>/dev/null; }
+# What the running engine booted on, from its own ready file: the field that hid the fault in the report
+# (`router.start kept logging githubRepo= empty from the old boot`) is the field to print.
+engine_boot() {
+  node -e 'try{const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(`booted ${r.at??"?"} githubRepo=${r.githubRepo??"none"}`)}catch{process.stdout.write("ready file unreadable")}' "$STATE/ready" 2>/dev/null
+}
+engine_says() {
+  local pids="$1"
+  printf 'pid %s, %s, health.json %s min old' "$pids" "$(engine_boot)" "$(health_age_min)"
+}
 
 # A remote URL that carries its credential (`https://user:token@github.com/…`) is a live secret in a file git
 # writes 0644: every user and every process on the box reads it, and the first `git remote -v`, `git config
@@ -355,6 +427,14 @@ start() {
     echo "already running: herdr agent $SESSION" >&2
     return 1
   fi
+  # The tab is not the only way in, and herdr's answer is not the whole truth: with the engine alive and its
+  # tab gone, `running` says nothing and a start here runs a SECOND router over the first, on the config the
+  # operator has just changed. 2026-11-23 19:15: exactly this start, and the old engine kept the board repo.
+  local engines; engines="$(engine_list)"
+  if [ -n "$engines" ]; then
+    echo "the router was not started: an engine for $STATE is already running (pid $engines)$(running || printf ', with no herdr tab to show for it'); superagent restart stops it and proves it stopped first" >&2
+    return 1
+  fi
   rm -f "$STOP_MARKER"
   # The pid that bound the panel, as the running router recorded it. Read once, before the loop: a file read
   # inside the kill loop changes shape when the process it names dies.
@@ -460,7 +540,8 @@ start() {
 }
 
 stop() {
-  running || { echo "not running"; rm -f "$STOP_MARKER"; return 0; }
+  local engines; engines="$(engine_list)"
+  if ! running && [ -z "$engines" ]; then echo "not running"; rm -f "$STOP_MARKER"; return 0; fi
   : > "$STOP_MARKER"
   # esc ends a running turn; in pi, ctrl+c clears the editor and a second ctrl+c exits.
   "$HERDR_BIN" agent send-keys "$SESSION" esc >/dev/null 2>&1
@@ -474,16 +555,94 @@ stop() {
   fi
   [ -n "$tab_id" ] && "$HERDR_BIN" tab close "$tab_id" >/dev/null 2>&1
   rm -f "$ROUTER_PLACE"
+  # Closing the tab is not stopping the engine, and this is the half the report is about: prove the process is
+  # gone, by pid and then by port, before this command says "stopped".
+  stop_engine || return 1
+  # The ready file is the engine's own word that it is listening, and pi takes it back only on a clean
+  # shutdown. A killed engine leaves it behind, and `start` waits on it -- so a stale one lets a start that
+  # booted nothing report healthy, which is how "the engine never came up" got read as a running router.
+  rm -f "$STATE/ready"
   echo "stopped after ${waited}s"
 }
 
+# The proof, and the escalation that gets it: the keystrokes and the tab close are a request, and a router
+# wedged inside a model turn answers no keystroke. SIGTERM, then SIGKILL, then the verdict. Fails naming the
+# pids, because the person who owns that process is the only one who can end it, and a restart that started a
+# second engine over it would run the old config and bury the evidence.
+stop_engine() {
+  local left pid i=0
+  left="$(engine_list)"
+  if [ -n "$left" ]; then
+    for pid in $left; do kill "$pid" 2>/dev/null || true; done
+    while [ "$i" -lt "$GRACE" ]; do
+      left="$(engine_list)"; [ -z "$left" ] && break
+      sleep 1; i=$((i+1))
+    done
+    if [ -n "$left" ]; then
+      for pid in $left; do kill -9 "$pid" 2>/dev/null || true; done
+      i=0
+      while [ "$i" -lt 5 ]; do
+        left="$(engine_list)"; [ -z "$left" ] && break
+        sleep 1; i=$((i+1))
+      done
+    fi
+    if [ -n "$left" ]; then
+      echo "superagent: the engine would not stop: pid $left (state $STATE) survived SIGTERM and SIGKILL; nothing was started over it -- end it by hand, then start" >&2
+      return 1
+    fi
+  fi
+  # The port is the second fingerprint of a live loop. A listener that outlives every engine pid of this state
+  # directory is not this router, and `start` refuses to kill what it cannot prove is ours, so say so here.
+  if panel_busy; then
+    echo "superagent: the engine's processes are gone, but the panel port $PANEL_PORT is still held by pid $(panel_listener_pids | tr '\n' ' '): it is not this router, and start will not take it. Move it with PI_SUPERAGENT_PANEL_PORT." >&2
+    return 1
+  fi
+  return 0
+}
+
 status() {
-  if ! running; then
+  local engines tab signals
+  engines="$(engine_list)"
+  tab=0; running && tab=1
+  # Two signals, said apart. `running` alone means only that a herdr tab exists, and the one hint the old
+  # output gave that the tab and the engine disagreed was "running and not beating", 15 minutes late.
+  if [ -n "$engines" ]; then
+    signals="engine: up ($(engine_says "$engines"))"
+  else
+    signals="engine: down"
+  fi
+  if [ "$tab" -eq 1 ]; then
+    signals="$signals; tab: up (herdr agent $SESSION in workspace $WORKSPACE_LABEL)"
+  else
+    signals="$signals; tab: absent"
+  fi
+
+  if [ "$tab" -eq 0 ] && [ -z "$engines" ]; then
     if [ -f "$STOP_MARKER" ]; then echo "stopped by request (manual stop marker present)"; return 0; fi
     herdr_up || { echo "not running: herdr is not reachable" >&2; return 1; }
+    echo "$signals"
     echo "not running: superagent start"; return 1
   fi
+  # An engine with no tab is the state that produced this report: the health check read it as "not running",
+  # started a second router, and the first kept the old config. Code 1 would order that start; a restart is
+  # the only remedy that takes the engine back first.
+  if [ "$tab" -eq 0 ]; then
+    echo "$signals" >&2
+    echo "running with no herdr tab: $(engine_says "$engines"); the engine is up and nothing shows it, so start would run a second one: superagent restart" >&2
+    return 5
+  fi
+  # A tab with no engine behind it: pi booted in the tab and the supervisor never came up (upstream #11).
+  # It answers nothing, which code 2 names, and a restart is what clears it.
+  if [ -z "$engines" ]; then
+    echo "$signals" >&2
+    echo "running and not beating: the herdr tab is up and no engine process runs the loop (panel port $(panel_busy && echo busy || echo free), health.json $(health_age_min) min old): superagent restart" >&2
+    # The probe proves the engine is down; herdr's context reading names the session that caused it, and
+    # #13's line is the one that tells the operator which file to delete.
+    boot_without_engine && say_dead_engine "$(router_context_pct)"
+    return 2
+  fi
   if setup_needed; then
+    echo "$signals" >&2
     echo "running, waiting for setup: $(tr -d '\n' < "$STATE/setup.json" | cut -c1-200)" >&2
     return 3
   fi
@@ -493,6 +652,7 @@ status() {
   # is the same fault seen from outside -- the loop that publishes the file is the loop that died, and a
   # router wedged inside a pass cannot report its own stall. Both are code 2 because a restart fixes both.
   if stale_health; then
+    echo "$signals" >&2
     echo "running and not beating: health.json is $(health_age_min) min old: the tick loop that writes it is not running; $(tr -d '\n' < "$STATE/health.json" | cut -c1-200)" >&2
     # A stale health.json has two causes a restart answers differently, and the operator reading this line is
     # one restart away from finding out which: a loop that wedged (a restart fixes it) and an engine that was
@@ -503,6 +663,7 @@ status() {
     return 2
   fi
   if [ "${beat:-0}" -gt 0 ]; then
+    echo "$signals" >&2
     echo "running and not beating: $(tr -d '\n' < "$STATE/health.json" | cut -c1-200)" >&2
     if boot_without_engine; then
       say_dead_engine "$(router_context_pct)" ", and no engine ever booted in this tab"
@@ -510,9 +671,11 @@ status() {
     return 2
   fi
   if [ "${parts:-0}" -gt 0 ]; then
+    echo "$signals" >&2
     echo "running with ${parts} failing part(s): $(tr -d '\n' < "$STATE/health.json" | cut -c1-200)" >&2
     return 4
   fi
+  echo "$signals"
   echo "running: herdr agent $SESSION in workspace $WORKSPACE_LABEL, state $STATE"
 }
 
@@ -522,7 +685,10 @@ status() {
 restart_router() {
   local was_manual=0
   [ -f "$STOP_MARKER" ] && was_manual=1
-  stop
+  # The stop has to land, and be PROVED, before the start: `stop` returns 1 when an engine of this state
+  # directory survives it, and starting over it is the fault in the report -- the new tab boots, the old
+  # engine keeps ticking on its old config, and the router on the board is the one nobody started.
+  stop || { echo "superagent: restart stopped nothing: the engine named above is still running, so no new session was started" >&2; return 1; }
   [ "$was_manual" -eq 0 ] && rm -f "$STOP_MARKER"
   start
 }
@@ -580,6 +746,8 @@ remedy() {
        [ -f "$STATE/ready" ] || clear_full_session
        remedy_report ;;
     2) restart_on_stall "$out" ;;
+    # An engine with no tab: starting over it is what doubled the router, so this code means restart.
+    5) restart_on_stall "$out" ;;
     *) echo "health: $out; nothing to do, a restart will not fix it" ;;
   esac
 }
