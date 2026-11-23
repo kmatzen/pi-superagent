@@ -117,13 +117,14 @@ table{border-collapse:collapse;width:100%}td,th{padding:.3rem .5rem;border-botto
 
 export function renderPanel(m: Model): string {
   const quiet = (n: number, label: string): string => n === 0 ? '' : `<li>${n} ${esc(label)}</li>`
-  const asks = m.needsPerson.map(a => `<div class="ask">${a.url ? `<a href="${esc(a.url)}">${esc(a.thread)}</a>` : `<a href="/ticket?id=${encodeURIComponent(a.id)}">${esc(a.thread || a.id)}</a>`} — ${a.nudged ? `<strong>quiet, no question from the worker</strong>: ${esc(a.summary)}` : esc(a.question || a.summary || 'needs a person')}<div class="muted">${esc(a.title)} · <a href="${esc(a.screen)}">screen</a></div></div>`).join('')
+  const asks = m.needsPerson.map(a => `<div class="ask">${a.url ? `<a href="${esc(a.url)}">${esc(a.thread)}</a>` : `<a href="/ticket?id=${encodeURIComponent(a.id)}">${esc(a.thread || a.id)}</a>`} — ${a.nudged ? `<strong>quiet, no question from the worker</strong>: ${esc(a.summary)}` : esc(a.question || a.summary || 'needs a person')}<div class="muted">${esc(a.title)} · <a href="${esc(a.screen)}">screen</a> · <button class="stop" data-ticket="${esc(a.id)}">stop</button></div></div>`).join('')
     || '<p class="muted">Nothing needs you.</p>'
   const rows = (rows: Record<string, unknown>[], cols: string[]): string => {
     if (rows.length === 0) return '<p class="muted">none</p>'
     const cell = (r: Record<string, unknown>, c: string): string =>
       c === 'screen' && r[c] ? `<a href="${esc(r[c])}">screen</a>`
-        : r.url ? `<a href="${esc(r.url)}">${esc(r[c])}</a>` : esc(r[c])
+        : c === 'stop' && r.id ? `<button class="stop" data-ticket="${esc(r.id)}">stop</button>`
+          : r.url ? `<a href="${esc(r.url)}">${esc(r[c])}</a>` : esc(r[c])
     return `<table><tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${cols.map(c => `<td>${cell(r, c)}</td>`).join('')}</tr>`).join('')}</table>`
   }
   return page('superagent', `
@@ -138,10 +139,22 @@ export function renderPanel(m: Model): string {
 <section id="workers"><h2>Workers <span class="count">(${m.workers.length} with a tab: ${m.load.running} on a run, ${m.load.parked} parked)</span></h2>
 ${rows(m.workers.map(w => ({ thread: w.ticketId.slice(0, 8), title: w.workspace.split('/').pop() ?? w.workspace, state: w.busy === false ? 'parked' : 'running', screen: `/worker?ticket=${encodeURIComponent(w.ticketId)}`, detail: `${w.watch || w.workspace} · ${w.events} events · quiet ${w.quietSeconds}s` })), ['thread', 'title', 'state', 'detail', 'screen'])}</section>
 <section id="execution"><h2>Execution <span class="count">(${m.open.length} open, ${m.load.running}/${m.load.maxWorkers} working, ${m.load.parked} parked, ${m.load.queued} queued)</span></h2>
-${rows(m.open, ['thread', 'title', 'state', 'waitsFor', 'worker', 'screen'])}
+${rows(m.open, ['thread', 'title', 'state', 'waitsFor', 'worker', 'screen', 'stop'])}
 <h2>Ended</h2>${rows(m.ended, ['id', 'title', 'outcome', 'at'])}</section>
 <section id="settings"><h2>Settings</h2><p class="count">policy ${esc(m.policy.version)} · paused=${m.paused} · state ${esc(process.env.PI_SUPERAGENT_STATE ?? '')}</p>
-<p class="muted">Settings live in config.env in the state directory; restart to apply them. POST /api/executor/pause pauses processing.</p></section>`)
+<p class="muted">Settings live in config.env in the state directory; restart to apply them. POST /api/executor/pause pauses processing.</p></section>
+<script>
+document.addEventListener('click', async function (e) {
+  var b = e.target.closest && e.target.closest('button.stop'); if (!b) return
+  if (!window.confirm('Stop this ticket? Its worker is released and the ticket ends.')) return
+  var r = await fetch('/api/tickets/' + encodeURIComponent(b.dataset.ticket) + '/stop', {
+    method: 'POST', credentials: 'include',
+    headers: { 'x-superagent-request': '1', 'content-type': 'application/json' },
+    body: JSON.stringify({ reason: 'stopped from the panel' }),
+  })
+  b.textContent = r.ok ? 'stopped' : 'refused ' + r.status
+})
+</script>`)
 }
 
 const json = (res: import('node:http').ServerResponse, code: number, body: unknown): void => {

@@ -437,3 +437,19 @@ describe('what the panel says a person is needed for', () => {
     expect(ask).toContain('/worker?ticket=t1')
   })
 })
+
+describe('what the panel offers for a ticket it says needs a person', () => {
+  it('links the thread and gives one-click stop', async () => {
+    const t = {
+      id: 't7', title: 'Resolve merge conflict', channels: [{ source: 'github', thread: 'o/r#2249', address: { repo: 'o/r', issue: '2249' } }],
+      assignments: [{ state: 'running', report: { state: 'blocked', summary: 'the merge is a wash', question: 'leave it closed?', at: new Date().toISOString() } }],
+      attention: { question: 'leave it closed?' },
+    } as never
+    const s = await serve(source({ repos: { tickets: { list: () => [t], get: () => t }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } } }))
+    const html = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
+    expect(html, 'the ask points at the thread it is about').toContain('github.com/o/r/')
+    expect(html.match(/data-ticket="t7"/g)?.length ?? 0, 'both the ask row and the open row can stop it').toBe(2)
+    expect(html).toContain('/api/tickets/')
+    await s.close()
+  })
+})
