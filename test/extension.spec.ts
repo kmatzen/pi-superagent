@@ -72,6 +72,7 @@ function memoryHerdr() {
     agentGet: async name => agents.get(name),
     tabList: async () => [],
     agentSendKeys: async () => {},
+    agentPrompt: async () => {},
     paneRead: async () => '',
   }
   return { herdr, calls, agents, envs }

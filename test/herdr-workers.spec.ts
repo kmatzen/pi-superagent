@@ -41,6 +41,7 @@ function memoryHerdr(over: Partial<Herdr> = {}) {
       workspaceId: 'w1', agentStatus: a.agent_status,
     })),
     agentSendKeys: async (name, keys) => { calls.push(`sendKeys ${name} ${keys.join(' ')}`) },
+    agentPrompt: async (name, text) => { calls.push(`prompt ${name} ${text}`) },
     paneRead: async () => '',
     ...over,
   }

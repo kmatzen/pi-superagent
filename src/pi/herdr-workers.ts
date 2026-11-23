@@ -285,6 +285,12 @@ export class HerdrWorkers {
     } catch { return new Set(records.map(r => r.ticketId)) }
   }
 
+  /** The tab a ticket ran in, live record first, so the panel can read a parked worker's screen too. */
+  forTicket(ticketId: string): WorkerRecord | undefined {
+    const all = [...this.records(false), ...this.records(true)]
+    return all.find(r => r.ticketId === ticketId && !r.endedAt) ?? all.filter(r => r.ticketId === ticketId).at(-1)
+  }
+
   private records(ended = false): WorkerRecord[] {
     if (!existsSync(this.root)) return []
     return readdirSync(this.root)

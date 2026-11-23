@@ -722,8 +722,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const grouped = group ? (deps.capWorkerGroup ?? capWorkerGroup)(group) : false
   if (group && grouped) log.line('info', 'worker.group_limits', { memoryMaxBytes: group.memoryMaxBytes, cpuPercent: group.cpuPercent })
   else if (group) log.line('warn', 'worker.group_limits_unavailable', { reason: 'systemctl set-property failed; each worker keeps its own cap only' })
+  const herdr = deps.herdr ?? herdrCli(cfg.herdrBin)
   const herdrWorkers = cfg.workers === 'herdr'
-    ? new HerdrWorkers({ herdr: deps.herdr ?? herdrCli(cfg.herdrBin), stateDir: cfg.dataDir, log,
+    ? new HerdrWorkers({ herdr, stateDir: cfg.dataDir, log,
       ...(cfg.herdrWorkspace ? { workspaceLabel: cfg.herdrWorkspace } : {}), ...deps.workerTiming, ...(cfg.workerStartMs ? { startTimeoutMs: cfg.workerStartMs } : {}) })
     : undefined
 
@@ -1430,10 +1431,26 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // Made at startup, not at the first write: the operator reads this file to pause the fleet by hand.
   if (cfg.panelPort) panelToken(cfg.dataDir)
 
+  const workerTab = herdrWorkers
+    ? (ticketId: string) => {
+      const rec = herdrWorkers.forTicket(ticketId)
+      if (!rec) throw new Error(`no worker tab for ticket ${ticketId}`)
+      return rec
+    }
+    : undefined
+
   const panel = cfg.panelPort
     ? createPanelServer({
       repos, engine, assessor, config: cfg,
       load: () => panelLoad(), isPaused: () => paused, workers: () => executor.workers(),
+      ...(workerTab ? {
+        workerPane: async (ticketId: string, lines: number) => {
+          const rec = workerTab(ticketId)
+          return { tab: rec.tabId, agent: rec.agent, text: await herdr.paneRead(rec.paneId, lines) }
+        },
+        workerPrompt: async (ticketId: string, text: string) => { await herdr.agentPrompt(workerTab(ticketId).agent, text) },
+        workerKeys: async (ticketId: string, keys: string[]) => { await herdr.agentSendKeys(workerTab(ticketId).agent, keys) },
+      } : {}),
       health: () => { try { return JSON.parse(readFileSync(`${cfg.dataDir}/health.json`, 'utf8')) as Record<string, unknown> } catch { return {} } },
       log: (level, event, fields) => log.line(level, event, fields), setPaused: (v: boolean) => { paused = v },
       token: () => panelToken(cfg.dataDir),
