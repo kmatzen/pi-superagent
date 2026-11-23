@@ -273,6 +273,71 @@ stale_health() {
 health_age_min() { node -e 'const s=require("fs").statSync(process.argv[1]);console.log(Math.floor((Date.now()-s.mtimeMs)/60000))' "$STATE/health.json" 2>/dev/null || echo '?'; }
 setup_needed() { [ -f "$STATE/setup.json" ] && grep -q '"problem": *{' "$STATE/setup.json" 2>/dev/null; }
 
+# ---- the tab-up-engine-down case ---------------------------------------------------------------------
+# `start` resumes the pi session named in $STATE/session-id. A session at the top of its context window has
+# no room left for its startup turn: pi boots in the tab, the extension is never reached, and the engine is
+# never created — so there is no `router.start` in engine.log, no `ready` file, and `health.json` keeps the
+# timestamp of the router that died. Every command said something true and nothing said this: `start` "the
+# router did not report ready within 60s", `status` "running and not beating: health.json is 5421 min old",
+# `remedy` "restarting the router" twice into the same full session. Measured 2026-11-23: four starts, two
+# remedies, one hour, and the number that named it was in `herdr agent get` the whole time.
+
+# The router session's context usage as herdr reports it, a bare integer percent; empty when herdr does not
+# say (no agent, an older herdr, a pi that has not reported usage yet).
+router_context_pct() {
+  "$HERDR_BIN" agent get "$SESSION" 2>/dev/null | field result agent tokens context_usage | tr -dc '0-9'
+}
+
+# The line at which a resumed session is the fault and not a detail. The measured failures sat at 90-100 %;
+# 80 % leaves room for the startup turn on the 200 k windows in use, and accusing a 40 % session would send
+# an operator to delete a healthy router's history. PI_SUPERAGENT_CONTEXT_FULL_PCT moves the line.
+case "${PI_SUPERAGENT_CONTEXT_FULL_PCT:-}" in ''|*[!0-9]*) CONTEXT_FULL_PCT=80 ;; *) CONTEXT_FULL_PCT="$PI_SUPERAGENT_CONTEXT_FULL_PCT" ;; esac
+session_is_full() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) [ "$1" -ge "$CONTEXT_FULL_PCT" ] ;; esac }
+
+# The boot whose tab is in $ROUTER_PLACE never reached the engine. `router.start` is the first line
+# createRouterExtension writes, so a boot with no such line newer than its own tab is a tab with pi sitting
+# in it and no router. No tab, no verdict: a closed tab means `stop` ran or a person closed it, and there is
+# no live boot to read. The tab's mtime is the boot time because `start` writes the place file seconds
+# before it asks herdr to start pi; 2 s of slack covers a slow clock between the two.
+boot_without_engine() {
+  [ -f "$ROUTER_PLACE" ] || return 1
+  node -e 'const fs=require("fs");let bootMs;try{bootMs=fs.statSync(process.argv[1]).mtimeMs}catch{process.exit(1)}
+let text="";try{text=fs.readFileSync(process.argv[2],"utf8")}catch{process.exit(0)}
+for(const line of text.split("\n")){const m= /^(\S+)\s+\w+\s+router\.start(\s|$)/.exec(line);if(!m)continue;
+const t=Date.parse(m[1]);if(!Number.isNaN(t)&&t>=bootMs-2000)process.exit(1)}
+process.exit(0)' "$ROUTER_PLACE" "$STATE/engine.log"
+}
+
+# Say the case where a reader is already standing in front of a tab that is up: what is up, what is down, and
+# the one file that fixes it. Stderr only, and only on the paths that already report a failure, so a healthy
+# router pays nothing for it and no exit code changes.
+say_dead_engine() {
+  local pct="$1" where="${2:-}"
+  if session_is_full "$pct"; then
+    printf 'the router resumed a session at %s%% context and booted no engine%s; clear it to boot fresh: rm -f %s/session-id\n' \
+      "$pct" "$where" "$STATE" >&2
+  else
+    printf 'the herdr tab is up and no engine booted in it%s; read the tab with `herdr agent read %s`, and if its session is full, `rm -f %s/session-id` starts a fresh one\n' \
+      "$where" "$SESSION" "$STATE" >&2
+  fi
+}
+
+# The remedy for that case, and the only one: stop resuming the session. Deleting the id costs the router its
+# chat history and nothing else — the engine's memory is tickets.db, the workers are their own sessions, and
+# the next `start` mints a fresh id — so it takes both proofs: this boot wrote no `router.start`, and herdr
+# says the session is at the saturation line. A boot that reached its engine has a different fault and keeps
+# its session; so does a session herdr reports as small, or does not report at all, where deleting on a guess
+# would erase the router's history every five minutes on a box whose real fault is a bad token.
+clear_full_session() {
+  [ -f "$STATE/session-id" ] || return 0
+  boot_without_engine || return 0
+  local pct; pct="$(router_context_pct)"
+  session_is_full "$pct" || return 0
+  rm -f "$STATE/session-id"
+  echo "health: the router resumed a session at ${pct}% context and booted no engine; cleared $STATE/session-id, so this start opens a fresh session"
+  return 0
+}
+
 start() {
   # A deployment that stores its credential in a world-readable URL is not a deployment to bring up: the
   # router's own workers are the readers. Refuse before herdr, the port and the tab, so the fix is the first
@@ -375,6 +440,17 @@ start() {
   # reported ready is code 1, so the check restarts it instead of admiring a herdr tab forever.
   if [ ! -f "$STATE/ready" ]; then
     echo "the router did not report ready within ${waited}s (herdr tab $tab_id)" >&2
+    # The tab is up and the engine is down. Name the case the timeout cannot: this `start` resumed the
+    # session in $STATE/session-id, and one at the top of its window boots a pi that reaches no engine, so
+    # every retry says this same line. The number comes from herdr, which is where an operator had to go
+    # and read it by hand (issue #11).
+    local pct; pct="$(router_context_pct)"
+    if boot_without_engine; then
+      say_dead_engine "$pct" " after ${waited}s"
+    elif session_is_full "$pct"; then
+      printf 'the router session is at %s%% context: it has little room left for its startup work, and a session that fills up this way boots no engine; clear it with rm -f %s/session-id\n' \
+        "$pct" "$STATE" >&2
+    fi
     return 1
   fi
   status
@@ -415,10 +491,19 @@ status() {
   # router wedged inside a pass cannot report its own stall. Both are code 2 because a restart fixes both.
   if stale_health; then
     echo "running and not beating: health.json is $(health_age_min) min old: the tick loop that writes it is not running; $(tr -d '\n' < "$STATE/health.json" | cut -c1-200)" >&2
+    # A stale health.json has two causes a restart answers differently, and the operator reading this line is
+    # one restart away from finding out which: a loop that wedged (a restart fixes it) and an engine that was
+    # never created in this tab (a restart resumes the same full session and the same line comes back).
+    if boot_without_engine; then
+      say_dead_engine "$(router_context_pct)" ", and no engine ever booted in this tab"
+    fi
     return 2
   fi
   if [ "${beat:-0}" -gt 0 ]; then
     echo "running and not beating: $(tr -d '\n' < "$STATE/health.json" | cut -c1-200)" >&2
+    if boot_without_engine; then
+      say_dead_engine "$(router_context_pct)" ", and no engine ever booted in this tab"
+    fi
     return 2
   fi
   if [ "${parts:-0}" -gt 0 ]; then
@@ -453,6 +538,10 @@ restart_on_stall() {
     return 0
   fi
   printf '%s\n' "$now" > "$RESTART_MARKER"   # before the restart: one that hangs cannot invite another
+  # A restart resumes the session in $STATE/session-id, so on the fault where that session is full it repeats
+  # the boot that just failed — measured: two remedies, two restarts, the same "did not report ready" line.
+  # Clearing the id is the part of this remedy a restart cannot do for itself.
+  clear_full_session
   echo "health: $why; restarting the router"
   restart_router
   remedy_report
@@ -481,7 +570,12 @@ remedy() {
        # lock the remedy out for the full cooldown: the 2026-11-11 outage lasted 25 min for exactly that reason.
        rm -f "$RESTART_MARKER"
        echo "health: $out; nothing to do" ;;
-    1) echo "health: $out; starting the router"; start; remedy_report ;;
+    1) echo "health: $out; starting the router"
+       start
+       # A start that reached no engine, on a session herdr reports as full, would be retried on the next
+       # pass and resume the same session: clear it here so that pass boots fresh instead of repeating.
+       [ -f "$STATE/ready" ] || clear_full_session
+       remedy_report ;;
     2) restart_on_stall "$out" ;;
     *) echo "health: $out; nothing to do, a restart will not fix it" ;;
   esac
