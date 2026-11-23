@@ -1987,6 +1987,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const pullReadsPerTick = positiveNumber('PI_SUPERAGENT_PULL_READS_PER_TICK', env.PI_SUPERAGENT_PULL_READS_PER_TICK)
   const pullReadBudgetMs = positiveNumber('PI_SUPERAGENT_PULL_READ_BUDGET_MS', env.PI_SUPERAGENT_PULL_READ_BUDGET_MS)
   const panelPort = positiveNumber('PI_SUPERAGENT_PANEL_PORT', env.PI_SUPERAGENT_PANEL_PORT)
+  const panelHosts = (env.PI_SUPERAGENT_PANEL_HOSTS ?? '').split(',').map(s => s.trim()).filter(Boolean)
+  const panelTokenAll = env.PI_SUPERAGENT_PANEL_TOKEN_ALL === '1'
   const keepWorktrees = positiveNumber('PI_SUPERAGENT_KEEP_WORKTREES', env.PI_SUPERAGENT_KEEP_WORKTREES)
   const minFreeGb = positiveNumber('PI_SUPERAGENT_MIN_FREE_GB', env.PI_SUPERAGENT_MIN_FREE_GB)
   const workerTokenFile = env.PI_SUPERAGENT_WORKER_TOKEN_FILE?.trim()
@@ -2010,6 +2012,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(pullReadsPerTick === undefined ? {} : { pullReadsPerTick: Math.floor(pullReadsPerTick) }),
     ...(pullReadBudgetMs === undefined ? {} : { pullReadBudgetMs }),
     ...(panelPort === undefined ? {} : { panelPort }),
+    ...(panelHosts.length === 0 ? {} : { panelHosts }),
+    ...(panelTokenAll ? { panelTokenAllRequests: true } : {}),
     ...(keepWorktrees === undefined ? {} : { keepWorktrees: Math.floor(keepWorktrees) }),
     ...(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB) === undefined ? {} : { workBudgetGb: Math.floor(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB)!) }),
     ...(minFreeGb === undefined ? {} : { minFreeGb: Math.floor(minFreeGb) }),
