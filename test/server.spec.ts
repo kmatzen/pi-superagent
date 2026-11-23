@@ -295,3 +295,71 @@ describe('the panel under a failing store', () => {
     await new Promise(resolve => server.close(resolve))
   })
 })
+
+describe('the panel worker screen', () => {
+  async function serve(src: PanelSource): Promise<{ port: number; close: () => Promise<void> }> {
+    const { server } = createPanelServer(src)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as net.AddressInfo).port
+    return { port, close: () => new Promise<void>(resolve => server.close(() => resolve())) }
+  }
+  const source = (over: Record<string, unknown>): PanelSource => ({
+    now: () => new Date().toISOString(),
+    repos: { tickets: { list: () => [], get: () => undefined }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } },
+    load: () => ({ running: 0, parked: 0, queued: 0, maxWorkers: 4 }),
+    workers: () => [],
+    log: () => {},
+    health: () => ({}),
+    isPaused: () => false,
+    setPaused: () => {},
+    token: () => 'sekret',
+    config: { githubRepo: 'o/r' },
+    assessor: { waiting: () => [] },
+    ...over,
+  } as unknown as PanelSource)
+  const hdr = (token?: string) => ({ host: '127.0.0.1', 'x-superagent-request': '1', ...(token ? { 'x-superagent-token': token } : {}) })
+
+  it('reads a worker screen, and typing needs the panel token', async () => {
+    const prompts: string[] = []
+    const s = await serve(source({
+      workerPane: async () => ({ tab: 'w9:t3', agent: 'sa-1', text: 'thinking about the ticket' }),
+      workerPrompt: async (_t: string, text: string) => { prompts.push(text) },
+    }))
+    const screen = await (await fetch(`http://127.0.0.1:${s.port}/api/worker?ticket=t1`, { headers: hdr() })).json() as Record<string, unknown>
+    expect(screen.text, 'the operator sees the worker terminal').toBe('thinking about the ticket')
+    const page = await (await fetch(`http://127.0.0.1:${s.port}/worker?ticket=t1`, { headers: { host: '127.0.0.1' } })).text()
+    expect(page).toContain('id="screen"')
+    const noToken = await fetch(`http://127.0.0.1:${s.port}/api/worker/prompt`, { method: 'POST', headers: hdr(), body: JSON.stringify({ ticket: 't1', text: 'do it' }) })
+    expect(noToken.status, 'typing into a worker is a POST, so it needs the token').toBe(403)
+    const sent = await fetch(`http://127.0.0.1:${s.port}/api/worker/prompt`, { method: 'POST', headers: hdr('sekret'), body: JSON.stringify({ ticket: 't1', text: 'do it' }) })
+    expect(sent.status).toBe(200)
+    expect(prompts).toEqual(['do it'])
+    const empty = await fetch(`http://127.0.0.1:${s.port}/api/worker/prompt`, { method: 'POST', headers: hdr('sekret'), body: JSON.stringify({ ticket: 't1', text: '  ' }) })
+    expect(empty.status, 'an empty prompt is the caller’s mistake').toBe(400)
+    await s.close()
+  })
+
+  it('names a ticket with no worker, and a fleet with no herdr tabs', async () => {
+    const missing = await serve(source({
+      workerPane: async (ticketId: string) => { throw new Error(`no worker tab for ticket ${ticketId}`) },
+    }))
+    expect((await fetch(`http://127.0.0.1:${missing.port}/api/worker?ticket=t2`, { headers: hdr() })).status).toBe(404)
+    await missing.close()
+    const inProcess = await serve(source({}))
+    const res = await fetch(`http://127.0.0.1:${inProcess.port}/api/worker?ticket=t1`, { headers: hdr() })
+    expect(res.status, 'in-process workers have no terminal to read').toBe(501)
+    const page = await (await fetch(`http://127.0.0.1:${inProcess.port}/worker?ticket=t1`, { headers: { host: '127.0.0.1' } })).text()
+    expect(page).toContain('do not run in herdr tabs')
+    await inProcess.close()
+  })
+
+  it('links the worker screen from every open ticket', async () => {
+    const ticket = {
+      id: 't1', title: 'Do the thing', channels: [{ source: 'github', thread: 'o/r#7' }], assignments: [],
+    } as never
+    const s = await serve(source({ repos: { tickets: { list: () => [ticket], get: () => ticket }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } } }))
+    const page = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
+    expect(page, 'the execution table reaches the screen of the ticket it names').toContain('/worker?ticket=t1')
+    await s.close()
+  })
+})

@@ -23,6 +23,10 @@ export interface PanelSource {
   setPaused(v: boolean): void
   /** Required on every POST: a localhost bind stops remote callers, not local ones. */
   token?(): string
+  /** A worker's terminal. Absent when workers do not run in herdr tabs. */
+  workerPane?(ticketId: string, lines: number): Promise<{ tab: string; agent: string; text: string }>
+  workerPrompt?(ticketId: string, text: string): Promise<void>
+  workerKeys?(ticketId: string, keys: string[]): Promise<void>
   now(): string
 }
 
@@ -65,6 +69,7 @@ export function readModel(src: PanelSource) {
     load: src.load(),
     needsPerson: open.filter(t => t.attention).map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', question: (t.attention as { question?: string }).question ?? '', at: t.assignments.at(-1)?.report?.at ?? '', url: issueUrl(t, src.config.githubRepo) })),
     open: open.map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', state: t.assignments.at(-1)?.state ?? 'queued', waitsFor: waitingOn(t),
+      screen: `/worker?ticket=${encodeURIComponent(t.id)}`,
       issue: t.channels[0]?.source === 'github' ? t.channels[0].thread : '', url: issueUrl(t, src.config.githubRepo),
       worker: (() => { const w = src.workers().find(w => w.ticketId === t.id); return w ? `${w.busy === false ? 'parked · ' : ''}watch ${w.watch || w.workspace} · ${w.events} events · quiet ${w.quietSeconds}s` : '' })() })),
     workers: src.workers(),
@@ -105,7 +110,8 @@ export function renderPanel(m: Model): string {
   const rows = (rows: Record<string, unknown>[], cols: string[]): string => {
     if (rows.length === 0) return '<p class="muted">none</p>'
     const cell = (r: Record<string, unknown>, c: string): string =>
-      r.url ? `<a href="${esc(r.url)}">${esc(r[c])}</a>` : esc(r[c])
+      c === 'screen' && r[c] ? `<a href="${esc(r[c])}">screen</a>`
+        : r.url ? `<a href="${esc(r.url)}">${esc(r[c])}</a>` : esc(r[c])
     return `<table><tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${cols.map(c => `<td>${cell(r, c)}</td>`).join('')}</tr>`).join('')}</table>`
   }
   return page('superagent', `
@@ -118,7 +124,7 @@ export function renderPanel(m: Model): string {
 <p class="count">Waiting on a judgement: ${m.waitingAssessment.length}</p></section>
 <section id="eval"><h2>Eval <span class="count">(${m.counts.decisions24h} in 24 h)</span></h2>${rows(m.recentDecisions, ['at', 'kind', 'reason', 'rules', 'ticket'])}</section>
 <section id="execution"><h2>Execution <span class="count">(${m.open.length} open, ${m.load.running}/${m.load.maxWorkers} working, ${m.load.parked} parked, ${m.load.queued} queued)</span></h2>
-${rows(m.open, ['thread', 'title', 'state', 'waitsFor', 'worker'])}
+${rows(m.open, ['thread', 'title', 'state', 'waitsFor', 'worker', 'screen'])}
 <h2>Ended</h2>${rows(m.ended, ['id', 'title', 'outcome', 'at'])}</section>
 <section id="settings"><h2>Settings</h2><p class="count">policy ${esc(m.policy.version)} · paused=${m.paused} · state ${esc(process.env.PI_SUPERAGENT_STATE ?? '')}</p>
 <p class="muted">Settings live in config.env in the state directory; restart to apply them. POST /api/executor/pause pauses processing.</p></section>`)
@@ -128,6 +134,41 @@ const json = (res: import('node:http').ServerResponse, code: number, body: unkno
   res.writeHead(code, { 'content-type': 'application/json' })
   res.end(JSON.stringify(body))
 }
+
+const readBody = (req: IncomingMessage): Promise<string> =>
+  new Promise(resolve => { let b = ''; req.on('data', (c: Buffer) => { b += c }); req.on('end', () => resolve(b)) })
+
+/** Polled every few seconds, not streamed: watching a run needs the last screen, not a socket. */
+const workerPage = (ticket: string, canType: boolean): string => page(`worker ${ticket}`, `
+<p><a href="/">&larr; panel</a> <span class="count" id="where"></span></p>
+<pre id="screen" style="white-space:pre-wrap;background:#111;color:#eee;padding:.6rem;overflow:auto;max-height:70vh">loading…</pre>
+${canType ? `<p><textarea id="msg" rows="3" style="width:100%" placeholder="say something to this worker; the Send button submits it as a prompt"></textarea>
+<button type="button" id="send">Send</button> <button type="button" id="esc">Esc</button> <span class="count" id="sent"></span></p>` : '<p class="muted">These workers do not run in herdr tabs, so there is nothing to type into.</p>'}
+<script>
+var ticket = ${JSON.stringify(ticket)}
+function tok() { var t = localStorage.getItem('superagent-panel-token') || ''; if (!t) { t = window.prompt('panel token (the panel-token file in the state directory)') || ''; localStorage.setItem('superagent-panel-token', t) } return t }
+function note(s) { document.getElementById('sent').textContent = s }
+async function refresh() {
+  try {
+    var r = await fetch('/api/worker?ticket=' + encodeURIComponent(ticket) + '&lines=80', { headers: { 'x-superagent-request': '1' } })
+    var j = await r.json()
+    document.getElementById('screen').textContent = (j.text !== undefined ? j.text : JSON.stringify(j, null, 2)) + '\n'
+    document.getElementById('where').textContent = j.tab ? ' · ' + j.tab + ' · agent ' + j.agent : ''
+  } catch (e) { document.getElementById('screen').textContent = String(e) + '\n' }
+}
+document.getElementById('send')?.addEventListener('click', async function () {
+  var text = document.getElementById('msg').value
+  if (!text.trim()) return note('nothing to send')
+  note('sending…')
+  var r = await fetch('/api/worker/prompt', { method: 'POST', headers: { 'x-superagent-request': '1', 'x-superagent-token': tok() }, body: JSON.stringify({ ticket: ticket, text: text }) })
+  var j = await r.json(); note(r.ok ? 'sent' : 'refused: ' + j.error); if (r.ok) document.getElementById('msg').value = ''
+})
+document.getElementById('esc')?.addEventListener('click', async function () {
+  var r = await fetch('/api/worker/keys', { method: 'POST', headers: { 'x-superagent-request': '1', 'x-superagent-token': tok() }, body: JSON.stringify({ ticket: ticket, keys: ['esc'] }) })
+  note(r.ok ? 'esc sent' : 'refused: ' + (await r.json()).error)
+})
+refresh(); setInterval(refresh, 3000)
+</script>`)
 
 export function createPanelServer(src: PanelSource): { server: Server; url(port: number): string } {
   const serve = (req: IncomingMessage, res: ServerResponse): void => {
@@ -187,6 +228,41 @@ export function createPanelServer(src: PanelSource): { server: Server; url(port:
     if (url.pathname === '/ticket' && ticket) {
       const t = src.repos.tickets.get(ticket)
       return void res.writeHead(200, { 'content-type': 'text/html' }).end(page(`ticket ${ticket}`, t ? `<pre>${esc(JSON.stringify(t, null, 2))}</pre>` : 'no such ticket'))
+    }
+    if (url.pathname === '/api/worker') {
+      if (!src.workerPane) return json(res, 501, { error: 'these workers do not run in herdr tabs' })
+      const t = url.searchParams.get('ticket') ?? ''
+      const lines = Math.min(500, Math.max(10, Number(url.searchParams.get('lines')) || 80))
+      void src.workerPane(t, lines)
+        .then(w => json(res, 200, { ticket: t, ...w }))
+        .catch(error => json(res, /no worker/.test(String(error)) ? 404 : 502, { error: String(error instanceof Error ? error.message : error) }))
+      return
+    }
+    // Typing into a worker is a shell on this machine, so these ride the same POST token as the stop route.
+    if ((url.pathname === '/api/worker/prompt' || url.pathname === '/api/worker/keys') && req.method === 'POST') {
+      const promptRoute = url.pathname.endsWith('/prompt')
+      if (!(promptRoute ? src.workerPrompt : src.workerKeys)) return json(res, 501, { error: 'these workers do not run in herdr tabs' })
+      void readBody(req).then(async raw => {
+        let body: { ticket?: unknown; text?: unknown; keys?: unknown }
+        try { body = JSON.parse(raw || '{}') } catch { return json(res, 400, { error: 'body must be JSON' }) }
+        const t = String(body.ticket ?? '')
+        const text = String(body.text ?? '').slice(0, 8000)
+        const keys = Array.isArray(body.keys) ? body.keys.slice(0, 16).map(k => String(k).slice(0, 16)) : []
+        if (promptRoute && !text.trim()) return json(res, 400, { error: 'text is required' })
+        if (!promptRoute && keys.length === 0) return json(res, 400, { error: 'keys is required' })
+        try {
+          if (promptRoute) await src.workerPrompt!(t, text)
+          else await src.workerKeys!(t, keys)
+          json(res, 200, { sent: promptRoute ? text.length : keys.length })
+        } catch (error) {
+          json(res, /no worker/.test(String(error)) ? 404 : 502, { error: String(error instanceof Error ? error.message : error) })
+        }
+      })
+      return
+    }
+    if (url.pathname === '/worker') {
+      return void res.writeHead(200, { 'content-type': 'text/html' })
+        .end(workerPage(url.searchParams.get('ticket') ?? '', Boolean(src.workerPrompt)))
     }
     if (url.pathname === '/') return void res.writeHead(200, { 'content-type': 'text/html' }).end(renderPanel(m))
     json(res, 404, { error: 'not found' })
