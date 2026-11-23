@@ -65,6 +65,10 @@ export interface RouterConfig {
   policyVersion?: string
   /** Serve the panel and the management API on 127.0.0.1:port; unset means no panel. */
   panelPort?: number
+  /** Extra Host names the panel answers, for a reverse proxy on a box address. Localhost always answers. */
+  panelHosts?: string[]
+  /** Require the panel token on reads too, for a panel a proxy exposes beyond localhost. */
+  panelTokenAllRequests?: boolean
   prepare?: string
   githubRepo?: string
   githubSelf?: string

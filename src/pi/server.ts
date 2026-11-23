@@ -170,6 +170,20 @@ document.getElementById('esc')?.addEventListener('click', async function () {
 refresh(); setInterval(refresh, 3000)
 </script>`)
 
+/** The token from the header a script sends, or the Basic password a browser prompts for. */
+const bearerToken = (headers: IncomingMessage['headers']): string => {
+  const header = String(headers['x-superagent-token'] ?? '')
+  if (header) return header
+  const basic = String(headers.authorization ?? '')
+  if (!/^basic /i.test(basic)) return ''
+  try { return Buffer.from(basic.slice(6), 'base64').toString('utf8').split(':').slice(1).join(':') } catch { return '' }
+}
+
+const allowedHost = (src: PanelSource, host: string): boolean => {
+  const base = host.replace(/:\d+$/, '')
+  return base === 'localhost' || base === '127.0.0.1' || (src.config.panelHosts ?? []).includes(base)
+}
+
 export function createPanelServer(src: PanelSource): { server: Server; url(port: number): string } {
   const serve = (req: IncomingMessage, res: ServerResponse): void => {
     const began = Date.now()
@@ -179,9 +193,16 @@ export function createPanelServer(src: PanelSource): { server: Server; url(port:
     })
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     const host = String(req.headers.host ?? '')
-    if (!/^127\.0\.0\.1:\d+$|^localhost:\d+$/.test(host)) { json(res, 403, { error: 'host must be 127.0.0.1 or localhost' }); return }
+    if (!allowedHost(src, host)) { json(res, 403, { error: `host ${host} is not localhost and not in PI_SUPERAGENT_PANEL_HOSTS` }); return }
+    const bearer = bearerToken(req.headers)
     if (url.pathname.startsWith('/api/') && req.headers['x-superagent-request'] !== '1') { json(res, 403, { error: 'missing x-superagent-request: 1' }); return }
-    if (req.method === 'POST' && src.token && req.headers['x-superagent-token'] !== src.token()) {
+    // 401 with Basic, because a plain navigation can carry no other credential.
+    if (src.config.panelTokenAllRequests && (!src.token || bearer !== src.token())) {
+      res.writeHead(401, { 'www-authenticate': 'Basic realm="superagent panel"', 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: 'the panel needs its token' }))
+      return
+    }
+    if (req.method === 'POST' && src.token && bearer !== src.token()) {
       json(res, 403, { error: 'a POST needs the panel token in x-superagent-token' }); return
     }
     const m = readModel(src)

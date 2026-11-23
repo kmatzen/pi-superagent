@@ -180,7 +180,7 @@ describe('the panel and the API', () => {
     // another site must not be able to read the queue by DNS-rebinding localhost.
     const raw = await rawRequest(f.port, 'GET /api/state HTTP/1.1\r\nHost: evil.example\r\nx-superagent-request: 1\r\nConnection: close\r\n\r\n')
     expect(raw.startsWith('HTTP/1.1 403')).toBe(true)
-    expect(raw).toMatch(/127\.0\.0\.1 or localhost/)
+    expect(raw).toMatch(/is not localhost and not in PI_SUPERAGENT_PANEL_HOSTS/)
     f.running.stop()
   })
 
@@ -360,6 +360,63 @@ describe('the panel worker screen', () => {
     const s = await serve(source({ repos: { tickets: { list: () => [ticket], get: () => ticket }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } } }))
     const page = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
     expect(page, 'the execution table reaches the screen of the ticket it names').toContain('/worker?ticket=t1')
+    await s.close()
+  })
+})
+
+describe('the panel behind a reverse proxy', () => {
+  async function serve(src: PanelSource): Promise<{ port: number; close: () => Promise<void> }> {
+    const { server } = createPanelServer(src)
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as net.AddressInfo).port
+    return { port, close: () => new Promise<void>(resolve => server.close(() => resolve())) }
+  }
+  const source = (over: Record<string, unknown>): PanelSource => ({
+    now: () => new Date().toISOString(),
+    repos: { tickets: { list: () => [], get: () => undefined }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } },
+    load: () => ({ running: 0, parked: 0, queued: 0, maxWorkers: 4 }),
+    workers: () => [],
+    log: () => {},
+    health: () => ({}),
+    isPaused: () => false,
+    setPaused: () => {},
+    token: () => 'sekret',
+    config: { githubRepo: 'o/r' },
+    assessor: { waiting: () => [] },
+    ...over,
+  } as unknown as PanelSource)
+
+  it('answers the proxy name it was configured with, and no other name', async () => {
+    const s = await serve(source({ config: { githubRepo: 'o/r', panelHosts: ['superagent.corp.adobe.com'] } }))
+    const get = (host: string) => rawRequest(s.port, `GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`)
+    expect((await get('superagent.corp.adobe.com')).startsWith('HTTP/1.1 200'), 'the proxy Host is an answerable name').toBe(true)
+    expect((await get('elsewhere.corp.adobe.com')).startsWith('HTTP/1.1 403'), 'a name nobody configured is refused').toBe(true)
+    expect((await get(`127.0.0.1:${s.port}`)).startsWith('HTTP/1.1 200'), 'localhost stays answerable, so the tunnel keeps working').toBe(true)
+    await s.close()
+  })
+
+  it('demands the token on a read once the panel is exposed, and takes it as a Basic password', async () => {
+    const s = await serve(source({ config: { githubRepo: 'o/r', panelHosts: ['superagent.corp.adobe.com'], panelTokenAllRequests: true } }))
+    const anon = await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: 'superagent.corp.adobe.com' } })
+    expect(anon.status, 'past localhost, a read needs the token').toBe(401)
+    expect(anon.headers.get('www-authenticate'), 'the browser gets a prompt it can fill').toContain('Basic')
+    const basic = Buffer.from(`:${'sekret'}`).toString('base64')
+    const authed = await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: 'superagent.corp.adobe.com', authorization: `Basic ${basic}` } })
+    expect(authed.status).toBe(200)
+    const write = await fetch(`http://127.0.0.1:${s.port}/api/executor/pause`, {
+      method: 'POST', headers: { host: 'superagent.corp.adobe.com', 'x-superagent-request': '1', 'content-type': 'application/json', authorization: `Basic ${basic}` },
+      body: JSON.stringify({ paused: true }),
+    })
+    expect(write.status, 'the Basic password serves a write as well as the header does').toBe(200)
+    const headerToken = await fetch(`http://127.0.0.1:${s.port}/api/state`, { headers: { host: 'superagent.corp.adobe.com', 'x-superagent-request': '1', 'x-superagent-token': 'sekret' } })
+    expect(headerToken.status, 'scripts keep the header path').toBe(200)
+    await s.close()
+  })
+
+  it('leaves a panel with no proxy config alone', async () => {
+    const s = await serve(source({}))
+    const anon = await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: `127.0.0.1:${s.port}` } })
+    expect(anon.status, 'unset means the localhost panel behaves exactly as before').toBe(200)
     await s.close()
   })
 })
