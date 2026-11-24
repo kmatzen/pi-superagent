@@ -19,7 +19,16 @@ export interface PullState {
   draft?: boolean
   mergeableState?: string
   mergedBy?: string
+  /** The commit the checks run on; it comes free with the pull read, and it is the key a check state belongs to. */
+  headSha?: string
+  /** Auto-merge is armed, so green checks land the pull request by themselves. */
+  autoMergeArmed?: boolean
+  /** The last check state this router saw and the SHA it belongs to: remembered so a finished CI cannot fire twice. */
+  checks?: { sha: string; state: ChecksState }
 }
+
+/** GitHub's rollup of a commit's checks. `none` = GitHub has no checks on it, so nothing will ever finish. */
+export type ChecksState = 'pending' | 'passed' | 'failed' | 'none'
 
 export interface ReviewComment { path: string; line?: number; body: string; url: string }
 
@@ -31,6 +40,8 @@ export interface PullApi {
   reviews(repo: string, number: number): Promise<PrReview[]>
   /** One review's comments on the code. */
   reviewComments?(repo: string, number: number, reviewId: number): Promise<ReviewComment[]>
+  /** The combined check state of one commit, asked only for a head whose state is not already known. */
+  checks?(repo: string, sha: string): Promise<ChecksState>
 }
 
 // URLs only: `#5` or `owner/repo#5` may be an issue, whose thread never merges, so its ticket would wait forever.
@@ -94,6 +105,12 @@ export interface FollowerOptions {
   reopened(thread: ThreadRef, pull: PullRef): number
   receive(trigger: Trigger): void
   warn(event: string, fields: Record<string, unknown>): void
+  /** A followed pull request's checks reached a final state on a head SHA (agent-inbox#667). Detection lives in the
+   *  pass that already reads the pull; who the outcome is for is the caller's, because only a ticket that asked for
+   *  a check gets a session — CI churn recruited one worker 48 times on ticket #205. */
+  checksSettled?(thread: ThreadRef, pull: PullRef, checks: { sha: string; state: ChecksState }, state: PullState): void
+  /** Every checks answer, `pending` included — only settled ones reach `checksSettled`, so nothing stored said `pending`. */
+  checksSeen?(thread: ThreadRef, pull: PullRef, checks: { sha: string; state: ChecksState }, state: PullState): void
   now?: () => number
   /** How often a pull request outside the watched repository is read: three calls each time, against GitHub's hourly limit. */
   everyMs?: number
@@ -102,6 +119,8 @@ export interface FollowerOptions {
    * failures in 4000 log lines, 42 on one thread, because a 404 is a permanent answer for a private
    * repository and the follower asked again every interval, and again after each of the day's 96 restarts.
    * The burn is what tripped the hourly API limit, and a tripped limit blinds the reads that DO matter.
+   * It is now also the gap between probes of a parked thread: the park itself is in the position store, so the
+   * restart that used to erase the backoff no longer re-asks the question.
    */
   cooldownMs?: number
   /** How often one stuck merge conflict is repeated to its ticket. Default 6 h. */
@@ -125,6 +144,67 @@ export interface FollowerOptions {
 // because this box is shared with the workers every `gh` call competes with.
 const readsAtOnce = (due: number): number => Math.min(16, Math.max(4, Math.ceil(due / 8)))
 
+/** What a finished rollup means for a ticket that is waiting on it (agent-inbox#667). */
+export type CheckReason = 'checks_failed' | 'checks_passed'
+
+export interface CheckWakePorts {
+  /** The time this ticket's worker asked for a check, undefined when it asked for nothing. */
+  scheduled(ticketId: string): string | undefined
+  /** The event is the check, so the timer goes. */
+  spend(ticketId: string): void
+  /** This ticket already got this news on this head SHA, so it is not recruited twice. */
+  fired(ticketId: string, sha: string, reason: CheckReason): boolean
+  mark(ticketId: string, sha: string, reason: CheckReason): void
+  recruit(ticket: Ticket, pull: PullRef, checks: { sha: string; state: ChecksState }, reason: CheckReason, scheduledAt: string): void
+  log(ticketId: string, reason: CheckReason, url: string): void
+}
+
+/**
+ * Hand a finished check state to the tickets waiting on it, returning how many it called back. The operator's rules
+ * (agent-inbox#667) live here and nowhere else, and the timer a woken ticket had scheduled is spent, so the
+ * fallback is left for what no event can see: a Pluto job, a person.
+ */
+export function wakeOnChecks(tickets: readonly Ticket[], thread: ThreadRef, pull: PullRef,
+                             checks: { sha: string; state: ChecksState }, state: PullState, ports: CheckWakePorts): number {
+  const reason: CheckReason | undefined = checks.state === 'failed' ? 'checks_failed'
+    : checks.state === 'passed' && !state.autoMergeArmed ? 'checks_passed' : undefined
+  if (!reason) return 0
+  const key = `github:${thread.id}`
+  let woke = 0
+  for (const ticket of tickets) {
+    if (ticket.ended || !ticket.follows?.some(f => f.thread === key && !f.closed)) continue
+    const at = ports.scheduled(ticket.id)
+    if (!at || ports.fired(ticket.id, checks.sha, reason)) continue
+    ports.mark(ticket.id, checks.sha, reason)
+    ports.spend(ticket.id)
+    ports.recruit(ticket, pull, checks, reason, at)
+    ports.log(ticket.id, reason, pullUrl(pull))
+    woke += 1
+  }
+  return woke
+}
+
+
+/**
+ * A state read that threw, in the position store, because the answer that causes it — a private repository this
+ * account cannot see, which GitHub answers 404 — outlives every restart. Measured 2026-11-19 → 11-21: the
+ * in-memory backoff this replaces cost one read and one WARN per unreadable thread per router start (92 WARNs in
+ * 24 h out of 7 threads and 25 starts), and reset to zero on the restart that ended the backoff.
+ */
+export interface UnreadableRead {
+  /** Consecutive failures: a read that works deletes this record, so the count is a streak, not a lifetime total. */
+  fails: number
+  /** Readable again at this pass time; 0 while the streak is short, because a blip is due on the next interval. */
+  nextProbeAt: number
+  /** The park was announced: the one escalation per park, so a probe that fails again says nothing. */
+  announced?: boolean
+}
+
+/** The streak that stops being read as a bad minute: three is a network, four is a repository this account cannot see. */
+export const PARK_AFTER_FAILURES = 4
+
+export const unreadableKey = (id: string): string => `pulls:${id}:unreadable`
+
 /** What one pass did, so the tick's log line can name its own cost. */
 export interface ReconcileReport {
   /** Pull requests past their budget when the pass started. */
@@ -146,20 +226,13 @@ const MACHINE_WRITTEN = /^\s*<!--[\s\S]*?-->/
 export class PullFollower {
   private readonly polled = new Map<string, number>()
   private readonly unreadable = new Set<string>()
-  /** Thread id -> the moment it may be read again. In memory on purpose: a restart re-asks once, and once is
-   *  what a repository that came back into sight deserves. */
-  private readonly cooldown = new Map<string, number>()
-  /** Consecutive failed reads per thread. The long backoff belongs to the PERMANENT answer (a private
-   *  repository this account cannot see), not to a network blip: a repo that comes back into sight mid-day
-   *  must be seen on the next interval: four consecutive failures is a permanent answer, three is a bad
-   *  minute. */
-  private readonly failures = new Map<string, number>()
-  /** Threads whose state read has already been complained about: a follow in a repository the account cannot see
-   *  fails every interval, and 720 identical lines a day is how the one real line gets buried. */
+  /** Threads whose blip has been complained about in this process; a parked thread is silent until it recovers. */
   private readonly unread = new Set<string>()
   /** Threads whose recorded close this process has already re-checked. A close is a fact about the past, so one
    *  look per start is enough to catch the ones a failed read wrote; re-checking them every poll would buy nothing. */
   private readonly probed = new Set<string>()
+  /** Threads whose failed check read is already complained about: once, not every poll. */
+  private readonly unreadChecks = new Set<string>()
 
   constructor(private readonly options: FollowerOptions) {}
 
@@ -182,9 +255,9 @@ export class PullFollower {
       const local = id.startsWith('#')
       if (local && (!open || open.has(id))) continue
       if (!local && now - (this.polled.get(id) ?? -Infinity) < (this.options.everyMs ?? 120_000)) continue
-      // A thread in backoff is not due: the answer that put it there (a repository this account cannot read)
-      // does not change between passes, and asking again is the burn, not the fix.
-      if (!local && (this.cooldown.get(id) ?? 0) > now) continue
+      // A parked thread is not due: the answer that put it there (a repository this account cannot read) does not
+      // change between passes, and its one probe per `cooldownMs` is what notices access being granted.
+      if (!local && this.parked(id, now)) continue
       due.push({ id, pull, local })
     }
     // A follow recorded closed is not in `followed`, so nothing reads it again: a close a read *failed* to make —
@@ -205,7 +278,7 @@ export class PullFollower {
     }
     for (const [id, pull] of recorded) {
       this.probed.add(id)
-      if ((this.cooldown.get(id) ?? 0) > now) continue
+      if (this.parked(id, now)) continue
       // The watched repository answers this from the poll already in hand: a thread open there denies the close, so
       // that reopen costs no API call. Its absence proves nothing — the list answers issues, and a pull request
       // thread missing from it is not a closed pull request — so the rest are read, once each.
@@ -248,6 +321,45 @@ export class PullFollower {
     return { due: due.length, read, deferred: skipped + queue.length, atOnce }
   }
 
+  /** Parked = past the streak threshold and before its probe time. Both halves matter: the blips stay quick. */
+  private parked(id: string, now: number): boolean {
+    const rec = this.options.positions.get<UnreadableRead>(unreadableKey(id))
+    return (rec?.fails ?? 0) >= PARK_AFTER_FAILURES && (rec?.nextProbeAt ?? 0) > now
+  }
+
+  /**
+   * Count a failed state read, and say something twice at most: once per blip streak, once when the thread parks.
+   * Parked probes are silent because GitHub's 404 for a repository it cannot see is the same answer every probe.
+   */
+  private failed(id: string, local: boolean, now: number, error: unknown): void {
+    const key = unreadableKey(id)
+    const before = this.options.positions.get<UnreadableRead>(key)
+    const fails = (before?.fails ?? 0) + 1
+    const ms = this.options.cooldownMs ?? 30 * 60_000
+    // Parking costs one read per `cooldownMs` from here, so a repository granted mid-day is back within one probe.
+    const parked = !local && ms > 0 && fails >= PARK_AFTER_FAILURES
+    if (parked && !before?.announced) {
+      this.options.positions.set(key, { fails, nextProbeAt: now + ms, announced: true })
+      this.unread.add(id)
+      const target = parseThread(id, this.options.home)
+      this.options.warn('pull.thread_unreadable', {
+        thread: id, ...(target ? { url: pullUrl(target) } : {}), fails,
+        retryMinutes: Math.round(ms / 60_000), error: String(error).slice(0, 200),
+      })
+      return
+    }
+    this.options.positions.set(key, { fails, nextProbeAt: parked ? now + ms : 0, ...(before?.announced ? { announced: true } : {}) })
+    // A park already announced says nothing more, across restarts: the durable flag is what makes "one escalation"
+    // mean one, where the per-process set below only silences a blip for the process that saw it.
+    if (before?.announced || this.unread.has(id)) return
+    // Once per thread per process, with the backoff on the same line: the router already counts this event.
+    this.unread.add(id)
+    this.options.warn('pull.read_failed', {
+      thread: id, error: String(error).slice(0, 200), fails,
+      backoffMinutes: ms > 0 ? Math.round(ms / 60_000) : 0,
+    })
+  }
+
   /** The tickets holding a close on this thread that GitHub says is open get their wait back. */
   private heal(id: string, pull: PullRef): void {
     const thread = threadOfPull(pull, this.options.home)
@@ -269,23 +381,13 @@ export class PullFollower {
       // Unknown is not closed. Ending the wait on a read that failed posts "closed without merging, so this ticket
       // ends" on a pull request that is open and ready — measured 2026-11-09, twice in one day, on the router's
       // own fix, because its account cannot see the private repository that pull lives in.
-      const fails = (this.failures.get(id) ?? 0) + 1
-      this.failures.set(id, fails)
-      const ms = this.options.cooldownMs ?? 30 * 60_000
-      if (!local && ms > 0 && fails >= 4) this.cooldown.set(id, now + ms)
-      // Said once per thread, with the backoff on the same line: the router already counts this event, and a
-      // second event per failure doubles the noise for the one fact a reader needs.
-      if (!this.unread.has(id)) {
-        this.unread.add(id)
-        this.options.warn('pull.read_failed', {
-          thread: id, error: String(error).slice(0, 200), backoffMinutes: ms > 0 ? Math.round(ms / 60_000) : 0,
-        })
-      }
+      this.failed(id, local, now, error)
       return
     }
-    this.cooldown.delete(id)
-    this.failures.delete(id)
-    if (this.unread.delete(id)) this.options.warn('pull.read_readable', { thread: id })
+    // A read that worked ends the park, and says so: the silence before it is deliberate, so recovery is not.
+    const wasParked = (this.options.positions.get<UnreadableRead>(unreadableKey(id))?.fails ?? 0) >= PARK_AFTER_FAILURES
+    this.options.positions.delete?.(unreadableKey(id))
+    if (this.unread.delete(id) || wasParked) this.options.warn('pull.read_readable', { thread: id })
     if (state) this.options.observed?.({ source: 'github', id }, pull, state)
     // A pull request GitHub no longer has cannot be merged, so the ticket's wait ends here. `undefined` is GitHub's
     // answer for one *to a reader that can see the repository*: a repository this account cannot read throws above
@@ -297,6 +399,7 @@ export class PullFollower {
     // Open: any ticket holding a close on this thread holds one that never happened.
     this.heal(id, pull)
     await this.conflict(id, pull, state, now)
+    await this.checks(id, pull, state)
     // The reopened follow is in `followed` from the next pass; reading its talk here as well would read it twice.
     if (reopen || local) return
     await this.listen(id, pull, state.createdAt)
@@ -320,6 +423,35 @@ export class PullFollower {
       'GitHub reports this pull request no longer merges cleanly: it has a merge conflict against its base. '
         + 'Rebase or merge the base branch, resolve the conflict, push the branch, and report the new head.',
       'conflict', `conflict:${id}:${now}`))
+  }
+
+  /** Checks of the head commit, asked at most once per SHA once they are final: 41 follows read every 120 s is
+   *  already 1230 GitHub reads an hour, so a check read on every pass spends the hourly limit on pulls that
+   *  finished yesterday (measured 2026-11-10, #303). The last state is the position store, not memory, so a
+   *  restart cannot re-ask a finished SHA and fire its wake a second time. */
+  private async checks(id: string, pull: PullRef, state: PullState): Promise<void> {
+    const read = this.options.api.checks
+    const sha = state.headSha
+    if (!read || !sha) return
+    const key = `pulls:${id}:checks`
+    const seen = this.options.positions.get<{ sha: string; state: ChecksState }>(key)
+    if (seen && seen.sha === sha && seen.state !== 'pending') return
+    let latest: ChecksState
+    try {
+      latest = await read.call(this.options.api, pull.repo, sha)
+    } catch (error) {
+      if (!this.unreadChecks.has(id)) {
+        this.unreadChecks.add(id)
+        this.options.warn('pull.checks_unreadable', { thread: id, sha: sha.slice(0, 10), error: String(error).slice(0, 200) })
+      }
+      return
+    }
+    if (this.unreadChecks.delete(id)) this.options.warn('pull.checks_readable', { thread: id })
+    this.options.positions.set(key, { sha, state: latest })
+    this.options.checksSeen?.({ source: 'github', id }, pull, { sha, state: latest }, state)
+    // `pending` is not an outcome, and `none` is an outcome that never arrives: both keep the ticket's timer.
+    if (latest === 'pending' || latest === 'none') return
+    this.options.checksSettled?.({ source: 'github', id }, pull, { sha, state: latest }, state)
   }
 
   private async listen(id: string, pull: PullRef, createdAt: string): Promise<void> {

@@ -85,12 +85,27 @@ terminal, run `tail -F ~/.pi/superagent/engine.log`.
 
 ```sh
 superagent status    # 0 healthy · 1 down · 2 up and not beating · 3 waiting for setup · 4 a part is failing
-superagent remedy    # what the health job runs: 1 starts, 2 restarts, 0 and 3 and 4 do nothing
-superagent restart   # safe at any time: workers keep running and the new router adopts them
+                     #   · 5 an engine is running with no tab (a start would run a second one)
+superagent remedy    # what the health job runs: 1 starts, 2 and 5 restart, 0 and 3 and 4 do nothing
+superagent restart   # stops the engine and PROVES it stopped before starting a new one; workers keep running
 superagent stop      # leaves a marker, so the health check will not restart it
 superagent start     # clears the marker; refuses a checkout with uncommitted code (--allow-dirty overrides)
 superagent backup    # one sqlite-safe copy of tickets.db per day into <state>/archive, last 14 kept
 ```
+
+**`status` reports two things, in two words, because they fail apart.** `engine:` is the process that runs
+the router loop — its pid, when it booted, the repository it booted on, how old its `health.json` is. `tab:`
+is the herdr tab that shows it. A tab can be up with no engine behind it (pi booted, the supervisor never
+came up: code 2), and an engine can tick with no tab (herdr forgot the agent: code 5). Measured 2026-11-23
+19:15, the second one: `stop` answered "not running", `restart` opened a second tab, and the first engine
+kept the board repository from its own boot for an hour — the `PI_SUPERAGENT_GITHUB_REPO` written into
+`config.env` that day never took effect, because the router that answered was the old process. That is why
+`restart` now proves the stop: it waits for the engine's pid to be gone (SIGTERM, then SIGKILL) and for its
+panel port to be free, and it fails naming the pid it could not stop instead of starting a second engine
+over it. `start` refuses the same way, so a doubled router cannot be created by accident.
+
+Read `engine: up (pid …, booted …, githubRepo=…)` when a setting you changed has not taken effect: it names
+which engine you are talking to.
 
 In a checkout, the same script is `scripts/superagent`.
 
@@ -100,9 +115,11 @@ with the package, explains each setting and its default. Restart to apply a chan
 On macOS, the launchd job in [`launchd/`](../launchd/com.example.superagent-health.plist) runs
 `superagent remedy` every five minutes. It **starts** a router that is down (code 1) and **restarts** one that
 is up and not beating (code 2, the stalled tick loop), which is the fault a running router refuses to fix: the
-router is up, so `start` answers "already running" and the stall would stay loud and permanent. It does nothing
-to a router that is healthy (0), waiting for setup (3), carrying a part a restart cannot fix (4), or stopped on
-purpose: `remedy` honours the stop marker on its own, so a deliberate stop stays deliberate. A parked loop is
+router is up, so `start` answers "already running" and the stall would stay loud and permanent. It restarts
+the engine that ticks with no tab (code 5) the same way, because the remedy for that one is a start, and a
+start over a live engine is the fault. It does nothing to a router that is healthy (0), waiting for setup (3),
+carrying a part a restart cannot fix (4), or stopped on purpose: `remedy` honours the stop marker on its own,
+so a deliberate stop stays deliberate. A parked loop is
 recovered within five minutes, and a restart costs the router's tab and nothing else, because the workers are
 their own sessions and the new router adopts them. Restarts are capped at one per
 `PI_SUPERAGENT_RESTART_COOLDOWN_MIN` (30), so a fault a restart cannot fix cannot restart the router forever —
@@ -236,6 +253,30 @@ instructions ask them to limit parallel jobs and clean up any processes they sta
 goes quiet for 15 minutes, it appears under *Needs a person* on the panel. A long build can be
 quiet, too. Take a look in the tab before interrupting it.
 
+Label an open issue `priority:high` to put it in the next free slot. The launch queue is ordered
+by that label first and oldest updated second, so a flagged thread whose worker is already queued
+takes the slot the moment one frees, and one priority launch per tick, because 38 pending tickets
+sharing 4 slots starves just as well in a priority lane that takes them all — once the tick's one
+priority launch is out, the queue resumes its oldest-first order. The label never bypasses the
+worker cap: it ranks the queue, it does not add a worker, and the daily relaunch cap rises from two
+per thread to six. Every launch line in `engine.log` names the lane that won — `wonSlot: priority`,
+`wonSlot: oldest-starved` (queue win by age) or `wonSlot: unanswered` (the thread has operator
+input no worker delivered) — and the panel's ticket row repeats it under *wonSlot*. Measured
+2026-11-19, the reason the label exists: parking four tickets freed all four slots, and the router
+refilled them in 45 seconds with the oldest asks. Parking is not a stop either, so answer or
+withdraw the replies on a thread you want to keep parked: a parked thread with unanswered operator
+input re-earns a worker up to twice a day, labelled or not.
+
+A worker that reports `waiting` names a time for the next check, and the router keeps that appointment
+(`wake.scheduled`, then `wake.fired`). When what it waits for is a pull request the router already
+reads, the event fires first (`wake.event ticket=… reason=checks_failed|checks_passed`) and the
+appointment is spent. Red checks wake it at once; green with auto-merge armed wake nobody, because the
+merge ends the ticket; green with no auto-merge wakes it, since a person has to merge. The timer stays
+for what the router cannot see — a Pluto job, a person — and `node scripts/measure-timed-rechecks.mjs
+<owner/repo> <fromISO>` reports the share of status reports that end in a timed re-check. Measured
+2026-11-20, 82 of 155 reports in one 24 h window did just that, each a whole agent session spent
+re-reading a check that had finished an hour earlier, on a box with 33 tickets queued for 6 slots.
+
 ## When something goes wrong
 
 **No acknowledgement after a few minutes.** Run `superagent status`, then inspect the most recent
@@ -253,6 +294,12 @@ repositories every two minutes.
 
 **Status exits 2.** Read `~/.pi/superagent/health.json` to identify the failing component. For a
 GitHub source error, check `gh auth status`. The next successful poll clears the error.
+
+**Status exits 5, `engine: up …; tab: absent`.** The router's process is ticking and herdr has no agent for
+it, so `status` cannot ask herdr about it and `start` refuses to run a second one over it. `superagent
+restart` takes it back: it kills the engine, proves the pid is gone and the panel port is free, then starts
+one. If it names a pid it could not stop, that process is yours to end by hand — the restart stopped, and
+started, nothing.
 
 **Status exits 2 and `health.json` names a `tick`.** The loop is not beating: a pass has been running longer
 than `PI_SUPERAGENT_TICK_STALL_MS`, and `tick.stage` names where it is parked (`poll`, `reconcile`,

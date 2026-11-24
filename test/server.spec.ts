@@ -17,7 +17,7 @@ return { port, close: () => new Promise<void>(resolve => server.close(() => reso
 
 const source = (over: Record<string, unknown>): PanelSource => ({
 now: () => new Date().toISOString(),
-repos: { tickets: { list: () => [], get: () => undefined }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } },
+repos: { tickets: { list: () => [], get: () => undefined }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined }, kv: { get: () => undefined, set: () => {} } },
 load: () => ({ running: 0, parked: 0, queued: 0, maxWorkers: 4 }),
 workers: () => [],
 log: () => {},
@@ -359,7 +359,7 @@ describe('the panel worker screen', () => {
     const ticket = {
       id: 't1', title: 'Do the thing', channels: [{ source: 'github', thread: 'o/r#7' }], assignments: [],
     } as never
-    const s = await serve(source({ repos: { tickets: { list: () => [ticket], get: () => ticket }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } } }))
+    const s = await serve(source({ repos: { tickets: { list: () => [ticket], get: () => ticket }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined }, kv: { get: () => undefined, set: () => {} } } }))
     const page = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
     expect(page, 'the execution table reaches the screen of the ticket it names').toContain('/worker?ticket=t1')
     await s.close()
@@ -411,7 +411,7 @@ describe('what the panel says a person is needed for', () => {
   }) as never
 
   const page = async (t: never) => {
-    const s = await serve(source({ repos: { tickets: { list: () => [t], get: () => t }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } } }))
+    const s = await serve(source({ repos: { tickets: { list: () => [t], get: () => t }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined }, kv: { get: () => undefined, set: () => {} } } }))
     const html = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
     await s.close()
     return html
@@ -445,7 +445,7 @@ describe('what the panel offers for a ticket it says needs a person', () => {
       assignments: [{ state: 'running', report: { state: 'blocked', summary: 'the merge is a wash', question: 'leave it closed?', at: new Date().toISOString() } }],
       attention: { question: 'leave it closed?' },
     } as never
-    const s = await serve(source({ repos: { tickets: { list: () => [t], get: () => t }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined } } }))
+    const s = await serve(source({ repos: { tickets: { list: () => [t], get: () => t }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined }, kv: { get: () => undefined, set: () => {} } } }))
     const html = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
     expect(html, 'the ask points at the thread it is about').toContain('github.com/o/r/')
     expect(html.match(/data-ticket="t7"/g)?.length ?? 0, 'both the ask row and the open row can stop it').toBe(2)

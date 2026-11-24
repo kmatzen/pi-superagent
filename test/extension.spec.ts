@@ -8,10 +8,10 @@ import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
 import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
-import type { PullApi, PullState } from '../src/pi/pulls.ts'
+import type { ChecksState, PullApi, PullState } from '../src/pi/pulls.ts'
 import { paneKeysScrubbed, scrubPaneEnv } from './setup.ts'
 
-import { REGRANT_CAP, regrantable, regrantPlan, standingAskEntitled } from '../src/pi/extension.ts'
+import { PRIORITY_REGRANT_CAP, REGRANT_CAP, regrantable, regrantPlan, standingAskEntitled } from '../src/pi/extension.ts'
 
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-ext-')); dirs.push(d); return d }
@@ -168,10 +168,16 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     scopesWork: () => options.scopesWork ?? false, capWorkerGroup: () => options.groupCap ?? true, ...(options.sizeOf ? { sizeOf: options.sizeOf } : {}) })
   live.push(running)
   // A deterministic stand-in for the model: the tests bind the wiring, not the judgement.
+  // pi reports a throwing tool as a failed result; the harness calls execute directly, so return the text.
   const decide = (kind: 'accept' | 'ignore') => {
     const evalId = /Assess eval (\S+)/.exec(judge.prompts.at(-1) ?? pi.sent.at(-1) ?? '')?.[1]
-    if (!evalId) return
-    invoke0(pi, 'ticket_decide', { evalId, kind, reason: kind === 'accept' ? 'the operator asked' : 'not a request', title: 'Ship tonight', scope: 'the named change', acknowledgement: 'on it' })
+    if (!evalId) return ''
+    try {
+      invoke0(pi, 'ticket_decide', { evalId, kind, reason: kind === 'accept' ? 'the operator asked' : 'not a request', title: 'Ship tonight', scope: 'the named change', acknowledgement: 'on it' })
+      return ''
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error)
+    }
   }
   const settleJudge = () => { for (const l of judgeListeners) l({ type: 'agent_settled' }) }
   // The Session's own events, so a test can die one: the pane closes, the process exits, a restart adopts a ticket whose session is gone.
@@ -1256,13 +1262,16 @@ describe('a pull request per ticket', () => {
     const comments = new Map<string, IssueComment[]>()
     const created = new Date(Date.now() - 60_000).toISOString()
     const failing = new Set<string>()
+    const builds = new Map<string, ChecksState>()
     const api: PullApi = {
       pull: async (repo, n) => { if (failing.has(`${repo}#${n}`)) throw new Error('HTTP 502 Bad Gateway'); return states.get(`${repo}#${n}`) },
       comments: async (repo, n) => comments.get(`${repo}#${n}`) ?? [],
       reviews: async () => [],
+      checks: async (repo, sha) => builds.get(`${repo}@${sha}`) ?? 'none',
     }
     return {
       api, comments, states, failing,
+      build: (repo: string, sha: string, state: ChecksState) => { builds.set(`${repo}@${sha}`, state) },
       open: (repo: string, n: number, more: Partial<PullState> = {}) => states.set(`${repo}#${n}`, { open: true, merged: false, createdAt: created, ...more }),
       end: (repo: string, n: number, merged: boolean, closedAt = new Date().toISOString(), mergedBy?: string) =>
         states.set(`${repo}#${n}`, { open: false, merged, createdAt: created, closedAt, ...(mergedBy ? { mergedBy } : {}) }),
@@ -1325,6 +1334,42 @@ describe('a pull request per ticket', () => {
     await f.running.tick()
     expect(f.receipts('494')).toContain('#494 merged: https://github.com/o/r/pull/85, https://github.com/o/r/pull/86. This ticket is done.')
     expect(callsOf(f, '494').filter(c => c === 'close:494'), 'closed again').toHaveLength(2)
+  })
+
+  it('a build the router reads as running is what the receipt names, from the read alone (agent-inbox#667)', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    await working(f, '497')
+    pulls.open('o/r', 93, { headSha: 'sha-build' })
+    pulls.build('o/r', 'sha-build', 'pending')
+    f.workers[0]!.report!({ state: 'waiting', summary: 'Pushed the fix; CI is running.', pullRequests: ['https://github.com/o/r/pull/93'], wakeInMinutes: 30 })
+    await f.running.tick()
+    await f.running.tick()
+    f.addComment('497', 'octocat', 'Is it still building?')
+    await f.running.tick()
+    await until(() => f.workers.length === 2)
+    f.workers[1]!.report!({ state: 'waiting', summary: 'CI is still running on the same commit.', wakeInMinutes: 30 })
+    await f.running.tick()
+    const last = f.feed.posts.filter(p => p.issue === 497).at(-1)!.body
+    expect(last, 'the read of a running build, not a hand-written state, drives the wording').toMatch(/Next check: a fresh worker the moment its pull-request checks finish/)
+  })
+
+  it('a waiting ticket whose pull request is still building is told the checks, not the clock, wake it (agent-inbox#667)', async () => {
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    await working(f, '496')
+    pulls.open('o/r', 90, { checks: { sha: 'abc12345678', state: 'pending' } })
+    f.workers[0]!.report!({ state: 'waiting', summary: 'Pushed the fix; CI is running.', pullRequests: ['https://github.com/o/r/pull/90'], wakeInMinutes: 30 })
+    await f.running.tick()
+    await f.running.tick()
+    f.addComment('496', 'octocat', 'Any news on the build?')
+    await f.running.tick()
+    await until(() => f.workers.length === 2)
+    f.workers[1]!.report!({ state: 'waiting', summary: 'CI is still running on the same commit.', wakeInMinutes: 30 })
+    await f.running.tick()
+    const last = f.feed.posts.filter(p => p.issue === 496).at(-1)!.body
+    expect(last).toMatch(/Next check: a fresh worker the moment its pull-request checks finish/)
+    expect(last, 'the timer is the backstop, not the plan').not.toMatch(/Next check: a fresh worker looks at it at/)
   })
 
   it('a check the last worker asked for outlives the merge that ends its ticket, and the issue closes after it reports', async () => {
@@ -1856,8 +1901,8 @@ describe('a pull request per ticket', () => {
     expect(ticket().ended).toMatchObject({ outcome: 'stopped' })
     expect(f.closes, 'a ticket waiting on CI keeps its issue open').toEqual([])
     // And the door is real: the stopped ticket does not resume, and the comment reaches the judge as a new ask.
-    // The judge answers one eval at a time, and the issue's own first-sight eval is still waiting on it.
-    f.decide('ignore')
+    // The eval the streak stopped on is finished, so an answer for it is refused out loud, not swallowed.
+    expect(f.decide('ignore')).toMatch(/has finished or a later eval replaced it/)
     await f.running.tick()
     f.addComment('508', 'octocat', 'CI is fixed now, take it again', new Date().toISOString())
     await f.running.tick()
@@ -2330,15 +2375,23 @@ describe('the sweep of settled checkouts', () => {
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
 
-  it('a clone with a second worktree is kept whole: deleting either side breaks the other', async () => {
+  it('a clone and its worktrees inside one workspace go together; a worktree in another workspace keeps both', async () => {
+    // 2026-11-18: 39 of the checkouts the sweep kept were a worker's own worktrees/<repo>/<branch>.
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-wt-'))
     try {
-      const main = seedNested(root, 'eeee2222ffff', true)
-      git(main, 'worktree', 'add', '-q', join(root, 'eeee2222ffff', 'worktrees', 'side'), '-b', 'side')
-      const swept = await sweepWorktrees(root, new Set(['eeee2222ffff']), 20, Infinity, async () => 0,
+      const own = seedNested(root, 'eeee2222ffff', true)
+      git(own, 'worktree', 'add', '-q', join(root, 'eeee2222ffff', 'worktrees', 'side'), '-b', 'side')
+      const shared = seedNested(root, 'aaaa3333bbbb', true)
+      mkdirSync(join(root, 'cccc4444dddd'))
+      git(shared, 'worktree', 'add', '-q', join(root, 'cccc4444dddd', 'side'), '-b', 'side')
+      const opened = new Set(['eeee2222ffff', 'aaaa3333bbbb', 'cccc4444dddd'])
+      const swept = await sweepWorktrees(root, opened, 20, Infinity, async () => 0,
         { minFreeBytes: 5 * 1024 ** 3, free: async () => 1024 ** 3 })
-      expect(swept).toMatchObject({ clonesDropped: 0, keptWorkIds: ['eeee2222ffff'] })
-      expect(existsSync(join(root, 'eeee2222ffff', 'worktrees', 'side', 'f'))).toBe(true)
+      expect(existsSync(join(root, 'eeee2222ffff', 'repo')), 'its own worktree goes with it').toBe(false)
+      expect(existsSync(join(root, 'eeee2222ffff', 'worktrees', 'side')), 'and the worktree too').toBe(false)
+      expect(existsSync(join(root, 'aaaa3333bbbb', 'repo', 'f')), 'another workspace works from this clone').toBe(true)
+      expect(existsSync(join(root, 'cccc4444dddd', 'side', 'f')), 'whose main repository lives elsewhere').toBe(true)
+      expect([...swept.keptWorkIds].sort()).toEqual(['aaaa3333bbbb', 'cccc4444dddd'])
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
 
@@ -2391,7 +2444,7 @@ describe('the sweep of settled checkouts', () => {
     try {
       for (const id of ['g1pushed0000', 'g2local00000']) {
         const dir = seedNested(root, id, false)
-        git(dir, 'remote', 'set-url', 'origin', 'https://x-access-token:secret@github.com/Research-Adobe/parfait.git')
+        git(dir, 'remote', 'set-url', 'origin', 'https://x-access-token:secret@github.com/kmatzen/parfait.git')
         git(dir, 'checkout', '-q', '-b', 'fix/green-gate')
         writeFileSync(join(dir, 'g'), id); git(dir, 'add', 'g'); git(dir, 'commit', '-q', '-m', id)
         aged(join(root, id), 9)
@@ -2406,7 +2459,7 @@ describe('the sweep of settled checkouts', () => {
         }),
       })
       expect(swept).toMatchObject({ removed: 1, keptWork: 1, keptWorkIds: ['g2local00000'] })
-      expect(asked[0], 'the repository and branch, never the credential in the URL').toMatch(/^repos\/Research-Adobe\/parfait\/compare\/[0-9a-f]{40}\.\.\.fix%2Fgreen-gate$/)
+      expect(asked[0], 'the repository and branch, never the credential in the URL').toMatch(/^repos\/kmatzen\/parfait\/compare\/[0-9a-f]{40}\.\.\.fix%2Fgreen-gate$/)
       expect(existsSync(join(root, 'g2local00000', 'repo', 'f')), 'GitHub never saw it: the only copy').toBe(true)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
@@ -2584,6 +2637,36 @@ describe('the tick keeps its cadence', () => {
     release()
   }, 30_000)
 
+  it('the label that won the slot says so, and the lane passes the queue that is already waiting', async () => {
+    // agent-inbox#660: the launch lane is the operator's lever, so it has to be visible in the log and beat
+    // the ask that queued first. Measured on the box 2026-11-20 09:53: six labelled threads sat behind 27
+    // queued launches with all six slots busy, and every free slot went to the oldest by arrival order.
+    const feed: { issues: IssueState[]; comments: IssueComment[] } = { issues: [], comments: [] }
+    const ask = (n: string, labels: string[] = []) => {
+      feed.issues.push({ issue: Number(n), title: 'DO: the thing', author: 'pi-superagent', labels,
+        association: 'OWNER', createdAt: '2026-11-04T09:00:00Z', updatedAt: '2026-11-05T09:00:00Z' })
+      feed.comments.push({ issue: Number(n), author: 'octocat', association: 'OWNER', at: '2026-11-05T09:00:00Z', body: `do the thing ${n}` })
+    }
+    const f = fixture(true, undefined, undefined, undefined, {
+      tickMs: 5, maxConcurrent: 1,
+      githubApi: { issues: async () => [...feed.issues], comments: async () => [...feed.comments], postComment: async () => {} },
+    })
+    for (const [n, labels] of [['541', []], ['542', []], ['543', ['priority:high']]] as Array<[string, string[]]>) {
+      ask(n, labels)
+      await f.running.tick()
+      f.decide('accept')
+      await f.running.tick()
+    }
+    expect(f.workers.length, 'one slot, so the two later launches wait for it').toBe(1)
+    expect(f.running.load().queued).toBe(2)
+    f.workers[0]!.report!({ state: 'ready', summary: 'did the thing' })
+    await until(() => f.workers.length === 2, 3_000)
+    expect(f.workers[1]!.prompts.join('\n'), 'the flagged ask took the freed slot, not the ask that queued first').toContain('543')
+    const trail = trailOf(f.dir)
+    expect(trail, 'and the win names its lane').toMatch(/launch\.granted ticket=\S+ thread=#543 lane=priority wonSlot=priority/)
+    expect(trail).toMatch(/launch\.granted ticket=\S+ thread=#541 lane=queue wonSlot=oldest-starved/)
+  }, 30_000)
+
   it('a pass that never finishes is abandoned, and the beat survives it', async () => {
     let release!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })
@@ -2701,6 +2784,20 @@ describe('the standing queue re-grant', () => {
     expect(regrantPlan(counters, '#214', '2026-11-11'), 'the day rolls and the ask may launch again')
       .toMatchObject({ day: '2026-11-11', perIssue: { '#214': 1 } })
     expect(REGRANT_CAP, 'two per issue per day, the number in the design note').toBe(2)
+  })
+
+  it('gives a labelled ask three times the queue, because the label is the operator asking', () => {
+    // The 2026-11-19 queue: 43 starved tickets and zero launches on a daily cap of two.
+    let counters = regrantPlan(undefined, '#214', day, PRIORITY_REGRANT_CAP)
+    for (let n = 2; n <= PRIORITY_REGRANT_CAP; n++) {
+      expect(counters, `grant ${n} of ${PRIORITY_REGRANT_CAP} is granted`).toBeTruthy()
+      counters = regrantPlan(counters, '#214', day, PRIORITY_REGRANT_CAP)
+    }
+    expect(counters?.perIssue['#214'], 'the sixth lands').toBe(PRIORITY_REGRANT_CAP)
+    expect(regrantPlan(counters, '#214', day, PRIORITY_REGRANT_CAP), 'the seventh is the cap').toBeUndefined()
+    expect(regrantPlan(counters, '#214', day), 'and the unlabelled ask is capped at its second by the same counters')
+      .toBeUndefined()
+    expect(PRIORITY_REGRANT_CAP, 'three times the queue, the number in the guide').toBe(REGRANT_CAP * 3)
   })
 })
 
