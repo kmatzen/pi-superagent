@@ -78,6 +78,20 @@ read is unreadable, the follow stays open, and the failure is said once per thre
 matching `pull.read_readable` when it recovers. Absent and unreadable are different answers; only
 the first one ends a wait.
 
+**Park a thread the account cannot read, durably.** Unreadable was said once per thread, and a thread
+that stays unreadable was read again, and complained about again, at every router start: measured
+2026-11-19 → 11-21, 92 `pull.read_failed` lines in 24 h out of 7 follows in four repositories the bot
+cannot see — `kmatzen/pi-superagent`, `matzen_adobe/fleet-board`, `matzen_adobe/caramel`,
+`a-learning-space/superagent` — which is 7 threads × 25 starts, because the failure streak and its
+30-minute backoff lived in memory and every start reset both to zero. GitHub's 404 for a repository
+the token cannot see is a fact about the repository, so the streak is a fact that must outlive the
+process: four consecutive failures now park the thread in the position store, one
+`pull.thread_unreadable` line names it, and after that the follower reads it once per `cooldownMs`
+and says nothing, because the answer is the same on every probe. A read that works deletes the record
+and logs `pull.read_readable`, so access granted mid-day is back within one probe. The watched
+repository is never parked: its threads are read by the source poll, which is a read the router pays
+for anyway.
+
 **Repair a close a failed read wrote down.** The fix above stops the next false close; it does not undo
 the ones already in the database, and a recorded close is permanent by design — a closed follow is not
 read again, so nothing is there to notice the truth. Measured 2026-11-09 on the live board: 21 **live**
