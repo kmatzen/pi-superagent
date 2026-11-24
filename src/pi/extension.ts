@@ -89,7 +89,7 @@ export const regrantable = (
   judging: () => boolean = () => false,
 ): boolean => open ? standingAskEntitled(open, liveWorkers) : !everTicketed() && !judging()
 export const REGRANT_KEY = 'router:regrant'
-export interface RegrantCounters { day: string, perIssue: Record<string, number> }
+export interface RegrantCounters { day: string, perIssue: Record<string, number>, cappedOn?: Record<string, string> }
 /** Grants this issue already spent today. Counters from another day read as zero, which is what the day rollover means. */
 export const regrantUsed = (counters: RegrantCounters | undefined, key: string, day: string): number =>
   counters?.day === day ? counters.perIssue[key] ?? 0 : 0
@@ -296,7 +296,16 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
           const counters = repos.kv.get<RegrantCounters>(REGRANT_KEY)
           const next = regrantPlan(counters, key, day, cap)
           // A capped line with no counter read exactly like a healthy lane: eight threads were each at 2 of 2.
-          if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day, used: regrantUsed(counters, key, day), cap }); return false }
+          if (!next) {
+            // Said once per thread per day: the queue polls every 45 seconds, and six threads that re-read their
+            // own body logged 480 refusals in an hour, which the operator read as the batch churning (2026-11-24).
+            if (counters?.cappedOn?.[key] !== day) {
+              log.line('info', 'regrant.capped', { thread: key, issue, day, used: regrantUsed(counters, key, day), cap })
+              repos.kv.set(REGRANT_KEY, { day, perIssue: counters?.perIssue ?? {},
+                cappedOn: { ...(counters?.cappedOn ?? {}), [key]: day } })
+            }
+            return false
+          }
           repos.kv.set(REGRANT_KEY, next)
           const wonSlot = wonSlotReason(priority, (ask?.undelivered.length ?? 0) > 0)
           repos.kv.set(WON_SLOT_KEY, { ...(repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {}), [key]: wonSlot })
