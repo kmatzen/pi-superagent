@@ -1315,8 +1315,22 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       // A herdr worker runs in its own process and outlives the router: take it over instead of starting another.
       const survivor = herdrWorkers ? await herdrWorkers.find(ticket.id) : undefined
       if (survivor && herdrWorkers) {
-        executor.adopt(ticket, assignment, send => herdrWorkers.attach(survivor, send, { adopted: true }))
-        log.line('info', 'worker.adopted', { ticket: ticket.id, agent: survivor.agent, tab: survivor.tabId })
+        const outcome = executor.adopt(ticket, assignment, send => herdrWorkers.attach(survivor, send, { adopted: true }))
+        if (outcome === 'adopted') {
+          log.line('info', 'worker.adopted', { ticket: ticket.id, agent: survivor.agent, tab: survivor.tabId })
+          return
+        }
+        if (outcome === 'busy') return  // this process already holds a worker on that ticket
+        // No slot: retire this survivor like a worker that died. The report goes first, because `interrupted`
+        // ends an assignment with nothing settled on it, and an ended assignment refuses a report.
+        log.line('warn', 'worker.adopt_refused', {
+          ticket: ticket.id, agent: survivor.agent, tab: survivor.tabId, running: executor.running, cap: executor.capacity,
+        })
+        engine.report(ticket.id, { state: 'failed', question: null, summary: executor.capacity === 1
+          ? 'the router restarted with its only worker slot full, so this worker was retired; a fresh one starts when a slot frees'
+          : `the router restarted with all ${executor.capacity} worker slots full, so this worker was retired; a fresh one starts when a slot frees` } as never)
+        engine.assignmentInterrupted(ticket.id, assignment.id)
+        engine.retryTicket(ticket.id)
         return
       }
       engine.assignmentInterrupted(ticket.id, assignment.id)
@@ -1436,7 +1450,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // beat, saw `ticking === true`, and folded the demand into `again` — silently, for hours, because nothing
   // logged that a pass had not finished. The pass was parked in its last await, `executor.idle()`, which is the
   // launch queue's tail, and that queue waits for a free worker slot: with 20 workers busy against a cap of 8
-  // (survivors adopted at startup ignore the cap) it drains only when the fleet goes quiet, which is the hourly
+  // (survivors adopted at startup ignored the cap) it drains only when the fleet goes quiet, which is the hourly
   // beat. The cadence and the cost are one fault: at an hourly beat the 120 s per-pull budget is always
   // expired, so every pass paid the full 41-pull fan-out — the 6.6 s → 15.4 s climb the board tracked.
   // Three changes, each of them loud: the pass never awaits worker capacity; a pass that stops moving names the

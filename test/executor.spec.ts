@@ -28,7 +28,8 @@ function fixture(extra: { maxConcurrent?: number; slotPollMs?: number; launchBlo
                           stillWanted?: (t: Ticket, a: Assignment) => Ticket | undefined;
                           priorityOf?: (t: Ticket) => boolean;
                           laneWon?: (t: Ticket, a: Assignment, lane: 'priority' | 'queue') => void } = {},
-                 fail: { launch?: string; report?: string } = {}) {
+                 fail: { launch?: string; report?: string } = {},
+                 launcher?: (input: { ticket: Ticket; report: Reporter }) => WorkerSession | Promise<WorkerSession>) {
   const calls: Call[] = []
   const sessions: FakeSession[] = []
   const engine = {
@@ -42,13 +43,13 @@ function fixture(extra: { maxConcurrent?: number; slotPollMs?: number; launchBlo
     },
   }
   const executor = new PiExecutor(engine as never, {
-    launch: ({ ticket, report }) => {
-      if (fail.launch === ticket.id) throw new Error('prepare command failed')
+    launch: (input) => launcher ? launcher({ ticket: input.ticket, report: input.report }) : (() => {
+      if (fail.launch === input.ticket.id) throw new Error('prepare command failed')
       const s = new FakeSession(`s${sessions.length}`)
-      s.report = report as never
+      s.report = input.report as never
       sessions.push(s)
       return s
-    },
+    })(),
   }, {
     worktreeFor: () => '/wt',
     briefFor: t => `brief for ${t.id}`,
@@ -249,6 +250,60 @@ describe('PiExecutor', () => {
     expect(f.executor.running, 'a pane that speaks has a run in flight, turnStarted or not').toBe(1)
     session.emit({ type: 'settled' })
     expect(f.executor.running).toBe(0)
+  })
+
+  it('adoption takes a slot: two survivors and one slot adopt one worker, and the refused one is never attached', () => {
+    // #811: the cap guarded the launch path only, so a restart adopted every survivor a crash left behind.
+    const f = fixture({ maxConcurrent: 1 })
+    const attached: string[] = []
+    const kept = new FakeSession('kept')
+    expect(f.executor.adopt(ticket({ id: 'T1' }), assignment('A1'), report => {
+      attached.push('T1'); kept.report = report as never; return kept
+    })).toBe('adopted')
+    expect(f.executor.adopt(ticket({ id: 'T2' }), assignment('A2'), report => {
+      attached.push('T2'); return new FakeSession('refused')
+    }), 'the second survivor is outside the cap').toBe('no-slot')
+    expect(attached, 'a refused survivor is never attached: no reader, no tab watcher').toEqual(['T1'])
+    kept.emit({ type: 'activity' })
+    expect(f.executor.running, 'at most `max` running, the invariant the launch gate keeps').toBeLessThanOrEqual(f.executor.capacity)
+    expect(f.executor.workers().map(w => w.ticketId), 'and at most `max` workers on the box').toEqual(['T1'])
+    expect(f.executor.adopt(ticket({ id: 'T1' }), assignment('A1'), () => new FakeSession('dup')), 'a ticket already live is not a second worker').toBe('busy')
+  })
+
+  it('a survivor refused for want of a slot starts as a fresh worker when one frees', async () => {
+    const f = fixture({ maxConcurrent: 1, slotPollMs: 5 })
+    const kept = new FakeSession('kept')
+    expect(f.executor.adopt(ticket({ id: 'T1' }), assignment('A1'), report => { kept.report = report as never; return kept })).toBe('adopted')
+    expect(f.executor.adopt(ticket({ id: 'T2' }), assignment('A2'), () => new FakeSession('refused'))).toBe('no-slot')
+    f.executor.start(ticket({ id: 'T2' }), assignment('A2'))
+    f.executor.release(ticket({ id: 'T1' }))
+    kept.emit({ type: 'settled' })
+    await f.executor.idle()
+    expect(f.sessions.map(s => s.sessionId), 'the refused ticket is queued, not dropped').toEqual(['s0'])
+    expect(f.executor.running).toBe(1)
+  })
+
+  it('a launch whose slot an adoption took binds no worker, stops the session it made, and names the cause', async () => {
+    const made: FakeSession[] = []
+    let finishLaunch: (s: FakeSession) => void = () => {}
+    const f = fixture({ maxConcurrent: 1 }, {}, ({ report }) => new Promise<WorkerSession>(resolve => {
+      finishLaunch = s => { s.report = report as never; made.push(s); resolve(s) }
+    }))
+    f.executor.start(ticket({ id: 'T1' }), assignment('A1'))
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const kept = new FakeSession('adopted')
+    expect(f.executor.adopt(ticket({ id: 'T2' }), assignment('A2'), report => { kept.report = report as never; return kept })).toBe('adopted')
+    kept.emit({ type: 'activity' })
+    finishLaunch(new FakeSession('too-late'))
+    await f.executor.idle()
+    expect(made.map(s => s.sessionId), 'the session the launcher made is stopped, not bound').toEqual(['too-late'])
+    expect(made[0]!.aborted, 'a worker nobody watches is the failure this cap exists to stop').toBe(1)
+    expect(made[0]!.disposed).toBe(1)
+    expect(f.executor.workers().map(w => w.ticketId), 'the adoption holds the slot').toEqual(['T2'])
+    expect(f.executor.running, 'running never passes the cap, on either path').toBeLessThanOrEqual(f.executor.capacity)
+    expect(f.calls_of('report').map(c => (c.args[1] as { summary: string }).summary), 'the ticket reads as a refused launch').toEqual([
+      'could not start a worker: all 1 worker slots are live',
+    ])
   })
 
   it('input to an idle worker enters at once, and input to a running worker waits its turn', () => {

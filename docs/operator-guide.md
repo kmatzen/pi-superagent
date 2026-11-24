@@ -247,6 +247,8 @@ By default, four workers can run at once. If you open a fifth issue while all fo
 ticket waits in the queue on the panel. A worker waiting for your answer can **park**. It keeps
 its tab and its conversation history, and another ticket can use the free slot. When you reply,
 the parked worker picks up where it left off. Set `PI_SUPERAGENT_MAX_WORKERS` to change the limit.
+A router restart obeys the same limit: surviving workers take the slots in board order, a survivor
+that finds none is retired, and its issue relaunches when a slot frees.
 
 The judge reads one request at a time. Workers can build and test side by side, so their
 instructions ask them to limit parallel jobs and clean up any processes they start. If a worker
@@ -337,8 +339,10 @@ Read the backlog per pass, not the fleet size. Measured on the live router over 
 and 17 of those runs were already over `PI_SUPERAGENT_MAX_WORKERS` with an empty queue; the one run that queued
 a median of **12 launches per pass** with 18 workers on a cap of 8 beat every **2,780 s**. A fleet over its cap
 is not the fault — it is the condition that makes a queued launch slow, and the old code waited a whole pass on
-that queue. Startup takeover is one reason `running` can exceed `cap`: workers that outlived the previous
-router are adopted without checking the cap, which is a policy question the code does not decide.
+that queue. Startup takeover obeys the cap too (2026-11-24): a restart adopts as many surviving
+workers as `cap`, retires the rest, and relaunches their tickets as slots free. A `running` above
+`cap` in an older log line predates that fix; the count that sits above `cap` today is `parked`,
+which is by design — a parked worker keeps its tab and history, and holds no slot.
 
 **Status exits 3.** Read `~/.pi/superagent/setup.json` for the missing prerequisite and its location. One
 prerequisite is a credential in a checkout's git config; see

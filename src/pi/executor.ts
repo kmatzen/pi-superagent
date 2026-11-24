@@ -18,6 +18,8 @@ export interface WorkerSession {
   readonly watch?: string
 }
 
+export type AdoptOutcome = 'adopted' | 'busy' | 'no-slot'
+
 const NO_LIVE_WORKER = 'no live worker for this ticket'
 
 export type WorkerEvent =
@@ -167,7 +169,13 @@ export class PiExecutor {
         sessionRef = session
         // A stop during boot finds no worker to stop (2026-11-12: one ran 2 min on a closed issue), so ask again here.
         if (this.options.stillWanted && !this.options.stillWanted(current, assignment)) { session.dispose(); return }
-        this.bind(current, assignment, session)
+        if (!this.bind(current, assignment, session)) {
+          // The gate opened, then an adoption took the slot: a worker nobody watches must not stay up.
+          session.abort(); session.dispose()
+          this.file(current, assignment.id, 'launch',
+            report('failed', `could not start a worker: all ${this.capacity} worker slots are live`))
+          return
+        }
         this.startedAt = Date.now()
         this.engine.assignmentStarted(ticket.id, assignment.id)
         session.prompt(brief, 'followUp')
@@ -180,13 +188,17 @@ export class PiExecutor {
     }, this.options.priorityOf?.(ticket) === true)
   }
 
-  /** A worker already running that this process did not start (it outlived the previous router): bind it, and
-   *  do not prompt the brief again. */
-  adopt(ticket: Ticket, assignment: Assignment, attach: (report: Reporter) => WorkerSession): void {
-    if (this.live.has(ticket.id)) return
+  /** A worker that outlived the previous router: bind it, do not prompt its brief again, and take a slot. */
+  adopt(ticket: Ticket, assignment: Assignment, attach: (report: Reporter) => WorkerSession): AdoptOutcome {
+    if (this.live.has(ticket.id)) return 'busy'
+    if (this.live.size >= this.capacity) return 'no-slot'
     let own: WorkerSession | undefined
     own = attach(this.reporter(ticket, () => own))
-    this.bind(ticket, assignment, own, false)
+    if (!this.bind(ticket, assignment, own, false)) {
+      own.dispose()  // nothing bound, so the session this made must not stay up unwitnessed
+      return 'no-slot'
+    }
+    return 'adopted'
   }
 
   // Bound to the session that owns the ticket: a report from a worker the domain has already replaced or
@@ -233,7 +245,9 @@ export class PiExecutor {
       { ...filed, ...(followed.length ? { pullRequests: followed } : {}), ...(wakeAt ? { wakeAt } : {}), ...(notes ? { notes } : {}) })
   }
 
-  private bind(ticket: Ticket, assignment: Assignment, session: WorkerSession, busy = true): void {
+  /** The one place `live` grows, so the cap checked here bounds every path that starts a worker. */
+  private bind(ticket: Ticket, assignment: Assignment, session: WorkerSession, busy = true): boolean {
+    if (busy && !this.live.has(ticket.id) && this.running >= this.capacity) return false
     const born = Date.now()
     const live: Live = {
       session, unsubscribe: () => {}, pendingRead: [], busy,
@@ -269,6 +283,7 @@ export class PiExecutor {
         if (this.live.get(ticket.id) === live) { live.unsubscribe(); this.live.delete(ticket.id); live.session.dispose() }
       }
     })
+    return true
   }
 
   deliver(ticket: Ticket, assignment: Assignment): void {
@@ -343,8 +358,8 @@ export class PiExecutor {
 
   /**
    * The worker cap the launch gate enforces, next to `running`: a stall is only readable when the reader can
-   * see both (`running=18 cap=8` is the cause, `stage=drain` alone is a symptom). Startup takeover can push
-   * `running` past this number on purpose, which is why the pair is worth publishing rather than assuming.
+   * see both (`running=18 cap=8` is the cause, `stage=drain` alone is a symptom). Only `parked` sessions sit
+   * above it: a launch waits on the gate, and `adopt` takes a slot (#811).
    */
   get capacity(): number { return this.options.maxConcurrent ?? 4 }
 
