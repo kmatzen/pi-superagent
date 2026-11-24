@@ -1549,6 +1549,37 @@ describe('a pull request per ticket', () => {
     expect(f.calls, 'the watched repository has an issue 12 of its own, and this closes nothing of it').not.toContain('close:12')
   })
 
+  it('an ask its merged pull requests made moot ends on the next pass, question quoted', async () => {
+    // Measured 2026-11-24 on the live board: agent-inbox#855 asked "keep this watch running?" over four pull
+    // requests that had all merged. Each close was recorded while its worker was busy, and a blocked report
+    // never re-checks one, so the ask outlived the work and the ticket never ended.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    pulls.open('x/y', 9)
+    f.addComment('484', 'octocat', 'run the dashboard check only on dashboard pages')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    f.workers[0]!.report!({ state: 'blocked', summary: 'the dashboard check now runs only on dashboard pages',
+      question: 'Keep the watch running for the next twelve pull requests?', pullRequests: ['https://github.com/x/y/pull/9'] })
+    await f.running.tick()
+    expect(f.receipts('484')).toContain('**Question:** Keep the watch running')
+    // The merge is written down while the ticket's ask stands, which is the state the live board sat in.
+    const store = new SqliteRepositories(`${f.dir}/tickets.db`)
+    const ticket = store.tickets.list().find(t => t.channels[0]?.thread === '#484')!
+    ticket.follows = (ticket.follows ?? []).map(f => ({ ...f, closed: { at: new Date().toISOString(), outcome: 'merged' as const } }))
+    store.tickets.save(ticket)
+    store.close()
+    await f.running.tick()
+    const open = JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text)
+    expect(open.find((t: { thread: string }) => t.thread === '#484'), 'the moot ask ends the ticket').toBeFalsy()
+    const ended = f.receipts('484')
+    expect(ended).toContain('#484 merged: https://github.com/x/y/pull/9. This ticket is done.')
+    expect(ended, 'the question the merge made moot stays on the thread').toContain('**The question that was open when it ended:** Keep the watch running')
+  })
+
   it('a merge that leaves another pull request open wakes the worker for the follow-on change', async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })

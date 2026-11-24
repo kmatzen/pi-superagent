@@ -100,6 +100,23 @@ export class Tickets extends EnginePart {
     return counted.map(item => item.closed!).sort((a, b) => a.at.localeCompare(b.at)).at(-1)
   }
   /**
+   * End open tickets whose question the closes made moot: asked a person, every Thread done with has closed, no worker
+   * runs. A close recorded while work was busy ends nothing then, and a blocked report never re-checks it (#855).
+   */
+  closeAnsweredAsks(at: string): string[] {
+    const ended: string[] = []
+    for (const ticket of this.repo.tickets.open()) {
+      if (!ticket.attention || runningAssignment(ticket)) continue
+      const done = this.followsDone(ticket)
+      // The same guard the close itself uses, read at the close's moment: a merge that predates the work on the
+      // ticket leaves that work to finish, and the person's answer to start the worker that finishes it.
+      if (!done || this.unfinished(ticket, done.at)) continue
+      this.end(ticket.id, 'executor', done.outcome, at)
+      ended.push(ticket.id)
+    }
+    return ended
+  }
+  /**
    * The Trigger to attach to a ticket, once the ticket may take it.
    * @throws UserError when the trigger or ticket is unknown, a ticket's worker still decides the trigger, a person stopped the ticket, or an ended ticket's Mandate no longer revalidates.
    */
