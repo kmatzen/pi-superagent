@@ -180,6 +180,16 @@ observe the closure even if it cannot distinguish deletion, manual closure and c
 It stops the ticket and queues a notice. For a ticket awaiting its own PR, the PR’s merge or close
 determines the outcome. Reopening an issue lets its author ask again.
 
+**A conversation in another repository is a pull request, and its close ends the ticket too.** The
+source polls the watched repository only, so a ticket opened by a comment on `owner/repo#7` elsewhere
+never saw that thread close: measured 2026-11-23, fourteen open tickets sat on threads closed days
+earlier, five of them still asking a person for a decision nobody could make on a closed thread
+(agent-inbox#936). The router binds such a thread to its ticket, so the two-minute pull read ends it
+as merged or closed the way the ticket's own PRs do. GitHub is asked first, because `#7` names an
+issue as easily as a pull request, and a ticket bound to an issue would end on the merge of the pull
+request sharing its number. A question the worker asked and nobody answered rides along in the
+closing note, because the ticket's end clears it.
+
 **Every end closes the issue, and a promised check survives a merge.** A ticket resumed on a reopened
 issue can end again, and each end posts its own note and closes the issue again; both were once per
 ticket, so on 2026-11-13 #387's second end left it open in silence. A merge that ends a ticket whose

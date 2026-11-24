@@ -1517,6 +1517,38 @@ describe('a pull request per ticket', () => {
     expect(g.trackers, 'the same text as before the restart, so no edit').toEqual([])
   })
 
+  it('a conversation in another repository ends its ticket when the pull request closes, question quoted', async () => {
+    // agent-inbox#936, measured 2026-11-23: 14 of 61 open tickets lived on pull-request threads in other
+    // repositories, 13 of those threads closed, and 5 kept asking a person about a thread nobody could reopen.
+    let now = Date.now()
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api, clock: () => now })
+    pulls.open('x/y', 12)
+    f.running.engine.receive({ id: 'github:x/y#12:c1', source: 'github', threads: [{ source: 'github', id: 'x/y#12' }],
+      actor: { source: 'github', id: 'octocat' }, human: true, at: new Date(now).toISOString(), text: 'rename it back',
+      channel: { source: 'github', thread: 'x/y#12', address: { repo: 'x/y', issue: '12' } },
+      meta: { via: 'comment', author: 'octocat', association: 'OWNER' } } as never)
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers, 'the foreign comment opened a ticket and a worker').toHaveLength(1)
+    const repos = new SqliteRepositories(`${f.dir}/tickets.db`)
+    const foreign = () => repos.tickets.list().find(t => t.channels[0]?.thread === 'x/y#12')!
+    expect(foreign().follows, 'the ticket follows the pull request its conversation is on').toMatchObject([{ thread: 'github:x/y#12', own: true }])
+    f.workers[0]!.report!({ state: 'blocked', summary: 'the rename touches the public api', question: 'Rename it back, yes or no?' })
+    await f.running.tick()
+    expect(f.receipts('12'), 'the ask reached the thread it belongs to').toContain('**Question:** Rename it back, yes or no?')
+    pulls.end('x/y', 12, false)
+    now += 121_000   // a thread outside the watched repository is read on its own cadence, one look per 120 s
+    await f.running.tick()
+    expect(foreign().ended, 'the close ends the ticket').toMatchObject({ by: 'executor', outcome: 'closed' })
+    const ended = f.receipts('12')
+    expect(ended).toContain('https://github.com/x/y/pull/12 closed without merging, so this ticket ends')
+    expect(ended, 'the question the close made moot stays on the thread').toContain('**The question that was open when it ended:** Rename it back, yes or no?')
+    expect(f.calls, 'the watched repository has an issue 12 of its own, and this closes nothing of it').not.toContain('close:12')
+  })
+
   it('a merge that leaves another pull request open wakes the worker for the follow-on change', async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
