@@ -557,6 +557,38 @@ describe('follow-up owners', () => {
       expect(h.repo.tickets.get(ticketId)!.ended).toMatchObject({ outcome: 'merged' })
     }
   })
+  it('stops waiting on a pull request nobody can close, ends the ticket as the work that landed, and asks GitHub about it no more', () => {
+    // Measured 2026-11-24 on agent-inbox#928: the fix merged upstream while its duplicate pull request sat open in an
+    // archived fork, which answers "read-only" to a close. A ticket that follows a Thread that can never close ends
+    // never, its board issue stays open, and intake asks for the same work again.
+    for (const merged of [true, false]) {
+      const h = harness()
+      const ticketId = accepted(h).ticketId!
+      h.engine.bindThread(ticketId, { source: 'gh', id: 'pr-9' }, true)
+      h.engine.bindThread(ticketId, { source: 'gh', id: 'pr-14' }, true)
+      h.engine.report(ticketId, { state: 'ready', summary: 'PR ready' })
+      h.engine.threadClosed({ source: 'gh', id: 'pr-9' }, merged ? 'merged' : 'closed', '2026-09-23T00:00:01Z')
+      expect(h.repo.tickets.get(ticketId)!.ended, 'the open duplicate still holds the ticket open').toBeUndefined()
+      h.tick(5)
+      h.engine.abandonPull(ticketId, 'gh:pr-14', 'the fork is archived, so it can never close')
+      const ticket = h.repo.tickets.get(ticketId)!
+      // The pull written off closed nothing, so it names no outcome: the merged work says merged.
+      expect(ticket.ended).toMatchObject({ by: 'executor', outcome: merged ? 'merged' : 'closed' })
+      expect(ticket.ended?.reason).toContain('the fork is archived')
+      expect(ticket.follows?.find(f => f.thread === 'gh:pr-14')?.closed).toMatchObject({ outcome: 'abandoned' })
+      expect(h.repo.threads.get('gh:pr-14')!.subscriptions, 'the Thread keeps its subscriptions').toContain(ticketId)
+      expect(() => h.engine.abandonPull(ticketId, 'gh:pr-14', 'again')).toThrowError(/Ticket has ended/)
+    }
+  })
+  it('refuses to abandon the thread the ticket answers on, and a thread it does not follow', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.bindThread(ticketId, { source: 'gh', id: 'pr-9' }, true)
+    expect(() => h.engine.abandonPull(ticketId, 'chat:t1', 'the ask itself')).toThrowError(/thread the ticket started on/)
+    expect(() => h.engine.abandonPull(ticketId, 'gh:pr-404', 'never bound')).toThrowError(/does not follow/)
+    h.engine.abandonPull(ticketId, 'gh:pr-9', 'the fork is archived')
+    expect(h.repo.tickets.get(ticketId)!.ended).toMatchObject({ outcome: 'closed' })
+  })
   it('ends the ticket whose question its closes made moot, and leaves one whose worker is still on it', () => {
     // Measured 2026-11-24: inbox#855 asked "keep this watch running?" over four pull requests that had all
     // merged. A close recorded while work was busy ends nothing then, and a blocked report never re-checks it.

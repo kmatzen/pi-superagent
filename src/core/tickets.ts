@@ -2,7 +2,7 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { latestAssignment, latestReport, liveTicket, mandateWithdrawn, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
-import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, MandateBasis, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome, TicketStopKind,
+import type { Assignment, ChannelRef, ClosedEnd, Evaluation, Follow, Mandate, MandateBasis, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome, TicketStopKind,
   Trigger, TriggerDisposition } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
@@ -92,12 +92,32 @@ export class Tickets extends EnginePart {
    * How a ticket that follows Threads is done with them: once no Thread it opened (`own`) is still open, or, when it opened none,
    * once every one it follows closed. It ends as the latest close among those Threads did; undefined while it is not done.
    */
-  followsDone(ticket: Ticket): Follow['closed'] {
+  followsDone(ticket: Ticket): ClosedEnd | undefined {
     const follows = ticket.follows ?? []
     const own = follows.filter(item => item.own)
     const counted = own.length ? own : follows
     if (!counted.length || counted.some(item => !item.closed)) return undefined
-    return counted.map(item => item.closed!).sort((a, b) => a.at.localeCompare(b.at)).at(-1)
+    const latest = counted.map(item => item.closed!).sort((a, b) => a.at.localeCompare(b.at)).at(-1)!
+    // A pull a person abandoned closed nothing, so it names no outcome: the end is the best the pulls that did close achieved.
+    if (latest.outcome === 'abandoned') {
+      return { at: latest.at, outcome: counted.some(item => item.closed?.outcome === 'merged') ? 'merged' : 'closed',
+        ...(latest.reason ? { reason: latest.reason } : {}) }
+    }
+    return { at: latest.at, outcome: latest.outcome, ...(latest.reason ? { reason: latest.reason } : {}) }
+  }
+  /** Stop a ticket waiting on one pull request, on a person's word, and end it when that closes all of them: a pull in a repository the fleet cannot write to stays open forever, so the ticket would end never (#928). */
+  abandonPull(ticketId: string, thread: string, reason: string): Ticket {
+    const ticket = this.require(ticketId)
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    if (this.source(ticket)?.threads.some(ref => threadKey(ref) === thread)) throw new UserError('sourceThread')
+    const follow = (ticket.follows ?? []).find(item => item.thread === thread && !item.closed)
+    if (!follow) throw new UserError('notFollowing')
+    follow.closed = { at: this.now(), outcome: 'abandoned', reason }
+    ticket.updatedAt = this.now()
+    this.repo.tickets.save(ticket)
+    const done = this.followsDone(ticket)
+    if (done && !this.unfinished(ticket, done.at)) this.end(ticketId, 'executor', done.outcome, done.at, `stopped waiting on ${thread}: ${reason}`)
+    return this.require(ticketId)
   }
   /**
    * End open tickets whose question the closes made moot: asked a person, every Thread done with has closed, no worker

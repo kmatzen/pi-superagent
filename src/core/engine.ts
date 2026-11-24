@@ -165,6 +165,8 @@ export class Engine {
    * @throws UserError when the ticket is unknown.
    */
   stopTicket(ticketId: string, reason?: string, kind?: TicketStopKind): Ticket { return this.repo.atomic(() => this.tickets.stop(ticketId, reason, kind)) }
+  /** A person stops the ticket waiting on one pull request it cannot close (`github:o/r#12`); the ticket ends when that closes all of them. @throws UserError when the ticket is unknown, ended, its own board thread, or not following an open thread there. */
+  abandonPull(ticketId: string, thread: string, reason: string): Ticket { return this.repo.atomic(() => this.tickets.abandonPull(ticketId, thread, reason)) }
   /**
    * A person retries a ticket whose worker reported failed or blocked (or whose input delivery failed): the stalled
    * Assignment ends and a new one starts under the same Mandate.
@@ -281,7 +283,7 @@ export type EngineForSources = Pick<Engine, 'receive' | 'bindThread' | 'threadCl
 /** What the main Session asks of the Engine. */
 export type EngineForMainSession = Pick<Engine, 'candidate' | 'candidateDelivered' | 'decide' | 'attach' | 'reply' | 'requestStatus' | 'note'>
 /** What people ask of the Engine, through the panel or the main Session. */
-export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
+export type EngineForPeople = Pick<Engine, 'stopTicket' | 'abandonPull' | 'retryTicket' | 'reevaluate' | 'unsubscribe' | 'dismiss'>
 /** What Settings tells the Engine. */
 export type EngineForSettings = Pick<Engine, 'policyChanged'>
 /** What the Executor tells the Engine, and what its workers ask of it. */
