@@ -15,7 +15,7 @@
 # meaning, so a scheduled check can act on it without reading prose.
 set -uo pipefail
 
-usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] [--allow-dirty] {init OWNER/REPO|start|stop|stop-ticket ID [REASON]|restart|status|remedy|backup}"; }
+usage() { echo "usage: superagent [--session NAME] [--state DIR] [--respect-stop] [--allow-dirty] {init OWNER/REPO|start|stop|stop-ticket ID [REASON]|abandon-pull ID THREAD [REASON]|restart|status|remedy|backup}"; }
 
 # Flags come first because every path below derives from the state directory: parsed after them, --state
 # moved the router's tab but left its stop marker, its place file and its settings in the default one.
@@ -36,6 +36,10 @@ while [ $# -gt 0 ]; do
       CMD=stop-ticket
       ST_ID="${2:-}"; shift 2
       ST_REASON="$*"; shift ;;
+    abandon-pull)
+      # THREAD is how a person names it on screen: `#14`, `owner/repo#14`, or the pull request's URL.
+      [ "$#" -ge 3 ] || { usage >&2; exit 2; }
+      CMD=abandon-pull; AB_ID="$2"; AB_THREAD="$3"; shift 3; AB_REASON="$*"; shift ;;
     intake)
       # Removed with the labels it wrote (operator, 2026-11-10: "These labels are obsolete"). Said out loud and
       # non-zero, so a stale habit cannot read as a request that went through.
@@ -680,6 +684,29 @@ stop_ticket() {
   case "$out" in *'"stopped"'*) return 0 ;; *) return 1 ;; esac
 }
 
+# Stop a ticket waiting on ONE pull request. The lever for the state no read of GitHub can report fixed: the pull
+# sits in a repository the fleet cannot write to -- an archived fork answers "read-only" to a close -- so it stays
+# open, the ticket ends never, its board issue stays open, and intake asks for the same work again (#928, 2026-11-24).
+abandon_pull() {
+  local id="${1:-}" thread="${2:-}"
+  [ -n "$id" ] && [ -n "$thread" ] || { echo "usage: superagent abandon-pull <ticket-id> <#N|owner/repo#N|pull-url> [reason]"; return 2; }
+  shift 2
+  local reason="$*"
+  [ -n "$reason" ] || reason="abandoned from the command line by $(id -un)"
+  local port token
+  port="$(cat "$STATE/panel.port" 2>/dev/null)"
+  token="$(cat "$STATE/panel-token" 2>/dev/null)"
+  if [ -z "$port" ] || [ -z "$token" ]; then
+    echo "abandon-pull: no panel to ask (run 'superagent start' with a panelPort, and the port lands in $STATE/panel.port)"; return 1
+  fi
+  local out
+  out="$(curl -sS -m 15 -X POST -H "x-superagent-request: 1" -H "x-superagent-token: $token" -H 'content-type: application/json' \
+    --data "$(python3 -c 'import json,sys; print(json.dumps({"thread": sys.argv[1], "reason": sys.argv[2]}))' "$thread" "$reason")" \
+    "http://127.0.0.1:$port/api/tickets/$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$id")/abandon" 2>&1)"
+  echo "$out"
+  case "$out" in *'"abandoned"'*) return 0 ;; *) return 1 ;; esac
+}
+
 # One sqlite-safe copy of the engine's memory per day, kept in the state directory's archive. A box that dies
 # with the disk takes the queue, the seen set and the outbox with it; a fresh clone of the repo rebuilds the code
 # in a minute, and this file is the only copy of what the fleet was doing.
@@ -709,6 +736,7 @@ case "${CMD:-status}" in
     start ;;
   stop) stop ;;
   stop-ticket) stop_ticket "$ST_ID" "$ST_REASON" ;;
+  abandon-pull) abandon_pull "$AB_ID" "$AB_THREAD" "$AB_REASON" ;;
   restart)
     if [ -n "${RESPECT_STOP:-}" ] && [ -f "$STOP_MARKER" ]; then echo "left stopped: manual stop marker present"; exit 0; fi
     restart_router ;;

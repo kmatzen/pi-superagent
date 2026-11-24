@@ -89,6 +89,8 @@ superagent status    # 0 healthy · 1 down · 2 up and not beating · 3 waiting 
 superagent remedy    # what the health job runs: 1 starts, 2 and 5 restart, 0 and 3 and 4 do nothing
 superagent restart   # stops the engine and PROVES it stopped before starting a new one; workers keep running
 superagent stop      # leaves a marker, so the health check will not restart it
+superagent stop-ticket ID REASON   # stop one ticket from the shell; the reason lands in its record
+superagent abandon-pull ID THREAD REASON   # stop waiting on one pull request: `#14`, `o/r#14`, or its URL
 superagent start     # clears the marker; refuses a checkout with uncommitted code (--allow-dirty overrides)
 superagent backup    # one sqlite-safe copy of tickets.db per day into <state>/archive, last 14 kept
 ```
@@ -292,7 +294,12 @@ by one for each request it dropped this way.
 
 **A ticket stays open after a ready report.** Look for `review of #N` on the panel. Merge or close
 that PR to finish the ticket. The router checks the watched repository on each poll and other
-repositories every two minutes.
+repositories every two minutes. When a pull request cannot be merged or closed — it sits in a
+repository your account cannot write to, an archived fork answers `read-only` to a close — the ticket
+would wait forever and the board issue would be asked again. Say the word and the wait ends:
+`superagent abandon-pull <ticket-id> <#N|owner/repo#14|url> [reason]`. It ends the ticket with the
+work that landed, closes the board issue, and touches nothing on GitHub. Measured 2026-11-24 on an
+ask whose fix merged upstream while its duplicate pull request sat uncloseable in an archived fork.
 
 **Status exits 2.** Read `~/.pi/superagent/health.json` to identify the failing component. For a
 GitHub source error, check `gh auth status`. The next successful poll clears the error.
@@ -377,7 +384,8 @@ on each poll and posts the launch failure once.
 
 ## The panel's write endpoints (2026-11-10)
 
-`POST /api/executor/pause` and `POST /api/tickets/<id>/stop` need the panel secret, because binding to
+`POST /api/executor/pause`, `POST /api/tickets/<id>/stop` and `POST /api/tickets/<id>/abandon` need the panel
+secret, because binding to
 `127.0.0.1` keeps out remote callers and keeps out nothing local. The router writes it to
 `panel-token` in the state directory (`0600`) at startup:
 

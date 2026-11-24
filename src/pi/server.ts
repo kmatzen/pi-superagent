@@ -5,7 +5,7 @@ import type { Engine, Ticket } from '../core/index.ts'
 import type { SqliteRepositories } from './store.ts'
 import type { SessionAssessor } from './assessor.ts'
 import type { RouterConfig } from './router.ts'
-import { threadUrl } from './pulls.ts'
+import { parsePull, parseThread, threadOfPull, threadUrl } from './pulls.ts'
 import { WON_SLOT_KEY } from './source-github.ts'
 
 export interface PanelSource {
@@ -268,6 +268,33 @@ export function createPanelServer(src: PanelSource): { server: Server; url(port:
         try {
           src.engine.stopTicket(id, reason)
           json(res, 200, { stopped: id, reason })
+        } catch (error) {
+          json(res, 409, { error: String(error instanceof Error ? error.message : error) })
+        }
+      })
+      return
+    }
+    // Stop a ticket waiting on one pull request, for the state no read of GitHub can ever report fixed: it sits in a repository this account cannot write to, so it stays open. `POST {"thread":"o/r#14","reason":"..."}`.
+    const abandoning = /^\/api\/tickets\/([^/]+)\/abandon$/.exec(url.pathname)
+    if (abandoning && req.method === 'POST') {
+      const id = decodeURIComponent(abandoning[1]!)
+      if (!src.repos.tickets.get(id)) return json(res, 404, { error: 'no such ticket' })
+      void readBody(req).then(raw => {
+        // Named the way a person names a pull request, because that is what they have on screen: `#14`, `o/r#14`, its URL.
+        let names = '', reason = 'abandoned by the operator'
+        try {
+          const body = JSON.parse(raw || '{}')
+          names = String(body.thread ?? body.pull ?? '').trim()
+          reason = String(body.reason || reason).slice(0, 400)
+        } catch { return json(res, 400, { error: 'body must be JSON, e.g. {"thread":"o/r#14","reason":"the fork is archived"}' }) }
+        const home = src.config.githubRepo ?? ''
+        const pull = parsePull(names) ?? parseThread(names, home)
+        if (!pull) return json(res, 400, { error: `thread must name a pull request: #14, o/r#14, or its URL (got "${names.slice(0, 80)}")` })
+        const thread = `github:${threadOfPull(pull, home).id}`
+        try {
+          const ticket = src.engine.abandonPull(id, thread, reason)
+          src.log('info', 'panel.pull_abandoned', { ticket: id, thread, reason })
+          json(res, 200, { abandoned: thread, reason, ended: ticket.ended ?? null })
         } catch (error) {
           json(res, 409, { error: String(error instanceof Error ? error.message : error) })
         }

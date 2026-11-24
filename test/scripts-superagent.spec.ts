@@ -667,6 +667,36 @@ echo '{"stopped":"TK-1"}'
     expect(refused.status).toBe(1)
   })
 
+  it('abandon-pull posts the thread and the reason, and answers on its exit code', () => {
+    // The shell lever for a pull request that can never close (an archived fork): the panel has the endpoint, the
+    // operator's shell had no way to ask it, so the ticket sat waiting on a read-only repository.
+    const bin = join(state, 'bin2'); mkdirSync(bin, { recursive: true })
+    const calls = join(state, 'abandon.calls')
+    writeFileSync(join(bin, 'curl'), `#!/bin/bash
+printf '%s\n' "$*" >> "$CURL_LOG"
+if [ -f "$(dirname "$0")/refuse" ]; then echo '{"error":"Ticket has ended"}'; exit 0; fi
+echo '{"abandoned":"github:o/r#14","reason":"the fork is archived"}'
+`)
+    chmodSync(join(bin, 'curl'), 0o755)
+    writeFileSync(join(state, 'panel.port'), String(PANEL_PORT))
+    writeFileSync(join(state, 'panel-token'), 'sekrit')
+    const env = { PATH: `${bin}:${process.env.PATH ?? ''}`, CURL_LOG: calls }
+    const run = (args: string[]) => spawnSync(SCRIPT, args, { encoding: 'utf8', env: { ...process.env, PI_SUPERAGENT_STATE: state, ...env } })
+    const ok = run(['abandon-pull', 'TK-1', 'o/r#14', 'the fork is archived'])
+    expect(ok.status, ok.stderr).toBe(0)
+    const logged = readFileSync(calls, 'utf8')
+    expect(logged).toContain('-X POST')
+    expect(logged).toContain('api/tickets/TK-1/abandon')
+    expect(logged).toContain('x-superagent-token: sekrit')
+    expect(logged).toContain('o/r#14')
+    expect(logged).toContain('the fork is archived')
+    // A panel that refused is a lever that did not move: the shell says so with its exit code, not with prose alone.
+    writeFileSync(join(bin, 'refuse'), '1')
+    expect(run(['abandon-pull', 'TK-1', 'o/r#14', 'again']).status).toBe(1)
+    rmSync(join(bin, 'refuse'))
+    expect(run(['abandon-pull', 'TK-1']).status, 'a thread is not optional').toBe(2)
+  })
+
   it('reads only PI_SUPERAGENT_* from config.env, and survives CRLF and stray spaces', () => {
     // config.env is a 0600 file the operator edits by hand: a foreign key must not reach the router's
     // environment, a file edited on Windows must not put \r in every value, and `KEY = value` must not

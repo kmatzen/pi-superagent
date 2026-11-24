@@ -323,9 +323,12 @@ export interface Ticket {
 /**
  * A Thread a ticket follows, by its key: `own` when the ticket opened it, such as its own pull request, and when and how it
  * closed. `followsDone` holds once no Thread of its own is open, or, when the ticket has no `own` Thread, once every followed
- * Thread closed; the ticket then ends unless its work has not finished (see `Tickets.unfinished`).
+ * Thread closed; the ticket then ends unless its work has not finished (see `Tickets.unfinished`). `abandoned` is a person's
+ * order to stop waiting on a pull request that stays open, in a repository the fleet cannot write to: it names no outcome.
  */
-export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
+export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' | 'abandoned'; reason?: string } }
+/** The close that ends a ticket, as `followsDone` answers it: `abandoned` is not in it, because a pull nobody closed decides nothing. */
+export type ClosedEnd = { at: string; outcome: 'merged' | 'closed'; reason?: string }
 export interface Execution { name: string; directory: string; assignment: string }
 
 /** Whether a ticket is open: it has not ended. */

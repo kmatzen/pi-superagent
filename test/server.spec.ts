@@ -193,6 +193,32 @@ describe('the panel and the API', () => {
     f.running.stop()
   })
 
+  it('the operator ends the wait on a pull request nobody can close, named any way they have it on screen', async () => {
+    // The fork's duplicate stays open forever: GitHub answers "read-only" to a close there, so no poll will ever free the ticket.
+    const f = await boot(true)
+    const [open] = (await f.api('/api/tickets', '1')).json() as unknown as Array<{ id: string }>
+    f.report()!.execute('r1', { state: 'ready', summary: 'opened both', pullRequests: ['https://github.com/o/r/pull/77', 'https://github.com/old/r/pull/14'] })
+    const abandon = (body: unknown, token = panelSecret(f.dir)) => fetch(`http://127.0.0.1:${f.port}/api/tickets/${open!.id}/abandon`, {
+      method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': token, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const byUrl = await abandon({ thread: 'https://github.com/old/r/pull/14', reason: 'the fork is archived, and #77 is the work' })
+    expect(byUrl.status, 'a full pull request URL is a name a person has on screen').toBe(200)
+    expect((await byUrl.json() as { abandoned?: string }).abandoned).toBe('github:old/r#14')
+    const t = (await f.api(`/api/ticket?id=${open!.id}`, '1')).json() as { follows: Array<{ thread: string; closed?: { outcome?: string; reason?: string } }>, ended?: { outcome?: string } }
+    expect(t.follows.find(x => x.thread === 'github:old/r#14')!.closed).toMatchObject({ outcome: 'abandoned', reason: 'the fork is archived, and #77 is the work' })
+    expect(t.ended, 'the ticket keeps waiting on the pull request that can still merge').toBeUndefined()
+    // A name that is no pull request is the caller's mistake, said with the shapes that work.
+    expect((await abandon({ thread: 'old/r/14' })).status).toBe(400)
+    expect((await abandon({ thread: '#77', reason: 'merged by hand and GitHub will not say so' })).status).toBe(200)
+    const ended = (await f.api(`/api/ticket?id=${open!.id}`, '1')).json() as { ended?: { outcome?: string; by?: string } }
+    expect(ended.ended).toMatchObject({ by: 'executor', outcome: 'closed' })
+    expect((await abandon({ thread: '#77' })).status, 'a second abandon moves nothing').toBe(409)
+    const missing = await fetch(`http://127.0.0.1:${f.port}/api/tickets/nope/abandon`, { method: 'POST', headers: { host: `127.0.0.1:${f.port}`, 'x-superagent-request': '1', 'x-superagent-token': panelSecret(f.dir) } })
+    expect(missing.status).toBe(404)
+    f.running.stop()
+  })
+
   it('refuses a caller that did not say what it is, and any non-local host', async () => {
     const f = await boot(false)
     const anon = await api403(f)
