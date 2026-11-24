@@ -69,6 +69,11 @@ export const standingAskEntitled = (
   return !liveWorkers.some(w => ticket.id !== undefined && w.ticketId === ticket.id)
 }
 
+/**
+ * Launches one issue gets from the standing queue per day when the operator sets nothing; the setting is
+ * `PI_SUPERAGENT_REGRANT_CAP`. Measured 2026-11-23: eight threads stuck at 2 of 2 with `starved=8
+ * oldestStarvedH=65.6`, and no knob — the lane was widened by editing this file, and the next install lost it.
+ */
 export const REGRANT_CAP = 2
 
 /** A labelled ask is an explicit operator request, so 6 a day (3x) where the queue gets 2: measured 2026-11-19, those 2 left 43 starved tickets and zero launches, and one launch per poll bounds the loop. */
@@ -85,11 +90,14 @@ export const regrantable = (
 ): boolean => open ? standingAskEntitled(open, liveWorkers) : !everTicketed() && !judging()
 export const REGRANT_KEY = 'router:regrant'
 export interface RegrantCounters { day: string, perIssue: Record<string, number> }
+/** Grants this issue already spent today. Counters from another day read as zero, which is what the day rollover means. */
+export const regrantUsed = (counters: RegrantCounters | undefined, key: string, day: string): number =>
+  counters?.day === day ? counters.perIssue[key] ?? 0 : 0
 export const regrantPlan = (counters: RegrantCounters | undefined, key: string, day: string,
                             cap = REGRANT_CAP): RegrantCounters | undefined => {
-  const today = counters?.day === day ? counters : { day, perIssue: {} }
-  const used = today.perIssue[key] ?? 0
-  return used >= cap ? undefined : { day, perIssue: { ...today.perIssue, [key]: used + 1 } }
+  const used = regrantUsed(counters, key, day)
+  return used >= cap ? undefined
+    : { day, perIssue: { ...(counters?.day === day ? counters.perIssue : {}), [key]: used + 1 } }
 }
 
 
@@ -203,6 +211,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     sdkPath: cfg.sdkPath ?? 'package-name', githubRepo: cfg.githubRepo ?? '',
     githubAs: cfg.githubTokenFile ? 'token file' : 'gh login',
     maxWorkers: cfg.maxConcurrent ?? 4, tickMs: cfg.tickMs ?? 30_000,
+    regrantCap: cfg.regrantCap ?? REGRANT_CAP, priorityRegrantCap: cfg.priorityRegrantCap ?? PRIORITY_REGRANT_CAP,
   })
   const issueOf = (m: OutboundMessage): string | undefined =>
     m.channel.source === 'github' ? (m.channel.address as { issue?: string } | undefined)?.issue : undefined
@@ -283,8 +292,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
           const judging = (): boolean => { const thread = repos.threads.get(`github:${key}`); return !!thread?.evaluating || !!thread?.pending.length }
           if (!regrantable(ask, () => repos.tickets.list().some(onThread), executor.workers(), judging)) return false
           const day = (deps.now ? deps.now() : new Date().toISOString()).slice(0, 10)
-          const next = regrantPlan(repos.kv.get<RegrantCounters>(REGRANT_KEY), key, day, priority ? PRIORITY_REGRANT_CAP : REGRANT_CAP)
-          if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day }); return false }
+          const cap = priority ? cfg.priorityRegrantCap ?? PRIORITY_REGRANT_CAP : cfg.regrantCap ?? REGRANT_CAP
+          const counters = repos.kv.get<RegrantCounters>(REGRANT_KEY)
+          const next = regrantPlan(counters, key, day, cap)
+          // A capped line with no counter read exactly like a healthy lane: eight threads were each at 2 of 2.
+          if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day, used: regrantUsed(counters, key, day), cap }); return false }
           repos.kv.set(REGRANT_KEY, next)
           const wonSlot = wonSlotReason(priority, (ask?.undelivered.length ?? 0) > 0)
           repos.kv.set(WON_SLOT_KEY, { ...(repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {}), [key]: wonSlot })
@@ -2086,6 +2098,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const workerQuietMinutes = positiveNumber('PI_SUPERAGENT_WORKER_QUIET_MINUTES', env.PI_SUPERAGENT_WORKER_QUIET_MINUTES)
   const deadlineHours = positiveNumber('PI_SUPERAGENT_WORKER_DEADLINE_HOURS', env.PI_SUPERAGENT_WORKER_DEADLINE_HOURS)
   const reportCap = positiveNumber('PI_SUPERAGENT_REPORT_CAP', env.PI_SUPERAGENT_REPORT_CAP)
+  const regrantCap = positiveNumber('PI_SUPERAGENT_REGRANT_CAP', env.PI_SUPERAGENT_REGRANT_CAP)
+  const priorityRegrantCap = positiveNumber('PI_SUPERAGENT_PRIORITY_REGRANT_CAP', env.PI_SUPERAGENT_PRIORITY_REGRANT_CAP)
   const workerMemoryGb = positiveNumber('PI_SUPERAGENT_WORKER_MEMORY_GB', env.PI_SUPERAGENT_WORKER_MEMORY_GB)
   const workerCpus = positiveNumber('PI_SUPERAGENT_WORKER_CPUS', env.PI_SUPERAGENT_WORKER_CPUS)
   const workerTasks = positiveNumber('PI_SUPERAGENT_WORKER_TASKS', env.PI_SUPERAGENT_WORKER_TASKS)
@@ -2110,6 +2124,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(workerQuietMinutes === undefined ? {} : { workerQuietMinutes }),
     ...(deadlineHours === undefined ? {} : { workerDeadlineHours: deadlineHours }),
     ...(reportCap === undefined ? {} : { reportCap: Math.floor(reportCap) }),
+    ...(regrantCap === undefined ? {} : { regrantCap: Math.floor(regrantCap) }),
+    ...(priorityRegrantCap === undefined ? {} : { priorityRegrantCap: Math.floor(priorityRegrantCap) }),
     workerLimits: {
       ...(env.PI_SUPERAGENT_WORKER_LIMITS === 'off' ? { off: true } : {}),
       ...(workerMemoryGb === undefined ? {} : { memoryGb: workerMemoryGb }),

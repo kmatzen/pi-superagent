@@ -93,6 +93,11 @@ export interface RouterConfig {
    * itself. Default 3. `PI_SUPERAGENT_REPORT_CAP`.
    */
   reportCap?: number
+  /** Launches one issue gets from the standing queue per day. `PI_SUPERAGENT_REGRANT_CAP`, default 2: the cap
+   *  stops churn on one issue, it is not the fleet's throughput limit, so a starved lane raises it here. */
+  regrantCap?: number
+  /** The same for a priority (labelled) ask. `PI_SUPERAGENT_PRIORITY_REGRANT_CAP`, unset uses 6. */
+  priorityRegrantCap?: number
 }
 
 export interface SdkSurface {

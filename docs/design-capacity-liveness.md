@@ -5,7 +5,9 @@
 > whoever opened it (the separate ask system, and the title verbs that kept its issues out, went on 2026-11-11). What keeps a
 > finished issue from churning is not a label: it is `standingAskEntitled` (an ended assignment whose worker
 > released, no live worker, no report awaiting a human, no delivered pull request still open) and `REGRANT_CAP`
-> of two launches per issue per day. Lines below keep their original wording where they record a measurement.
+> of two launches per issue per day — a setting since 2026-11-23 (`PI_SUPERAGENT_REGRANT_CAP`), because two was
+> the lane's width: eight threads sat at 2 of 2 each while the oldest starved ask waited 65.6 h, with the
+> worker cap unmet. Lines below keep their original wording where they record a measurement.
 >
 > **Amendment, 2026-11-12: orphans come back by themselves.** Four tickets lost their workers to router restarts
 > while each had a draft pull request open, and the rule above then read "no open pull request" for every report,
