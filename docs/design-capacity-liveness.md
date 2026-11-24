@@ -227,6 +227,12 @@ report; the second consecutive silence files the failure, which is the case a hu
   (a refused report is no report, so the first silence nudges), the busy-events test (a `selfNudge` event
   joins the log), the reported-then-silent test (the next silent run is nudged), and the two inbox-listing
   tests (the nudge file is not a router input, so filter it out).
+- **A freed session is not a silent worker (2026-11-24, agent-inbox#886).** A hand-over report
+  (`ready`/`blocked`/`waiting`) frees the session, and the worker's own background task — a `tail -F` of a
+  build log, a `pluto-run` finishing — keeps waking it. Measured 2026-11-14 to 21 over 1830 workers: 366
+  nudges from 305 of them, all 46 repeats after a hand-over, and 12 `SILENT_FINISH` reports filed over real
+  ones. A silent settle after a hand-over now logs `silentAfterHandover` and nudges nothing; a live worker
+  gets `MAX_SELF_NUDGES` (2) nudges, then `selfNudgeExhausted` with the count, then the failure once.
 
 ### 2. A worker that ends its turn re-earns the launch, with a cap
 
