@@ -72,6 +72,7 @@ function memoryHerdr() {
     agentGet: async name => agents.get(name),
     tabList: async () => [],
     agentSendKeys: async () => {},
+    agentPrompt: async () => {},
     paneRead: async () => '',
   }
   return { herdr, calls, agents, envs }
@@ -1335,7 +1336,7 @@ describe('a pull request per ticket', () => {
     expect(callsOf(f, '494').filter(c => c === 'close:494'), 'closed again').toHaveLength(2)
   })
 
-  it('a build the router reads as running is what the receipt names, from the read alone (agent-inbox#667)', async () => {
+  it('a build the router reads as running is what the receipt names, from the read alone (inbox#667)', async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
     await working(f, '497')
@@ -1353,7 +1354,7 @@ describe('a pull request per ticket', () => {
     expect(last, 'the read of a running build, not a hand-written state, drives the wording').toMatch(/Next check: a fresh worker the moment its pull-request checks finish/)
   })
 
-  it('a waiting ticket whose pull request is still building is told the checks, not the clock, wake it (agent-inbox#667)', async () => {
+  it('a waiting ticket whose pull request is still building is told the checks, not the clock, wake it (inbox#667)', async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
     await working(f, '496')
@@ -1516,6 +1517,27 @@ describe('a pull request per ticket', () => {
     expect(h.workers, 'a second loss gets a second worker').toHaveLength(1)
   })
 
+  it('a thread that has spent its grants is refused once a day, not once a poll', async () => {
+    // Measured 2026-11-24: six ticketless threads that re-read their own issue body on every poll each logged a
+    // refusal, 480 lines an hour together, and the operator read the log as the queue churning on a small batch.
+    const f = fixture(true)
+    f.addComment('499', 'kmatzen', 'reconcile fails on the laptop box, proof attached')
+    f.feed.issues.find(i => i.issue === 499)!.author = 'kmatzen'
+    await f.running.tick()
+    await settle()
+    f.decide('ignore')
+    // Polls with nothing new on the issue, each grant judged as it arrives: this is what the live threads did,
+    // a body re-read on every poll, the judge sending it away, and the queue asking for a launch again.
+    let judged = 1
+    for (const _ of Array(14)) {
+      await f.running.tick()
+      await settle()
+      if (f.judge.prompts.length > judged) { f.decide('ignore'); judged = f.judge.prompts.length }
+    }
+    const lines = readFileSync(join(f.dir, 'engine.log'), 'utf8').match(/regrant\.capped thread=#499/g) ?? []
+    expect(lines, 'the refusal is said once, then the log stays quiet').toHaveLength(1)
+  })
+
   it('several pull requests get one status comment in the worker\'s merge order, edited in place as they land', async () => {
     // Operator, 2026-11-12: a multi-repository change was a plan pieced together from report comments whose lists drifted.
     const pulls = pullsFake()
@@ -1559,6 +1581,69 @@ describe('a pull request per ticket', () => {
     const g = fixture(true, undefined, f.dir, undefined, { pullApi: pulls.api, issues: f.feed.issues })
     for (let pass = 0; pass < 3; pass++) { await g.running.tick(); await settle() }
     expect(g.trackers, 'the same text as before the restart, so no edit').toEqual([])
+  })
+
+  it('a conversation in another repository ends its ticket when the pull request closes, question quoted', async () => {
+    // inbox#936, measured 2026-11-23: 14 of 61 open tickets lived on pull-request threads in other
+    // repositories, 13 of those threads closed, and 5 kept asking a person about a thread nobody could reopen.
+    let now = Date.now()
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api, clock: () => now })
+    pulls.open('x/y', 12)
+    f.running.engine.receive({ id: 'github:x/y#12:c1', source: 'github', threads: [{ source: 'github', id: 'x/y#12' }],
+      actor: { source: 'github', id: 'octocat' }, human: true, at: new Date(now).toISOString(), text: 'rename it back',
+      channel: { source: 'github', thread: 'x/y#12', address: { repo: 'x/y', issue: '12' } },
+      meta: { via: 'comment', author: 'octocat', association: 'OWNER' } } as never)
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers, 'the foreign comment opened a ticket and a worker').toHaveLength(1)
+    const repos = new SqliteRepositories(`${f.dir}/tickets.db`)
+    const foreign = () => repos.tickets.list().find(t => t.channels[0]?.thread === 'x/y#12')!
+    expect(foreign().follows, 'the ticket follows the pull request its conversation is on').toMatchObject([{ thread: 'github:x/y#12', own: true }])
+    f.workers[0]!.report!({ state: 'blocked', summary: 'the rename touches the public api', question: 'Rename it back, yes or no?' })
+    await f.running.tick()
+    expect(f.receipts('12'), 'the ask reached the thread it belongs to').toContain('**Question:** Rename it back, yes or no?')
+    pulls.end('x/y', 12, false)
+    now += 121_000   // a thread outside the watched repository is read on its own cadence, one look per 120 s
+    await f.running.tick()
+    expect(foreign().ended, 'the close ends the ticket').toMatchObject({ by: 'executor', outcome: 'closed' })
+    const ended = f.receipts('12')
+    expect(ended).toContain('https://github.com/x/y/pull/12 closed without merging, so this ticket ends')
+    expect(ended, 'the question the close made moot stays on the thread').toContain('**The question that was open when it ended:** Rename it back, yes or no?')
+    expect(f.calls, 'the watched repository has an issue 12 of its own, and this closes nothing of it').not.toContain('close:12')
+  })
+
+  it('an ask its merged pull requests made moot ends on the next pass, question quoted', async () => {
+    // Measured 2026-11-24 on the live board: inbox#855 asked "keep this watch running?" over four pull
+    // requests that had all merged. Each close was recorded while its worker was busy, and a blocked report
+    // never re-checks one, so the ask outlived the work and the ticket never ended.
+    const pulls = pullsFake()
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
+    pulls.open('x/y', 9)
+    f.addComment('484', 'octocat', 'run the dashboard check only on dashboard pages')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    f.workers[0]!.report!({ state: 'blocked', summary: 'the dashboard check now runs only on dashboard pages',
+      question: 'Keep the watch running for the next twelve pull requests?', pullRequests: ['https://github.com/x/y/pull/9'] })
+    await f.running.tick()
+    expect(f.receipts('484')).toContain('**Question:** Keep the watch running')
+    // The merge is written down while the ticket's ask stands, which is the state the live board sat in.
+    const store = new SqliteRepositories(`${f.dir}/tickets.db`)
+    const ticket = store.tickets.list().find(t => t.channels[0]?.thread === '#484')!
+    ticket.follows = (ticket.follows ?? []).map(f => ({ ...f, closed: { at: new Date().toISOString(), outcome: 'merged' as const } }))
+    store.tickets.save(ticket)
+    store.close()
+    await f.running.tick()
+    const open = JSON.parse(invoke(f, 'tickets_open', {}).content[0]!.text)
+    expect(open.find((t: { thread: string }) => t.thread === '#484'), 'the moot ask ends the ticket').toBeFalsy()
+    const ended = f.receipts('484')
+    expect(ended).toContain('#484 merged: https://github.com/x/y/pull/9. This ticket is done.')
+    expect(ended, 'the question the merge made moot stays on the thread').toContain('**The question that was open when it ended:** Keep the watch running')
   })
 
   it('a merge that leaves another pull request open wakes the worker for the follow-on change', async () => {
@@ -2226,10 +2311,10 @@ describe('the sweep of settled checkouts', () => {
     const dir = mkdtempSync(join(tmpdir(), 'sa-tmp-'))
     try {
       mkdirSync(join(dir, 'scene3d-old')); writeFileSync(join(dir, 'scene3d-old', 'f'), 'x')
-      writeFileSync(join(dir, 'parfait-refresh.tar.gz'), 'x')
+      writeFileSync(join(dir, 'gadget-refresh.tar.gz'), 'x')
       aged(join(dir, 'scene3d-old'), 1)
       expect(await sweepTmp(dir)).toEqual({ removed: 1, kept: 1 })
-      expect(readdirSync(dir)).toEqual(['parfait-refresh.tar.gz'])
+      expect(readdirSync(dir)).toEqual(['gadget-refresh.tar.gz'])
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
@@ -2292,13 +2377,13 @@ describe('the sweep of settled checkouts', () => {
         if (pushed) git(dir, 'push', '-q', 'origin', 'HEAD')
         return dir
       }
-      named('aaaa0000bbbb', 'caramel', false)
+      named('aaaa0000bbbb', 'widget', false)
       aged(join(root, 'aaaa0000bbbb'), 9)
       expect(await sweepWorktrees(root, new Set(), 0)).toMatchObject({ removed: 0, bare: 0, keptWork: 1, keptWorkIds: ['aaaa0000bbbb'] })
-      expect(existsSync(join(root, 'aaaa0000bbbb', 'caramel', 'f')), 'the only copy of the work').toBe(true)
+      expect(existsSync(join(root, 'aaaa0000bbbb', 'widget', 'f')), 'the only copy of the work').toBe(true)
 
       named('cccc1111dddd', 'conveyor', true)
-      const venvOwner = join(root, 'aaaa0000bbbb', 'caramel')
+      const venvOwner = join(root, 'aaaa0000bbbb', 'widget')
       writeFileSync(join(venvOwner, '.gitignore'), '.venv/\n')
       git(venvOwner, 'add', '.gitignore'); git(venvOwner, 'commit', '-q', '-m', 'ignore')
       mkdirSync(join(venvOwner, '.venv')); writeFileSync(join(venvOwner, '.venv', 'torch.so'), 'x')
@@ -2332,7 +2417,7 @@ describe('the sweep of settled checkouts', () => {
   }, 30_000)
 
   it('a parked worker loses its venv only when it is not working and nothing it started runs there', async () => {
-    // 2026-11-18: one parked caramel venv was 12.4 GB, and the box sat at 12 GB free under 10 GB write bursts.
+    // 2026-11-18: one parked widget venv was 12.4 GB, and the box sat at 12 GB free under 10 GB write bursts.
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-parked-'))
     try {
       for (const id of ['p1parked0000', 'p2working000', 'p3inuse00000']) {
@@ -2368,7 +2453,7 @@ describe('the sweep of settled checkouts', () => {
       fake('23', '20', 'node', '/w/bbbb', 'node doorman-mcp.mjs')
       fake('30', '1', 'pi', '/w/aaaa', 'pi')
       fake('31', '30', 'bash', '/w/aaaa', 'bash -c pytest')
-      fake('32', '31', 'python', '/w/aaaa/caramel', 'python -m pytest')
+      fake('32', '31', 'python', '/w/aaaa/widget', 'python -m pytest')
       fake('40', '1', 'python', '/home', '/w/dddd/repo/.venv/bin/python train.py')
       expect([...ticketsInUse('/w', proc)].sort()).toEqual(['aaaa', 'dddd'])
     } finally { rmSync(proc, { recursive: true, force: true }) }
@@ -2380,7 +2465,7 @@ describe('the sweep of settled checkouts', () => {
     try {
       for (const id of ['g1pushed0000', 'g2local00000']) {
         const dir = seedNested(root, id, false)
-        git(dir, 'remote', 'set-url', 'origin', 'https://x-access-token:secret@github.com/kmatzen/parfait.git')
+        git(dir, 'remote', 'set-url', 'origin', 'https://x-access-token:secret@github.com/kmatzen/gadget.git')
         git(dir, 'checkout', '-q', '-b', 'fix/green-gate')
         writeFileSync(join(dir, 'g'), id); git(dir, 'add', 'g'); git(dir, 'commit', '-q', '-m', id)
         aged(join(root, id), 9)
@@ -2395,7 +2480,7 @@ describe('the sweep of settled checkouts', () => {
         }),
       })
       expect(swept).toMatchObject({ removed: 1, keptWork: 1, keptWorkIds: ['g2local00000'] })
-      expect(asked[0], 'the repository and branch, never the credential in the URL').toMatch(/^repos\/kmatzen\/parfait\/compare\/[0-9a-f]{40}\.\.\.fix%2Fgreen-gate$/)
+      expect(asked[0], 'the repository and branch, never the credential in the URL').toMatch(/^repos\/kmatzen\/gadget\/compare\/[0-9a-f]{40}\.\.\.fix%2Fgreen-gate$/)
       expect(existsSync(join(root, 'g2local00000', 'repo', 'f')), 'GitHub never saw it: the only copy').toBe(true)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
@@ -2574,7 +2659,7 @@ describe('the tick keeps its cadence', () => {
   }, 30_000)
 
   it('the label that won the slot says so, and the lane passes the queue that is already waiting', async () => {
-    // agent-inbox#660: the launch lane is the operator's lever, so it has to be visible in the log and beat
+    // inbox#660: the launch lane is the operator's lever, so it has to be visible in the log and beat
     // the ask that queued first. Measured on the box 2026-11-20 09:53: six labelled threads sat behind 27
     // queued launches with all six slots busy, and every free slot went to the oldest by arrival order.
     const feed: { issues: IssueState[]; comments: IssueComment[] } = { issues: [], comments: [] }

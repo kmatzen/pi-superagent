@@ -23,6 +23,7 @@ export interface Herdr {
   agentStart(o: { name: string; kind: string; pane: string; timeoutMs: number; args: string[] }): Promise<AgentInfo>
   agentGet(name: string): Promise<AgentInfo | undefined>
   agentSendKeys(name: string, keys: string[]): Promise<void>
+  agentPrompt(name: string, text: string): Promise<void>
   /** The tab's last lines of terminal text: what a pi that died at startup printed before its shell came back. */
   paneRead(paneId: string, lines: number): Promise<string>
 }
@@ -99,6 +100,7 @@ export function herdrCli(bin = 'herdr', timeoutMs = 60_000): Herdr {
       }
     },
     async agentSendKeys(name, keys) { await call(['agent', 'send-keys', name, ...keys]) },
+    async agentPrompt(name, text) { await call(['agent', 'prompt', name, text]) },
     async paneRead(paneId, lines) {
       const { code, out } = await run(['pane', 'read', paneId, '--lines', String(lines)])
       return code === 0 ? out : ''

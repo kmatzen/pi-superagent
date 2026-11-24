@@ -81,7 +81,7 @@ the first one ends a wait.
 **Park a thread the account cannot read, durably.** Unreadable was said once per thread, and a thread
 that stays unreadable was read again, and complained about again, at every router start: measured
 2026-11-19 → 11-21, 92 `pull.read_failed` lines in 24 h out of 7 follows in four repositories the bot
-cannot see — `kmatzen/pi-superagent`, `matzen_adobe/fleet-board`, `matzen_adobe/caramel`,
+cannot see — `kmatzen/pi-superagent`, `kmatzen/task-board`, `kmatzen/widget`,
 `a-learning-space/superagent` — which is 7 threads × 25 starts, because the failure streak and its
 30-minute backoff lived in memory and every start reset both to zero. GitHub's 404 for a repository
 the token cannot see is a fact about the repository, so the streak is a fact that must outlive the
@@ -194,6 +194,24 @@ observe the closure even if it cannot distinguish deletion, manual closure and c
 It stops the ticket and queues a notice. For a ticket awaiting its own PR, the PR’s merge or close
 determines the outcome. Reopening an issue lets its author ask again.
 
+**A conversation in another repository is a pull request, and its close ends the ticket too.** The
+source polls the watched repository only, so a ticket opened by a comment on `owner/repo#7` elsewhere
+never saw that thread close: measured 2026-11-23, fourteen open tickets sat on threads closed days
+earlier, five of them still asking a person for a decision nobody could make on a closed thread
+(inbox#936). The router binds such a thread to its ticket, so the two-minute pull read ends it
+as merged or closed the way the ticket's own PRs do. GitHub is asked first, because `#7` names an
+issue as easily as a pull request, and a ticket bound to an issue would end on the merge of the pull
+request sharing its number. A question the worker asked and nobody answered rides along in the
+closing note, because the ticket's end clears it.
+
+**A question the closes made moot ends the ticket on a later pass.** A close recorded while the ticket's
+work was busy ends nothing at that moment, and a blocked report never re-reads a close it already has,
+so an ask can outlive the work it asked about: measured 2026-11-24, inbox#855 asked "keep this
+watch running?" over four pull requests that had all merged. A pass ends such a ticket when every
+thread it is done with has closed and no worker runs, with the closes' own outcome, and the closing
+note quotes the question the end makes moot (see `Tickets.closeAnsweredAsks`). A worker on the ticket
+decides it, so the pass leaves it alone.
+
 **Every end closes the issue, and a promised check survives a merge.** A ticket resumed on a reopened
 issue can end again, and each end posts its own note and closes the issue again; both were once per
 ticket, so on 2026-11-13 #387's second end left it open in silence. A merge that ends a ticket whose
@@ -272,8 +290,8 @@ pause lifts on the first tick above half the floor (`disk.launches_paused` / `di
 also tells workers what never belongs on the box: model weights, datasets, checkpoints, and output left in /tmp.
 
 **A checkout is wherever git says it is (2026-11-18).** The sweeps looked for a checkout at the ticket directory or at
-`repo/` inside it; most tickets on the box clone into a directory named for the repository (`caramel/`,
-`repos/caramel/`, `worktrees/caramel/<branch>/`). The pressure pass therefore skipped them, and the settled pass, since
+`repo/` inside it; most tickets on the box clone into a directory named for the repository (`widget/`,
+`repos/widget/`, `worktrees/widget/<branch>/`). The pressure pass therefore skipped them, and the settled pass, since
 0.2.0, counted them as bare workspaces and deleted them without asking git about unpushed work. Every pass now finds
 each checkout three levels down (real directories only, never through a symlink) and keeps the whole workspace when
 any one of them holds work, including a worktree whose other half lives in another workspace, since deleting either
@@ -295,7 +313,7 @@ workspace borrows objects from (`lent` in the sweep's log line), comparing real 
 
 **Still short of the floor, a parked worker's venv goes (2026-11-18).** After every idle workspace was swept the box
 held 12 GB free against 10 GB write bursts, and parked workers' environments held 14.9 GB of unique blocks, 12.4 GB
-in one caramel venv. Under the floor the pass now also drops the `.venv` of a ticket whose worker is live but not
+in one widget venv. Under the floor the pass now also drops the `.venv` of a ticket whose worker is live but not
 working (busy in the executor, or `working` in herdr, protects it, between tool calls included) and in which no
 process runs: `ticketsInUse` reads each process's cwd and command line from /proc, ignoring the waiting agent, its
 shells and its own MCP servers (non-shell children of pi). The agent keeps its code, notes and inbox; `uv run` rebuilds the environment on its next command.

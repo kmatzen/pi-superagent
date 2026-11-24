@@ -24,6 +24,10 @@ export interface PanelSource {
   setPaused(v: boolean): void
   /** Required on every POST: a localhost bind stops remote callers, not local ones. */
   token?(): string
+  /** A worker's terminal. Absent when workers do not run in herdr tabs. */
+  workerPane?(ticketId: string, lines: number): Promise<{ tab: string; agent: string; text: string }>
+  workerPrompt?(ticketId: string, text: string): Promise<void>
+  workerKeys?(ticketId: string, keys: string[]): Promise<void>
   now(): string
 }
 
@@ -64,8 +68,22 @@ export function readModel(src: PanelSource) {
     paused: src.isPaused(),
     health: src.health(),
     load: src.load(),
-    needsPerson: open.filter(t => t.attention).map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', question: (t.attention as { question?: string }).question ?? '', at: t.assignments.at(-1)?.report?.at ?? '', url: issueUrl(t, src.config.githubRepo) })),
-    open: open.map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', state: t.assignments.at(-1)?.state ?? 'queued', wonSlot: (src.repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {})[t.channels[0]?.thread ?? ''] ?? '', waitsFor: waitingOn(t),
+    needsPerson: open.filter(t => t.attention).map(t => {
+      const r = t.assignments.at(-1)?.report
+      const summary = String(r?.summary ?? '')
+      return {
+        id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '',
+        question: (t.attention as { question?: string }).question ?? '',
+        summary,
+        // The router nudges when a worker goes silent; that is the router speaking, not the worker asking.
+        nudged: /^the worker (sent no event|has run)/.test(summary),
+        screen: `/worker?ticket=${encodeURIComponent(t.id)}`,
+        at: r?.at ?? '', url: issueUrl(t, src.config.githubRepo),
+      }
+    }),
+    open: open.map(t => ({ id: t.id, title: t.title, thread: t.channels[0]?.thread ?? '', state: t.assignments.at(-1)?.state ?? 'queued',
+      wonSlot: (src.repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {})[t.channels[0]?.thread ?? ''] ?? '', waitsFor: waitingOn(t),
+      screen: `/worker?ticket=${encodeURIComponent(t.id)}`,
       issue: t.channels[0]?.source === 'github' ? t.channels[0].thread : '', url: issueUrl(t, src.config.githubRepo),
       worker: (() => { const w = src.workers().find(w => w.ticketId === t.id); return w ? `${w.busy === false ? 'parked · ' : ''}watch ${w.watch || w.workspace} · ${w.events} events · quiet ${w.quietSeconds}s` : '' })() })),
     workers: src.workers(),
@@ -96,17 +114,19 @@ table{border-collapse:collapse;width:100%}td,th{padding:.3rem .5rem;border-botto
 .count{color:#666}.ask{background:#fff8dc;padding:.5rem;border-left:3px solid #c90}
 .muted{color:#666}code{background:#eee;padding:0 .2rem}
 </style>
-<nav><a href="#overview">Overview</a><a href="#source">Source</a><a href="#trigger">Trigger</a><a href="#eval">Eval</a><a href="#execution">Execution</a><a href="#settings">Settings</a></nav>
+<nav><a href="#overview">Overview</a><a href="#source">Source</a><a href="#trigger">Trigger</a><a href="#eval">Eval</a><a href="#workers">Workers</a><a href="#execution">Execution</a><a href="#settings">Settings</a></nav>
 <h1>${esc(title)}</h1>${body}`
 
 export function renderPanel(m: Model): string {
   const quiet = (n: number, label: string): string => n === 0 ? '' : `<li>${n} ${esc(label)}</li>`
-  const asks = m.needsPerson.map(a => `<div class="ask">${a.url ? `<a href="${esc(a.url)}">${esc(a.thread)}</a>` : `<a href="/ticket?id=${encodeURIComponent(a.id)}">${esc(a.thread || a.id)}</a>`} — ${esc(a.question || 'needs a person')}<div class="muted">${esc(a.title)}</div></div>`).join('')
+  const asks = m.needsPerson.map(a => `<div class="ask">${a.url ? `<a href="${esc(a.url)}">${esc(a.thread)}</a>` : `<a href="/ticket?id=${encodeURIComponent(a.id)}">${esc(a.thread || a.id)}</a>`} — ${a.nudged ? `<strong>quiet, no question from the worker</strong>: ${esc(a.summary)}` : esc(a.question || a.summary || 'needs a person')}<div class="muted">${esc(a.title)} · <a href="${esc(a.screen)}">screen</a> · <button class="stop" data-ticket="${esc(a.id)}">stop</button></div></div>`).join('')
     || '<p class="muted">Nothing needs you.</p>'
   const rows = (rows: Record<string, unknown>[], cols: string[]): string => {
     if (rows.length === 0) return '<p class="muted">none</p>'
     const cell = (r: Record<string, unknown>, c: string): string =>
-      r.url ? `<a href="${esc(r.url)}">${esc(r[c])}</a>` : esc(r[c])
+      c === 'screen' && r[c] ? `<a href="${esc(r[c])}">screen</a>`
+        : c === 'stop' && r.id ? `<button class="stop" data-ticket="${esc(r.id)}">stop</button>`
+          : r.url ? `<a href="${esc(r.url)}">${esc(r[c])}</a>` : esc(r[c])
     return `<table><tr>${cols.map(c => `<th>${esc(c)}</th>`).join('')}</tr>${rows.map(r => `<tr>${cols.map(c => `<td>${cell(r, c)}</td>`).join('')}</tr>`).join('')}</table>`
   }
   return page('superagent', `
@@ -118,16 +138,79 @@ export function renderPanel(m: Model): string {
 <section id="trigger"><h2>Trigger</h2>${rows(m.evaluating, ['key', 'evalId', 'since'])}
 <p class="count">Waiting on a judgement: ${m.waitingAssessment.length}</p></section>
 <section id="eval"><h2>Eval <span class="count">(${m.counts.decisions24h} in 24 h)</span></h2>${rows(m.recentDecisions, ['at', 'kind', 'reason', 'rules', 'ticket'])}</section>
+<section id="workers"><h2>Workers <span class="count">(${m.workers.length} with a tab: ${m.load.running} on a run, ${m.load.parked} parked)</span></h2>
+${rows(m.workers.map(w => ({ thread: w.ticketId.slice(0, 8), title: w.workspace.split('/').pop() ?? w.workspace, state: w.busy === false ? 'parked' : 'running', screen: `/worker?ticket=${encodeURIComponent(w.ticketId)}`, detail: `${w.watch || w.workspace} · ${w.events} events · quiet ${w.quietSeconds}s` })), ['thread', 'title', 'state', 'detail', 'screen'])}</section>
 <section id="execution"><h2>Execution <span class="count">(${m.open.length} open, ${m.load.running}/${m.load.maxWorkers} working, ${m.load.parked} parked, ${m.load.queued} queued)</span></h2>
-${rows(m.open, ['thread', 'title', 'state', 'wonSlot', 'waitsFor', 'worker'])}
+${rows(m.open, ['thread', 'title', 'state', 'wonSlot', 'waitsFor', 'worker', 'screen', 'stop'])}
 <h2>Ended</h2>${rows(m.ended, ['id', 'title', 'outcome', 'at'])}</section>
 <section id="settings"><h2>Settings</h2><p class="count">policy ${esc(m.policy.version)} · paused=${m.paused} · state ${esc(process.env.PI_SUPERAGENT_STATE ?? '')}</p>
-<p class="muted">Settings live in config.env in the state directory; restart to apply them. POST /api/executor/pause pauses processing.</p></section>`)
+<p class="muted">Settings live in config.env in the state directory; restart to apply them. POST /api/executor/pause pauses processing.</p></section>
+<script>
+document.addEventListener('click', async function (e) {
+  var b = e.target.closest && e.target.closest('button.stop'); if (!b) return
+  if (!window.confirm('Stop this ticket? Its worker is released and the ticket ends.')) return
+  var r = await fetch('/api/tickets/' + encodeURIComponent(b.dataset.ticket) + '/stop', {
+    method: 'POST', credentials: 'include',
+    headers: { 'x-superagent-request': '1', 'content-type': 'application/json' },
+    body: JSON.stringify({ reason: 'stopped from the panel' }),
+  })
+  b.textContent = r.ok ? 'stopped' : 'refused ' + r.status
+})
+</script>`)
 }
 
 const json = (res: import('node:http').ServerResponse, code: number, body: unknown): void => {
   res.writeHead(code, { 'content-type': 'application/json' })
   res.end(JSON.stringify(body))
+}
+
+const readBody = (req: IncomingMessage): Promise<string> =>
+  new Promise(resolve => { let b = ''; req.on('data', (c: Buffer) => { b += c }); req.on('end', () => resolve(b)) })
+
+/** Polled every few seconds, not streamed: watching a run needs the last screen, not a socket. */
+const workerPage = (ticket: string, canType: boolean): string => page(`worker ${ticket}`, `
+<p><a href="/">&larr; panel</a> <span class="count" id="where"></span></p>
+<pre id="screen" style="white-space:pre-wrap;background:#111;color:#eee;padding:.6rem;overflow:auto;max-height:70vh">loading…</pre>
+${canType ? `<p><textarea id="msg" rows="3" style="width:100%" placeholder="say something to this worker; the Send button submits it as a prompt"></textarea>
+<button type="button" id="send">Send</button> <button type="button" id="esc">Esc</button> <span class="count" id="sent"></span></p>` : '<p class="muted">These workers do not run in herdr tabs, so there is nothing to type into.</p>'}
+<script>
+var ticket = ${JSON.stringify(ticket)}
+function tok() { var t = localStorage.getItem('superagent-panel-token') || ''; if (!t) { t = window.prompt('panel token (the panel-token file in the state directory)') || ''; localStorage.setItem('superagent-panel-token', t) } return t }
+function note(s) { document.getElementById('sent').textContent = s }
+async function refresh() {
+  try {
+    var r = await fetch('/api/worker?ticket=' + encodeURIComponent(ticket) + '&lines=80', { headers: { 'x-superagent-request': '1' } })
+    var j = await r.json()
+    document.getElementById('screen').textContent = (j.text !== undefined ? j.text : JSON.stringify(j, null, 2)) + '\n'
+    document.getElementById('where').textContent = j.tab ? ' · ' + j.tab + ' · agent ' + j.agent : ''
+  } catch (e) { document.getElementById('screen').textContent = String(e) + '\n' }
+}
+document.getElementById('send')?.addEventListener('click', async function () {
+  var text = document.getElementById('msg').value
+  if (!text.trim()) return note('nothing to send')
+  note('sending…')
+  var r = await fetch('/api/worker/prompt', { method: 'POST', headers: { 'x-superagent-request': '1', 'x-superagent-token': tok() }, body: JSON.stringify({ ticket: ticket, text: text }) })
+  var j = await r.json(); note(r.ok ? 'sent' : 'refused: ' + j.error); if (r.ok) document.getElementById('msg').value = ''
+})
+document.getElementById('esc')?.addEventListener('click', async function () {
+  var r = await fetch('/api/worker/keys', { method: 'POST', headers: { 'x-superagent-request': '1', 'x-superagent-token': tok() }, body: JSON.stringify({ ticket: ticket, keys: ['esc'] }) })
+  note(r.ok ? 'esc sent' : 'refused: ' + (await r.json()).error)
+})
+refresh(); setInterval(refresh, 3000)
+</script>`)
+
+/** The token from the header a script sends, or the Basic password a browser prompts for. */
+const bearerToken = (headers: IncomingMessage['headers']): string => {
+  const header = String(headers['x-superagent-token'] ?? '')
+  if (header) return header
+  const basic = String(headers.authorization ?? '')
+  if (!/^basic /i.test(basic)) return ''
+  try { return Buffer.from(basic.slice(6), 'base64').toString('utf8').split(':').slice(1).join(':') } catch { return '' }
+}
+
+const allowedHost = (src: PanelSource, host: string): boolean => {
+  const base = host.replace(/:\d+$/, '')
+  return base === 'localhost' || base === '127.0.0.1' || (src.config.panelHosts ?? []).includes(base)
 }
 
 export function createPanelServer(src: PanelSource): { server: Server; url(port: number): string } {
@@ -139,9 +222,16 @@ export function createPanelServer(src: PanelSource): { server: Server; url(port:
     })
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     const host = String(req.headers.host ?? '')
-    if (!/^127\.0\.0\.1:\d+$|^localhost:\d+$/.test(host)) { json(res, 403, { error: 'host must be 127.0.0.1 or localhost' }); return }
+    if (!allowedHost(src, host)) { json(res, 403, { error: `host ${host} is not localhost and not in PI_SUPERAGENT_PANEL_HOSTS` }); return }
+    const bearer = bearerToken(req.headers)
     if (url.pathname.startsWith('/api/') && req.headers['x-superagent-request'] !== '1') { json(res, 403, { error: 'missing x-superagent-request: 1' }); return }
-    if (req.method === 'POST' && src.token && req.headers['x-superagent-token'] !== src.token()) {
+    // 401 with Basic, because a plain navigation can carry no other credential.
+    if (src.config.panelTokenAllRequests && (!src.token || bearer !== src.token())) {
+      res.writeHead(401, { 'www-authenticate': 'Basic realm="superagent panel"', 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: 'the panel needs its token' }))
+      return
+    }
+    if (req.method === 'POST' && src.token && bearer !== src.token()) {
       json(res, 403, { error: 'a POST needs the panel token in x-superagent-token' }); return
     }
     const m = readModel(src)
@@ -188,6 +278,41 @@ export function createPanelServer(src: PanelSource): { server: Server; url(port:
     if (url.pathname === '/ticket' && ticket) {
       const t = src.repos.tickets.get(ticket)
       return void res.writeHead(200, { 'content-type': 'text/html' }).end(page(`ticket ${ticket}`, t ? `<pre>${esc(JSON.stringify(t, null, 2))}</pre>` : 'no such ticket'))
+    }
+    if (url.pathname === '/api/worker') {
+      if (!src.workerPane) return json(res, 501, { error: 'these workers do not run in herdr tabs' })
+      const t = url.searchParams.get('ticket') ?? ''
+      const lines = Math.min(500, Math.max(10, Number(url.searchParams.get('lines')) || 80))
+      void src.workerPane(t, lines)
+        .then(w => json(res, 200, { ticket: t, ...w }))
+        .catch(error => json(res, /no worker/.test(String(error)) ? 404 : 502, { error: String(error instanceof Error ? error.message : error) }))
+      return
+    }
+    // Typing into a worker is a shell on this machine, so these ride the same POST token as the stop route.
+    if ((url.pathname === '/api/worker/prompt' || url.pathname === '/api/worker/keys') && req.method === 'POST') {
+      const promptRoute = url.pathname.endsWith('/prompt')
+      if (!(promptRoute ? src.workerPrompt : src.workerKeys)) return json(res, 501, { error: 'these workers do not run in herdr tabs' })
+      void readBody(req).then(async raw => {
+        let body: { ticket?: unknown; text?: unknown; keys?: unknown }
+        try { body = JSON.parse(raw || '{}') } catch { return json(res, 400, { error: 'body must be JSON' }) }
+        const t = String(body.ticket ?? '')
+        const text = String(body.text ?? '').slice(0, 8000)
+        const keys = Array.isArray(body.keys) ? body.keys.slice(0, 16).map(k => String(k).slice(0, 16)) : []
+        if (promptRoute && !text.trim()) return json(res, 400, { error: 'text is required' })
+        if (!promptRoute && keys.length === 0) return json(res, 400, { error: 'keys is required' })
+        try {
+          if (promptRoute) await src.workerPrompt!(t, text)
+          else await src.workerKeys!(t, keys)
+          json(res, 200, { sent: promptRoute ? text.length : keys.length })
+        } catch (error) {
+          json(res, /no worker/.test(String(error)) ? 404 : 502, { error: String(error instanceof Error ? error.message : error) })
+        }
+      })
+      return
+    }
+    if (url.pathname === '/worker') {
+      return void res.writeHead(200, { 'content-type': 'text/html' })
+        .end(workerPage(url.searchParams.get('ticket') ?? '', Boolean(src.workerPrompt)))
     }
     if (url.pathname === '/') return void res.writeHead(200, { 'content-type': 'text/html' }).end(renderPanel(m))
     json(res, 404, { error: 'not found' })

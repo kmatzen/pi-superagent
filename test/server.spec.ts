@@ -8,6 +8,28 @@ import { createPanelServer, type PanelSource } from '../src/pi/server.ts'
 import type { IssueComment, IssueState } from '../src/pi/source-github.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
 
+async function serve(src: PanelSource): Promise<{ port: number; close: () => Promise<void> }> {
+const { server } = createPanelServer(src)
+await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+const port = (server.address() as net.AddressInfo).port
+return { port, close: () => new Promise<void>(resolve => server.close(() => resolve())) }
+}
+
+const source = (over: Record<string, unknown>): PanelSource => ({
+now: () => new Date().toISOString(),
+repos: { tickets: { list: () => [], get: () => undefined }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined }, kv: { get: () => undefined, set: () => {} } },
+load: () => ({ running: 0, parked: 0, queued: 0, maxWorkers: 4 }),
+workers: () => [],
+log: () => {},
+health: () => ({}),
+isPaused: () => false,
+setPaused: () => {},
+token: () => 'sekret',
+config: { githubRepo: 'o/r' },
+assessor: { waiting: () => [] },
+...over,
+} as unknown as PanelSource)
+
 const dirs: string[] = []
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'pi-panel-')); dirs.push(d); return d }
 // The POST routes take the panel secret from the state directory the router made on its first start.
@@ -180,7 +202,7 @@ describe('the panel and the API', () => {
     // another site must not be able to read the queue by DNS-rebinding localhost.
     const raw = await rawRequest(f.port, 'GET /api/state HTTP/1.1\r\nHost: evil.example\r\nx-superagent-request: 1\r\nConnection: close\r\n\r\n')
     expect(raw.startsWith('HTTP/1.1 403')).toBe(true)
-    expect(raw).toMatch(/127\.0\.0\.1 or localhost/)
+    expect(raw).toMatch(/is not localhost and not in PI_SUPERAGENT_PANEL_HOSTS/)
     f.running.stop()
   })
 
@@ -293,5 +315,141 @@ describe('the panel under a failing store', () => {
     expect((await get()).status, 'still answering: the failure did not take the process down').toBe(500)
     expect(logged).toEqual(['panel.failed', 'panel.failed'])
     await new Promise(resolve => server.close(resolve))
+  })
+})
+
+describe('the panel worker screen', () => {
+  const hdr = (token?: string) => ({ host: '127.0.0.1', 'x-superagent-request': '1', ...(token ? { 'x-superagent-token': token } : {}) })
+
+  it('reads a worker screen, and typing needs the panel token', async () => {
+    const prompts: string[] = []
+    const s = await serve(source({
+      workerPane: async () => ({ tab: 'w9:t3', agent: 'sa-1', text: 'thinking about the ticket' }),
+      workerPrompt: async (_t: string, text: string) => { prompts.push(text) },
+    }))
+    const screen = await (await fetch(`http://127.0.0.1:${s.port}/api/worker?ticket=t1`, { headers: hdr() })).json() as Record<string, unknown>
+    expect(screen.text, 'the operator sees the worker terminal').toBe('thinking about the ticket')
+    const page = await (await fetch(`http://127.0.0.1:${s.port}/worker?ticket=t1`, { headers: { host: '127.0.0.1' } })).text()
+    expect(page).toContain('id="screen"')
+    const noToken = await fetch(`http://127.0.0.1:${s.port}/api/worker/prompt`, { method: 'POST', headers: hdr(), body: JSON.stringify({ ticket: 't1', text: 'do it' }) })
+    expect(noToken.status, 'typing into a worker is a POST, so it needs the token').toBe(403)
+    const sent = await fetch(`http://127.0.0.1:${s.port}/api/worker/prompt`, { method: 'POST', headers: hdr('sekret'), body: JSON.stringify({ ticket: 't1', text: 'do it' }) })
+    expect(sent.status).toBe(200)
+    expect(prompts).toEqual(['do it'])
+    const empty = await fetch(`http://127.0.0.1:${s.port}/api/worker/prompt`, { method: 'POST', headers: hdr('sekret'), body: JSON.stringify({ ticket: 't1', text: '  ' }) })
+    expect(empty.status, 'an empty prompt is the caller’s mistake').toBe(400)
+    await s.close()
+  })
+
+  it('names a ticket with no worker, and a fleet with no herdr tabs', async () => {
+    const missing = await serve(source({
+      workerPane: async (ticketId: string) => { throw new Error(`no worker tab for ticket ${ticketId}`) },
+    }))
+    expect((await fetch(`http://127.0.0.1:${missing.port}/api/worker?ticket=t2`, { headers: hdr() })).status).toBe(404)
+    await missing.close()
+    const inProcess = await serve(source({}))
+    const res = await fetch(`http://127.0.0.1:${inProcess.port}/api/worker?ticket=t1`, { headers: hdr() })
+    expect(res.status, 'in-process workers have no terminal to read').toBe(501)
+    const page = await (await fetch(`http://127.0.0.1:${inProcess.port}/worker?ticket=t1`, { headers: { host: '127.0.0.1' } })).text()
+    expect(page).toContain('do not run in herdr tabs')
+    await inProcess.close()
+  })
+
+  it('links the worker screen from every open ticket', async () => {
+    const ticket = {
+      id: 't1', title: 'Do the thing', channels: [{ source: 'github', thread: 'o/r#7' }], assignments: [],
+    } as never
+    const s = await serve(source({ repos: { tickets: { list: () => [ticket], get: () => ticket }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined }, kv: { get: () => undefined, set: () => {} } } }))
+    const page = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
+    expect(page, 'the execution table reaches the screen of the ticket it names').toContain('/worker?ticket=t1')
+    await s.close()
+  })
+})
+
+describe('the panel behind a reverse proxy', () => {
+
+  it('answers the proxy name it was configured with, and no other name', async () => {
+    const s = await serve(source({ config: { githubRepo: 'o/r', panelHosts: ['superagent.example.net'] } }))
+    const get = (host: string) => rawRequest(s.port, `GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`)
+    expect((await get('superagent.example.net')).startsWith('HTTP/1.1 200'), 'the proxy Host is an answerable name').toBe(true)
+    expect((await get('elsewhere.example.net')).startsWith('HTTP/1.1 403'), 'a name nobody configured is refused').toBe(true)
+    expect((await get(`127.0.0.1:${s.port}`)).startsWith('HTTP/1.1 200'), 'localhost stays answerable, so the tunnel keeps working').toBe(true)
+    await s.close()
+  })
+
+  it('demands the token on a read once the panel is exposed, and takes it as a Basic password', async () => {
+    const s = await serve(source({ config: { githubRepo: 'o/r', panelHosts: ['superagent.example.net'], panelTokenAllRequests: true } }))
+    const anon = await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: 'superagent.example.net' } })
+    expect(anon.status, 'past localhost, a read needs the token').toBe(401)
+    expect(anon.headers.get('www-authenticate'), 'the browser gets a prompt it can fill').toContain('Basic')
+    const basic = Buffer.from(`:${'sekret'}`).toString('base64')
+    const authed = await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: 'superagent.example.net', authorization: `Basic ${basic}` } })
+    expect(authed.status).toBe(200)
+    const write = await fetch(`http://127.0.0.1:${s.port}/api/executor/pause`, {
+      method: 'POST', headers: { host: 'superagent.example.net', 'x-superagent-request': '1', 'content-type': 'application/json', authorization: `Basic ${basic}` },
+      body: JSON.stringify({ paused: true }),
+    })
+    expect(write.status, 'the Basic password serves a write as well as the header does').toBe(200)
+    const headerToken = await fetch(`http://127.0.0.1:${s.port}/api/state`, { headers: { host: 'superagent.example.net', 'x-superagent-request': '1', 'x-superagent-token': 'sekret' } })
+    expect(headerToken.status, 'scripts keep the header path').toBe(200)
+    await s.close()
+  })
+
+  it('leaves a panel with no proxy config alone', async () => {
+    const s = await serve(source({}))
+    const anon = await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: `127.0.0.1:${s.port}` } })
+    expect(anon.status, 'unset means the localhost panel behaves exactly as before').toBe(200)
+    await s.close()
+  })
+})
+
+describe('what the panel says a person is needed for', () => {
+  const ticket = (summary: string, question: string) => ({
+    id: 't1', title: 'Fix the mirror', channels: [{ source: 'github', thread: 'o/r#924' }],
+    assignments: [{ state: 'running', report: { state: 'blocked', summary, question, at: new Date().toISOString() } }],
+    attention: { question },
+  }) as never
+
+  const page = async (t: never) => {
+    const s = await serve(source({ repos: { tickets: { list: () => [t], get: () => t }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined }, kv: { get: () => undefined, set: () => {} } } }))
+    const html = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
+    await s.close()
+    return html
+  }
+
+  it('names the router silence nudge as the router, not as a question from the worker', async () => {
+    const nudge = await page(ticket('the worker sent no event for 16 minutes in /work/t1', 'steer it, stop it, or accept the work it has done'))
+    expect(nudge, 'the operator reads why the row is there').toContain('quiet, no question from the worker')
+    expect(nudge).toContain('sent no event for 16 minutes')
+    const asked = await page(ticket('the prover is missing on the builder', 'should I install Lean 4.33.1 or skip the mirror?'))
+    expect(asked).toContain('should I install Lean 4.33.1 or skip the mirror?')
+    expect(asked).not.toContain('quiet, no question from the worker')
+  })
+
+  it('lists live workers with a screen link, and links the screen from each ask', async () => {
+    const s = await serve(source({ workers: () => [{ ticketId: 't9', sessionId: 's9', workspace: '/work/t9', startedAt: 'x', lastEventAt: 'y', events: 4, quietSeconds: 12, ageSeconds: 60, watch: 'o/r#9', busy: true }] }))
+    const html = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
+    expect(html).toContain('id="workers"')
+    expect(html).toContain('/worker?ticket=t9')
+    expect(html.match(/\/worker\?ticket=/g)?.length ?? 0).toBeGreaterThan(0)
+    await s.close()
+    const ask = await page(ticket('the prover is missing', 'install Lean?'))
+    expect(ask).toContain('/worker?ticket=t1')
+  })
+})
+
+describe('what the panel offers for a ticket it says needs a person', () => {
+  it('links the thread and gives one-click stop', async () => {
+    const t = {
+      id: 't7', title: 'Resolve merge conflict', channels: [{ source: 'github', thread: 'o/r#2249', address: { repo: 'o/r', issue: '2249' } }],
+      assignments: [{ state: 'running', report: { state: 'blocked', summary: 'the merge is a wash', question: 'leave it closed?', at: new Date().toISOString() } }],
+      attention: { question: 'leave it closed?' },
+    } as never
+    const s = await serve(source({ repos: { tickets: { list: () => [t], get: () => t }, threads: { list: () => [] }, decisions: { byThread: () => [] }, triggersOfThread: () => [], triggers: { disposition: () => undefined }, kv: { get: () => undefined, set: () => {} } } }))
+    const html = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
+    expect(html, 'the ask points at the thread it is about').toContain('github.com/o/r/')
+    expect(html.match(/data-ticket="t7"/g)?.length ?? 0, 'both the ask row and the open row can stop it').toBe(2)
+    expect(html).toContain('/api/tickets/')
+    await s.close()
   })
 })

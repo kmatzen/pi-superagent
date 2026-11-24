@@ -557,6 +557,37 @@ describe('follow-up owners', () => {
       expect(h.repo.tickets.get(ticketId)!.ended).toMatchObject({ outcome: 'merged' })
     }
   })
+  it('ends the ticket whose question its closes made moot, and leaves one whose worker is still on it', () => {
+    // Measured 2026-11-24: inbox#855 asked "keep this watch running?" over four pull requests that had all
+    // merged. A close recorded while work was busy ends nothing then, and a blocked report never re-checks it.
+    for (const running of [false, true]) {
+      const h = harness()
+      const ticketId = accepted(h).ticketId!
+      h.engine.bindThread(ticketId, { source: 'gh', id: 'pr-9' }, true)
+      h.engine.report(ticketId, { state: 'ready', summary: 'PR ready' })
+      h.tick(1); h.engine.receive(trigger('2')); h.settle()
+      // The worker took the person's message up and has not read it, and the pull request merges in that moment.
+      h.engine.reply({ purpose: 'acknowledgement', ticketId, triggerId: '2', text: 'On it' })
+      h.engine.threadClosed({ source: 'gh', id: 'pr-9' }, 'merged', '2026-09-23T00:00:01Z')
+      h.engine.inputsRead(ticketId, h.repo.tickets.get(ticketId)!.inputs.map(i => i.id))
+      h.tick(1)
+      h.engine.report(ticketId, { state: 'blocked', summary: 'the check runs on dashboard pages now',
+        question: 'Keep the watch running?' })
+      // The router frees the worker that asked, which is the state the ask sits in on the live board.
+      if (!running) {
+        const a = h.repo.tickets.get(ticketId)!.assignments.at(-1)!
+        h.engine.release(ticketId, a.id)
+      }
+      expect(h.repo.tickets.get(ticketId)!.ended, 'a blocked report does not re-check the recorded close').toBeUndefined()
+      const ended = h.engine.closeAnsweredAsks()
+      expect(ended).toEqual(running ? [] : [ticketId])
+      expect(h.repo.tickets.get(ticketId)!.ended, running
+        ? 'the worker on it decides, not the pass'
+        : 'the merge landed, so the question is moot and the ticket ends as the pull request did')
+        .toMatchObject(running ? {} : { by: 'executor', outcome: 'merged' })
+    }
+  })
+
   it('gives a follow-up its ended ticket let go to that ticket again when the main Session attaches it there', () => {
     for (const resumed of [false, true]) {
       const h = harness()

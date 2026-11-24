@@ -105,7 +105,7 @@ export interface FollowerOptions {
   reopened(thread: ThreadRef, pull: PullRef): number
   receive(trigger: Trigger): void
   warn(event: string, fields: Record<string, unknown>): void
-  /** A followed pull request's checks reached a final state on a head SHA (agent-inbox#667). Detection lives in the
+  /** A followed pull request's checks reached a final state on a head SHA (inbox#667). Detection lives in the
    *  pass that already reads the pull; who the outcome is for is the caller's, because only a ticket that asked for
    *  a check gets a session — CI churn recruited one worker 48 times on ticket #205. */
   checksSettled?(thread: ThreadRef, pull: PullRef, checks: { sha: string; state: ChecksState }, state: PullState): void
@@ -144,7 +144,7 @@ export interface FollowerOptions {
 // because this box is shared with the workers every `gh` call competes with.
 const readsAtOnce = (due: number): number => Math.min(16, Math.max(4, Math.ceil(due / 8)))
 
-/** What a finished rollup means for a ticket that is waiting on it (agent-inbox#667). */
+/** What a finished rollup means for a ticket that is waiting on it (inbox#667). */
 export type CheckReason = 'checks_failed' | 'checks_passed'
 
 export interface CheckWakePorts {
@@ -161,8 +161,8 @@ export interface CheckWakePorts {
 
 /**
  * Hand a finished check state to the tickets waiting on it, returning how many it called back. The operator's rules
- * (agent-inbox#667) live here and nowhere else, and the timer a woken ticket had scheduled is spent, so the
- * fallback is left for what no event can see: a Pluto job, a person.
+ * (inbox#667) live here and nowhere else, and the timer a woken ticket had scheduled is spent, so the
+ * fallback is left for what no event can see: a remote job, a person.
  */
 export function wakeOnChecks(tickets: readonly Ticket[], thread: ThreadRef, pull: PullRef,
                              checks: { sha: string; state: ChecksState }, state: PullState, ports: CheckWakePorts): number {

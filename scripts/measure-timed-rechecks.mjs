@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// node scripts/measure-timed-rechecks.mjs <owner/repo> <fromISO> [toISO] — the share agent-inbox#667 exists to cut.
+// node scripts/measure-timed-rechecks.mjs <owner/repo> <fromISO> [toISO] — the share inbox#667 exists to cut.
 // A report is a router-marked comment on an OPEN issue whose first line is `#<number> <state>`; that definition
 // reproduces the 82-of-155 baseline as 78 of 151, which is the only reason the two numbers are comparable.
 import { execFileSync } from 'node:child_process'
