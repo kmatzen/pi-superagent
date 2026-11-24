@@ -203,9 +203,14 @@ export function policyOf(config: RouterConfig): Policy {
     // Admission is policy, not a model call: a person, explicitly, on a thread the router listens to. The
     // author is checked again here because a trigger stored before bot names were matched as patterns still
     // says human, and one such trigger (an agent asking the operator to approve a test) became a ticket to run it.
-    gate: trigger => (trigger.human && !isListed(trigger.actor.id, config.bots)
-      ? { admissible: true, strength: 'explicit', basis: { via: 'listed' } }
-      : { admissible: false, reason: 'not human' }),
+    gate: trigger => trigger.meta?.sweep === true
+      // The ready sweep asks for a free slot, so the sender is the router and not a person: an inferred candidate,
+      // admissible only on rules the judge names (`admitsInferred`). Inferred is the strength that cannot stop a
+      // ticket, cannot resume one, and cannot speak as an operator's explicit request.
+      ? { admissible: true, strength: 'inferred', basis: { via: 'sweep', observation: { mode: 'auto' } } }
+      : (trigger.human && !isListed(trigger.actor.id, config.bots)
+        ? { admissible: true, strength: 'explicit', basis: { via: 'listed' } }
+        : { admissible: false, reason: 'not human' }),
     revalidate: () => true,
     admitsInferred: rules => rules.length > 0,
   }

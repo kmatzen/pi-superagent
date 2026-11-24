@@ -3,7 +3,7 @@
 import { isListed } from './authors.ts'
 import { createHash } from 'node:crypto'
 import { countCredentials, redactCredentials } from './git-credentials.ts'
-import type { Trigger } from '../core/index.ts'
+import type { SweepCandidate, Trigger } from '../core/index.ts'
 
 export interface IssueComment {
   issue: number
@@ -22,19 +22,22 @@ export interface IssueState {
   association: string
   createdAt: string
   updatedAt: string
-  /** Labels as GitHub spells them. Only `PRIORITY_LABEL` is read: the 2026-11-10 ruling deleted every other label. */
+  /** Labels as GitHub spells them. Two are read: `PRIORITY_LABEL` ranks a slot, `HUMAN_LABEL` parks an issue. */
   labels?: string[]
 }
 
 /** The one label the router obeys: the operator put this issue in the next free worker slot. */
 export const PRIORITY_LABEL = 'priority:high'
+/** The board's park-on-a-person label, read by the ready sweep alone: a parked issue's next move is a human's. */
+export const HUMAN_LABEL = 'waiting-on-human'
 /** One priority launch per pass: 38 pending tickets share 4 slots, and a priority lane that takes them all is a new starvation. */
 export const PRIORITY_GRANTS_PER_POLL = 1
-type WonSlot = 'priority' | 'unanswered' | 'oldest-starved'
+type WonSlot = 'priority' | 'unanswered' | 'oldest-starved' | 'swept'
 /** Why a thread took the slot, named for the operator: the label wins (`priority`); in the standing queue a
  *  thread with undelivered operator input is the parked-thread relaunch (`unanswered`, measured 2026-11-19:
  *  #593 relaunched on undelivered replies), and a plain win by age is `oldest-starved`. The names report the
- *  ranking — label first, then oldest updated — they never change it. */
+ *  ranking — label first, then oldest updated — they never change it. `swept` is written by the ready sweep,
+ *  which ranks the same way and asks the judge first, so it names a different road to the slot, not a new rule. */
 export const wonSlotReason = (priority: boolean, hasUndeliveredInput: boolean): WonSlot =>
   priority ? 'priority' : hasUndeliveredInput ? 'unanswered' : 'oldest-starved'
 /** kv key: thread key → the reason it last won a slot, so the panel row can say it after the log scrolled. */
@@ -141,6 +144,8 @@ export class GithubSource {
    *  produced are in the engine — commit-at-emit + crash = cursor past a request never accepted. */
   private staged: Array<[string, unknown]> = []
   private lastOpen: ReadonlySet<string> | undefined
+  /** The open issues of the last poll's listing: the sweep reads its board off the read the poll already made. */
+  private board: readonly IssueState[] = []
   /** The board's `priority:high` threads as of the last poll, taken from the listing that poll already makes. */
   private priorityThreads: ReadonlySet<string> = new Set()
   /** Polls in a row a seen issue has been missing from the open listing without GitHub saying it closed. */
@@ -155,6 +160,21 @@ export class GithubSource {
 
   /** A thread the board labels `priority:high`. The answer is the poll's own listing, so ranking costs no request. */
   isPriority(thread: string): boolean { return this.priorityThreads.has(thread) }
+
+  /** The open issues of the last poll, as the sweep's board; empty before the first poll, which is the honest answer. */
+  sweepBoard(): SweepCandidate[] {
+    return this.board.map(issue => ({
+      thread: { source: 'github', id: `#${issue.issue}` },
+      updatedAt: issue.updatedAt,
+      priority: priorityOf(issue),
+      waitingOnHuman: !!issue.labels?.includes(HUMAN_LABEL),
+      actor: { source: 'github', id: issue.author },
+      // Masked like every other ingest surface: a swept body is stored as the Trigger's text and reaches a worker.
+      text: `${this.mask(issue.title, 'issue')}${issue.body ? `\n\n${this.mask(issue.body, 'issue').slice(0, 4000)}` : ''}`,
+      channel: { source: 'github', thread: `#${issue.issue}`, address: { issue: String(issue.issue) } },
+      meta: { association: issue.association, author: issue.author },
+    }))
+  }
 
   /** One thread's state, asked of GitHub directly. 'unknown' when the read failed: a ticket stays alive on an
    *  unreadable answer, because the inference this replaces stopped a live ticket whose issue was open. */
@@ -206,6 +226,7 @@ export class GithubSource {
   private async issueTriggers(): Promise<Trigger[]> {
     const stored = this.store.get<string[]>(issuesKey(this.options.repo))
     const open = await this.api.issues('open')
+    this.board = open
     const pulls = this.api.pullsOpen ? await this.api.pullsOpen() : []
     this.lastOpen = new Set<string>([...open.map(i => `#${i.issue}`), ...pulls.map(n => `#${n}`)])
     this.priorityThreads = new Set(open.filter(priorityOf).map(i => `#${i.issue}`))

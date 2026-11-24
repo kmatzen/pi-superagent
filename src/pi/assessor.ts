@@ -27,6 +27,12 @@ export const renderCandidate = (c: Candidate): string => [
   `Assess eval ${c.evalId} (policy ${c.policyVersion}, ${c.strength}).`,
   `Thread ${c.thread.key}`,
   ...c.triggers.map(t => `[${t.actor.id}${t.human ? '' : ' (not human)'} ${t.at}] ${t.text}`),
+  ...(c.triggers.some(t => t.meta?.sweep === true)
+    // The judge must know nobody spoke: "a person wants this" is the reason it accepts most GitHub candidates.
+    ? ['The ready sweep sent this, not a person: a worker slot is free and no ticket is on this thread. '
+      + 'accept is the answer when the issue is work an agent can take now; ignore when it needs a person first, '
+      + 'when its work is done, or when it is chatter. Name the rules you matched, e.g. rules: ["swept-ready-ask"].']
+    : []),
   c.tickets.length ? `Tickets already on this thread:\n${c.tickets.map(t => `- ${t.id} ${t.title}${t.ended ? ' (ended)' : ' (open)'}`).join('\n')}` : 'No tickets on this thread yet.',
   'Answer with ticket_decide: accept (title, scope, reason, acknowledgement for the asker, rules you matched, '
   + 'name, note for the worker), ignore (reason), stop (ticketId, reason), or unavailable (reason). '
