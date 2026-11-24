@@ -1336,7 +1336,7 @@ describe('a pull request per ticket', () => {
     expect(callsOf(f, '494').filter(c => c === 'close:494'), 'closed again').toHaveLength(2)
   })
 
-  it('a build the router reads as running is what the receipt names, from the read alone (agent-inbox#667)', async () => {
+  it('a build the router reads as running is what the receipt names, from the read alone (inbox#667)', async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
     await working(f, '497')
@@ -1354,7 +1354,7 @@ describe('a pull request per ticket', () => {
     expect(last, 'the read of a running build, not a hand-written state, drives the wording').toMatch(/Next check: a fresh worker the moment its pull-request checks finish/)
   })
 
-  it('a waiting ticket whose pull request is still building is told the checks, not the clock, wake it (agent-inbox#667)', async () => {
+  it('a waiting ticket whose pull request is still building is told the checks, not the clock, wake it (inbox#667)', async () => {
     const pulls = pullsFake()
     const f = fixture(true, undefined, undefined, undefined, { pullApi: pulls.api })
     await working(f, '496')
@@ -1521,8 +1521,8 @@ describe('a pull request per ticket', () => {
     // Measured 2026-11-24: six ticketless threads that re-read their own issue body on every poll each logged a
     // refusal, 480 lines an hour together, and the operator read the log as the queue churning on a small batch.
     const f = fixture(true)
-    f.addComment('499', 'matzen_adobe', 'reconcile fails on the laptop box, proof attached')
-    f.feed.issues.find(i => i.issue === 499)!.author = 'matzen_adobe'
+    f.addComment('499', 'kmatzen', 'reconcile fails on the laptop box, proof attached')
+    f.feed.issues.find(i => i.issue === 499)!.author = 'kmatzen'
     await f.running.tick()
     await settle()
     f.decide('ignore')
@@ -1584,7 +1584,7 @@ describe('a pull request per ticket', () => {
   })
 
   it('a conversation in another repository ends its ticket when the pull request closes, question quoted', async () => {
-    // agent-inbox#936, measured 2026-11-23: 14 of 61 open tickets lived on pull-request threads in other
+    // inbox#936, measured 2026-11-23: 14 of 61 open tickets lived on pull-request threads in other
     // repositories, 13 of those threads closed, and 5 kept asking a person about a thread nobody could reopen.
     let now = Date.now()
     const pulls = pullsFake()
@@ -1616,7 +1616,7 @@ describe('a pull request per ticket', () => {
   })
 
   it('an ask its merged pull requests made moot ends on the next pass, question quoted', async () => {
-    // Measured 2026-11-24 on the live board: agent-inbox#855 asked "keep this watch running?" over four pull
+    // Measured 2026-11-24 on the live board: inbox#855 asked "keep this watch running?" over four pull
     // requests that had all merged. Each close was recorded while its worker was busy, and a blocked report
     // never re-checks one, so the ask outlived the work and the ticket never ended.
     const pulls = pullsFake()
@@ -2311,10 +2311,10 @@ describe('the sweep of settled checkouts', () => {
     const dir = mkdtempSync(join(tmpdir(), 'sa-tmp-'))
     try {
       mkdirSync(join(dir, 'scene3d-old')); writeFileSync(join(dir, 'scene3d-old', 'f'), 'x')
-      writeFileSync(join(dir, 'parfait-refresh.tar.gz'), 'x')
+      writeFileSync(join(dir, 'gadget-refresh.tar.gz'), 'x')
       aged(join(dir, 'scene3d-old'), 1)
       expect(await sweepTmp(dir)).toEqual({ removed: 1, kept: 1 })
-      expect(readdirSync(dir)).toEqual(['parfait-refresh.tar.gz'])
+      expect(readdirSync(dir)).toEqual(['gadget-refresh.tar.gz'])
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
@@ -2377,13 +2377,13 @@ describe('the sweep of settled checkouts', () => {
         if (pushed) git(dir, 'push', '-q', 'origin', 'HEAD')
         return dir
       }
-      named('aaaa0000bbbb', 'caramel', false)
+      named('aaaa0000bbbb', 'widget', false)
       aged(join(root, 'aaaa0000bbbb'), 9)
       expect(await sweepWorktrees(root, new Set(), 0)).toMatchObject({ removed: 0, bare: 0, keptWork: 1, keptWorkIds: ['aaaa0000bbbb'] })
-      expect(existsSync(join(root, 'aaaa0000bbbb', 'caramel', 'f')), 'the only copy of the work').toBe(true)
+      expect(existsSync(join(root, 'aaaa0000bbbb', 'widget', 'f')), 'the only copy of the work').toBe(true)
 
       named('cccc1111dddd', 'conveyor', true)
-      const venvOwner = join(root, 'aaaa0000bbbb', 'caramel')
+      const venvOwner = join(root, 'aaaa0000bbbb', 'widget')
       writeFileSync(join(venvOwner, '.gitignore'), '.venv/\n')
       git(venvOwner, 'add', '.gitignore'); git(venvOwner, 'commit', '-q', '-m', 'ignore')
       mkdirSync(join(venvOwner, '.venv')); writeFileSync(join(venvOwner, '.venv', 'torch.so'), 'x')
@@ -2417,7 +2417,7 @@ describe('the sweep of settled checkouts', () => {
   }, 30_000)
 
   it('a parked worker loses its venv only when it is not working and nothing it started runs there', async () => {
-    // 2026-11-18: one parked caramel venv was 12.4 GB, and the box sat at 12 GB free under 10 GB write bursts.
+    // 2026-11-18: one parked widget venv was 12.4 GB, and the box sat at 12 GB free under 10 GB write bursts.
     const root = mkdtempSync(join(tmpdir(), 'sa-sweep-parked-'))
     try {
       for (const id of ['p1parked0000', 'p2working000', 'p3inuse00000']) {
@@ -2453,7 +2453,7 @@ describe('the sweep of settled checkouts', () => {
       fake('23', '20', 'node', '/w/bbbb', 'node doorman-mcp.mjs')
       fake('30', '1', 'pi', '/w/aaaa', 'pi')
       fake('31', '30', 'bash', '/w/aaaa', 'bash -c pytest')
-      fake('32', '31', 'python', '/w/aaaa/caramel', 'python -m pytest')
+      fake('32', '31', 'python', '/w/aaaa/widget', 'python -m pytest')
       fake('40', '1', 'python', '/home', '/w/dddd/repo/.venv/bin/python train.py')
       expect([...ticketsInUse('/w', proc)].sort()).toEqual(['aaaa', 'dddd'])
     } finally { rmSync(proc, { recursive: true, force: true }) }
@@ -2465,7 +2465,7 @@ describe('the sweep of settled checkouts', () => {
     try {
       for (const id of ['g1pushed0000', 'g2local00000']) {
         const dir = seedNested(root, id, false)
-        git(dir, 'remote', 'set-url', 'origin', 'https://x-access-token:secret@github.com/kmatzen/parfait.git')
+        git(dir, 'remote', 'set-url', 'origin', 'https://x-access-token:secret@github.com/kmatzen/gadget.git')
         git(dir, 'checkout', '-q', '-b', 'fix/green-gate')
         writeFileSync(join(dir, 'g'), id); git(dir, 'add', 'g'); git(dir, 'commit', '-q', '-m', id)
         aged(join(root, id), 9)
@@ -2480,7 +2480,7 @@ describe('the sweep of settled checkouts', () => {
         }),
       })
       expect(swept).toMatchObject({ removed: 1, keptWork: 1, keptWorkIds: ['g2local00000'] })
-      expect(asked[0], 'the repository and branch, never the credential in the URL').toMatch(/^repos\/kmatzen\/parfait\/compare\/[0-9a-f]{40}\.\.\.fix%2Fgreen-gate$/)
+      expect(asked[0], 'the repository and branch, never the credential in the URL').toMatch(/^repos\/kmatzen\/gadget\/compare\/[0-9a-f]{40}\.\.\.fix%2Fgreen-gate$/)
       expect(existsSync(join(root, 'g2local00000', 'repo', 'f')), 'GitHub never saw it: the only copy').toBe(true)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
@@ -2659,7 +2659,7 @@ describe('the tick keeps its cadence', () => {
   }, 30_000)
 
   it('the label that won the slot says so, and the lane passes the queue that is already waiting', async () => {
-    // agent-inbox#660: the launch lane is the operator's lever, so it has to be visible in the log and beat
+    // inbox#660: the launch lane is the operator's lever, so it has to be visible in the log and beat
     // the ask that queued first. Measured on the box 2026-11-20 09:53: six labelled threads sat behind 27
     // queued launches with all six slots busy, and every free slot went to the oldest by arrival order.
     const feed: { issues: IssueState[]; comments: IssueComment[] } = { issues: [], comments: [] }

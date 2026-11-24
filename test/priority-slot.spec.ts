@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { GithubSource, wonSlotReason, type GithubApi, type IssueState } from '../src/pi/source-github.ts'
 
-// agent-inbox#660: `priority:high` wins the next free slot; the lane behind it keeps the oldest-starved tie-break.
+// inbox#660: `priority:high` wins the next free slot; the lane behind it keeps the oldest-starved tie-break.
 const HOUR = 3_600_000
 const ago = (h: number) => new Date(Date.now() - h * HOUR).toISOString()
 const issue = (over: Partial<IssueState>): IssueState => ({

@@ -32,7 +32,7 @@ function pullLines(urls: readonly string[], tracker?: string): string {
 const FINISHED = 'This ticket ends with the report: no pull request is open on it, so nothing runs it now, and this issue closes with it. '
   + 'A comment on the closed issue, or reopening it, starts the work again; nothing else does.'
 
-// checksPending (agent-inbox#667): a followed pull's checks are still running, so an event, not the timer, is the next check.
+// checksPending (inbox#667): a followed pull's checks are still running, so an event, not the timer, is the next check.
 export function receiptText(thread: string, origin: ReportOrigin, run: ReportedRun, relaunched = false, tracker?: string,
   checksPending = false): string {
   const head = `${thread} ${run.state}: ${run.summary}`
