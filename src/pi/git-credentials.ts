@@ -38,8 +38,12 @@ const USERINFO = /([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/\s@"]*):(?!\*+@)([^/\s@"]*)@
  * not global: `.test()` on a global regex advances `lastIndex`, and the next call resumes there, so a value
  * whose token sits before the previous match ends scans clean. Measured with two token-bearing remotes in
  * one file — origin reported, backup dropped, deploy allowed. The guard does not get to miss the second one.
+ *
+ * Slack's shapes ride along: this pattern is the definition of "credential-shaped" for the ingest guard too,
+ * and the ask that added it named `xox` beside `ghp_`. The first segment must be digits (Slack's are IDs): a
+ * shape that accepted letters there matched the prose `xoxb-not-a-token`, measured.
  */
-const TOKEN = /\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})\b/
+const TOKEN = /\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[a-z]-\d{6,}-[A-Za-z0-9-]{6,}|xoxe\.[A-Za-z0-9.-]{10,}|xapp-\d-[A-Za-z0-9-]{10,})\b/
 /** The same shapes, global, for masking *every* occurrence inside one value. */
 const TOKENS = new RegExp(TOKEN.source, 'g')
 /**
@@ -63,8 +67,7 @@ export const maskSecret = (value: string): string => value
   .slice(0, 140)
 
 /**
- * The outbound filter: every credential shape in a text, masked, nothing truncated.
- *
+ * Both edges, one mask: masking only the outbound reply leaves the secret stored on the inbound read.
  * The router publishes a worker's report into a GitHub issue, and a report that quotes what the worker
  * printed quotes what the checkout stored: `git remote -v` output is the leak, and the issue body is the
  * publication. The ticket that opened this class named it — the board redacts credential-shaped strings, the

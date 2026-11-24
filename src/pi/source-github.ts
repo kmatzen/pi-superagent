@@ -2,6 +2,7 @@
  *  read positions. */
 import { isListed } from './authors.ts'
 import { createHash } from 'node:crypto'
+import { countCredentials, redactCredentials } from './git-credentials.ts'
 import type { Trigger } from '../core/index.ts'
 
 export interface IssueComment {
@@ -74,6 +75,9 @@ export interface PrReview {
   body: string
 }
 
+/** Where an incoming body entered the inbox: the surface a mask alert names. */
+export type IngestSurface = 'issue' | 'comment' | 'review'
+
 export interface GithubSourceOptions {
   repo: string
   self: string
@@ -91,6 +95,8 @@ export interface GithubSourceOptions {
   /** The open board on every poll: the router publishes how much open work waits for a slot, and nobody
    *  downstream may re-read GitHub to find out. */
   onOpen?: (open: readonly IssueState[]) => void
+  /** Count of credentials masked on the way in, never the value: a silent mask is indistinguishable from no secret arriving. */
+  onCredentialMasked?: (count: number, where: IngestSurface) => void
 }
 
 
@@ -127,6 +133,7 @@ export const CURSOR_LAG_MS = 120_000
 export const REPLY_MARKER = '<!-- superagent -->'
 
 export const commentTriggerId = (c: IssueComment): string =>
+  // The id hashes the raw body: the cursor re-reads a two-minute window, so an id that moved with masking rules would re-fire stored comments.
   `github:#${c.issue}:${createHash('sha1').update(`${c.author}\u0000${c.at}\u0000${c.body}`).digest('hex').slice(0, 16)}`
 
 export class GithubSource {
@@ -153,6 +160,15 @@ export class GithubSource {
    *  unreadable answer, because the inference this replaces stopped a live ticket whose issue was open. */
   issueState(issue: number): Promise<'open' | 'closed' | 'unknown'> {
     return this.api.issueState?.(issue) ?? Promise.resolve('unknown')
+  }
+
+  /** Mask before the text is stored: a trigger's text is what the engine keeps, and every later worker on the
+   *  thread is handed it as "word for word" — one paste on 2026-11-24 reached three workers over two hours. */
+  private mask(text: string, where: IngestSurface): string {
+    const count = countCredentials(text)
+    if (!count) return text
+    this.options.onCredentialMasked?.(count, where)
+    return redactCredentials(text)
   }
 
   /** A cold start reads a day back: enough to catch a request made while the router was down. */
@@ -252,7 +268,7 @@ export class GithubSource {
       actor: { source: 'github', id: issue.author },
       human: this.isHuman(issue.author),
       at: issue.createdAt,
-      text: `${issue.title}${issue.body ? `\n\n${issue.body.slice(0, 4000)}` : ''}`,
+      text: `${this.mask(issue.title, 'issue')}${issue.body ? `\n\n${this.mask(issue.body, 'issue').slice(0, 4000)}` : ''}`,
       channel: { source: 'github', thread: key, address: { issue: String(issue.issue) } },
       meta: { via, association: issue.association, author: issue.author },
     }
@@ -301,7 +317,7 @@ export class GithubSource {
           actor: { source: 'github', id: r.author },
           human: true,
           at: r.at,
-          text: `PR ${key}: ${r.author} ${state}${r.body ? `\n\n${r.body.slice(0, 4000)}` : ''}`,
+          text: `PR ${key}: ${r.author} ${state}${r.body ? `\n\n${this.mask(r.body, 'review').slice(0, 4000)}` : ''}`,
           // The address carries the repository, or the reply posts the number into the watched one:
           // measured 2026-11-07, 12 HTTP 404s, and any watched issue with that number would have taken it.
           channel: {
@@ -330,7 +346,7 @@ export class GithubSource {
       human,
       at: c.at,
       // Bounded like an issue body: one pasted CI log would otherwise buy its own judge prompt and worker brief.
-      text: c.body.slice(0, 4000),
+      text: this.mask(c.body, 'comment').slice(0, 4000),
       channel: { source: 'github', thread: `#${c.issue}`, address: { issue: String(c.issue) } },
       // The scope sees a trigger's source and meta only, so who wrote it travels in meta as well.
       meta: { association: c.association, author: c.author },

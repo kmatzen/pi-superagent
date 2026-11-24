@@ -1,7 +1,8 @@
 /** A ticket's pull requests: their threads, their state, and what people say on those outside the watched repository. */
 import { createHash } from 'node:crypto'
 import { isListed } from './authors.ts'
-import { CURSOR_LAG_MS, REPLY_MARKER, type IssueComment, type PositionStore, type PrReview } from './source-github.ts'
+import { CURSOR_LAG_MS, REPLY_MARKER, type IngestSurface, type IssueComment, type PositionStore, type PrReview } from './source-github.ts'
+import { countCredentials, redactCredentials } from './git-credentials.ts'
 import type { Ticket, ThreadRef, Trigger } from '../core/index.ts'
 
 export interface PullRef { repo: string; number: number }
@@ -467,7 +468,8 @@ export class PullFollower {
         // already read. Its new body made a new trigger id: a CI dashboard edited in place reached a worker as a fresh
         // message from the operator on every CI run (2026-11-12).
         if (Date.parse(c.at) < Date.parse(since)) continue
-        this.options.receive(this.trigger(id, pull, c.author, c.association, c.at, c.body, 'comment',
+        this.options.receive(this.trigger(id, pull, c.author, c.association, c.at,
+          this.mask(c.body, id, 'comment'), 'comment',
           `github:${id}:${createHash('sha1').update(`${c.author}\u0000${c.at}\u0000${c.body}`).digest('hex').slice(0, 16)}`))
       }
       // Committed once the engine holds what it produced: a crash before this line replays, and ids make replays free.
@@ -488,7 +490,7 @@ export class PullFollower {
         if (reviewedTo && Date.parse(r.at) <= Date.parse(reviewedTo)) continue
         if (!latest || Date.parse(r.at) > Date.parse(latest)) latest = r.at
         if (this.ours(r.author, r.body)) continue
-        const said = `${pull.repo}#${pull.number}: ${r.author} ${r.state.toLowerCase().replace(/_/g, ' ')}${r.body ? `\n\n${r.body.slice(0, 4000)}` : ''}`
+        const said = `${pull.repo}#${pull.number}: ${r.author} ${r.state.toLowerCase().replace(/_/g, ' ')}${r.body ? `\n\n${this.mask(r.body, id, 'review').slice(0, 4000)}` : ''}`
           + await this.onTheCode(pull, r.id)
         this.options.receive(this.trigger(id, pull, r.author, r.association, r.at, said, 'review', `github:${id}:review:${r.id}`))
       }
@@ -514,10 +516,18 @@ export class PullFollower {
       const rows = await this.options.api.reviewComments(pull.repo, pull.number, reviewId)
       if (!rows.length) return ''
       return `\n\n${rows.length} comment${rows.length === 1 ? '' : 's'} on the code, numbered so your report can answer each:\n`
-        + rows.map((c, i) => `${i + 1}. ${c.path}${c.line ? `:${c.line}` : ''}: ${c.body.slice(0, 1500)}${c.url ? `\n   ${c.url}` : ''}`).join('\n')
+        + rows.map((c, i) => `${i + 1}. ${c.path}${c.line ? `:${c.line}` : ''}: ${this.mask(c.body, `${pull.repo}#${pull.number}`, 'review').slice(0, 1500)}${c.url ? `\n   ${c.url}` : ''}`).join('\n')
     } catch {
       return `\n\nIts comments on the code could not be read here; read every one with \`gh api repos/${pull.repo}/pulls/${pull.number}/reviews/${reviewId}/comments\`.`
     }
+  }
+
+  /** Mask before storing: this text is what a worker is handed, and ids keep hashing the raw body so a re-read stays a free duplicate. */
+  private mask(text: string, thread: string, where: IngestSurface): string {
+    const count = countCredentials(text)
+    if (!count) return text
+    this.options.warn('pull.ingest_credential_masked', { thread, where, count })
+    return redactCredentials(text)
   }
 
   private ours(author: string, body: string): boolean {

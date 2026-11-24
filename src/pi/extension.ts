@@ -283,6 +283,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     ? new GithubSource(githubApi, {
         repo: cfg.githubRepo ?? '', self: cfg.githubSelf ?? cfg.self, bots: cfg.bots,
         onOpen: (open) => { openBoard = open },
+        // A mask the operator never hears about is a paste left unrevoked: log the count, never the value.
+        onCredentialMasked: (count, where) => log.line('warn', 'github.ingest_credential_masked', { where, count }),
         // The standing queue, given its launch back: the source offers every open issue that is not an ask to
         // the operator, this decides whether the work qualifies, and the counter decides how often.
         regrant: (issue, key, priority = false) => {
