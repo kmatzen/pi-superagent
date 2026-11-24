@@ -1517,6 +1517,27 @@ describe('a pull request per ticket', () => {
     expect(h.workers, 'a second loss gets a second worker').toHaveLength(1)
   })
 
+  it('a thread that has spent its grants is refused once a day, not once a poll', async () => {
+    // Measured 2026-11-24: six ticketless threads that re-read their own issue body on every poll each logged a
+    // refusal, 480 lines an hour together, and the operator read the log as the queue churning on a small batch.
+    const f = fixture(true)
+    f.addComment('499', 'matzen_adobe', 'reconcile fails on the laptop box, proof attached')
+    f.feed.issues.find(i => i.issue === 499)!.author = 'matzen_adobe'
+    await f.running.tick()
+    await settle()
+    f.decide('ignore')
+    // Polls with nothing new on the issue, each grant judged as it arrives: this is what the live threads did,
+    // a body re-read on every poll, the judge sending it away, and the queue asking for a launch again.
+    let judged = 1
+    for (const _ of Array(14)) {
+      await f.running.tick()
+      await settle()
+      if (f.judge.prompts.length > judged) { f.decide('ignore'); judged = f.judge.prompts.length }
+    }
+    const lines = readFileSync(join(f.dir, 'engine.log'), 'utf8').match(/regrant\.capped thread=#499/g) ?? []
+    expect(lines, 'the refusal is said once, then the log stays quiet').toHaveLength(1)
+  })
+
   it('several pull requests get one status comment in the worker\'s merge order, edited in place as they land', async () => {
     // Operator, 2026-11-12: a multi-repository change was a plan pieced together from report comments whose lists drifted.
     const pulls = pullsFake()
