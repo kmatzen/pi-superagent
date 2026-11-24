@@ -22,9 +22,13 @@ const harness = (t: Ticket) => {
     tickets: { get: id => (id === t.id ? t : undefined), open: () => [] },
     kv: { get: <T,>(key: string) => store.get(key) as T | undefined, set: (key, value) => void store.set(key, value) },
     closeIssue: async issue => { closed.push(issue) },
-    // Every pull answers "open", the only answer GitHub will ever give for the archived fork's duplicate.
-    pullApi: { pull: async (repo, number) => { asked.push(`${repo}#${number}`)
-      return { open: true, merged: false, createdAt: '2026-11-24T00:00:00Z' } satisfies PullState },
+    // GitHub's answers, per pull: #148 merged, the fork's duplicate open forever. The board issue answers "no such
+    // pull", because a pull answer there makes the closer skip the issue entirely.
+    pullApi: { pull: async (repo, number) => {
+      asked.push(`${repo}#${number}`)
+      if (repo === 'kmatzen/inbox') return undefined
+      const merged = repo === 'kmatzen/kit'
+      return { open: !merged, merged, createdAt: '2026-11-24T00:00:00Z' } satisfies PullState },
       comments: async () => [], reviews: async () => [] },
     home: 'kmatzen/inbox', flushReplies: async () => {}, log: { line: () => {}, path: 'engine.log' },
     now: () => '2026-11-24T03:00:00Z',
