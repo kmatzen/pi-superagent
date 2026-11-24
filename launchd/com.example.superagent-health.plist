@@ -3,7 +3,8 @@
 <!-- The health check. Every five minutes it runs `superagent remedy`, which reads the status contract and
      applies the remedy each code names: START a router that is down (code 1), RESTART one that is up and not
      beating (code 2, the stalled tick loop; `start` refuses a running router, so a stall needs a restart and
-     nothing else clears it), and NOTHING to a router that is healthy (0), waiting for setup (3), has a part in
+     nothing else clears it) and one whose engine runs with no tab (code 5, where a START would run a SECOND
+     engine on the old config), and NOTHING to a router that is healthy (0), waiting for setup (3), has a part in
      error (4, a restart will not fix it) or was stopped on purpose. `remedy` respects the manual stop marker on
      its own, so a deliberate stop stays deliberate, and it restarts at most once per
      PI_SUPERAGENT_RESTART_COOLDOWN_MIN (30 min), so a fault a restart cannot fix cannot restart the router

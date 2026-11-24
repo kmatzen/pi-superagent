@@ -2380,7 +2380,7 @@ describe('the sweep of settled checkouts', () => {
     try {
       for (const id of ['g1pushed0000', 'g2local00000']) {
         const dir = seedNested(root, id, false)
-        git(dir, 'remote', 'set-url', 'origin', 'https://x-access-token:secret@github.com/Research-Adobe/parfait.git')
+        git(dir, 'remote', 'set-url', 'origin', 'https://x-access-token:secret@github.com/kmatzen/parfait.git')
         git(dir, 'checkout', '-q', '-b', 'fix/green-gate')
         writeFileSync(join(dir, 'g'), id); git(dir, 'add', 'g'); git(dir, 'commit', '-q', '-m', id)
         aged(join(root, id), 9)
@@ -2395,7 +2395,7 @@ describe('the sweep of settled checkouts', () => {
         }),
       })
       expect(swept).toMatchObject({ removed: 1, keptWork: 1, keptWorkIds: ['g2local00000'] })
-      expect(asked[0], 'the repository and branch, never the credential in the URL').toMatch(/^repos\/Research-Adobe\/parfait\/compare\/[0-9a-f]{40}\.\.\.fix%2Fgreen-gate$/)
+      expect(asked[0], 'the repository and branch, never the credential in the URL').toMatch(/^repos\/kmatzen\/parfait\/compare\/[0-9a-f]{40}\.\.\.fix%2Fgreen-gate$/)
       expect(existsSync(join(root, 'g2local00000', 'repo', 'f')), 'GitHub never saw it: the only copy').toBe(true)
     } finally { rmSync(root, { recursive: true, force: true }) }
   }, 30_000)
