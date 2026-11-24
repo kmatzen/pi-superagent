@@ -311,6 +311,25 @@ describe('following a ticket\'s pull requests', () => {
     expect(t.received[1]!.human, 'a person still is one').toBe(true)
   })
 
+  it('masks a credential pasted into a pull request thread, the second door to the same store', async () => {
+    // The board is not the only way into the same trigger text a worker is handed (#928, 2026-11-24).
+    const SECRET = `ghp_${'x'.repeat(36)}`
+    const t = follower({
+      pull: async () => openPull,
+      comments: async () => [comment({ author: 'operator', body: `deploy with ${SECRET}` })],
+      reviews: async () => [review({ body: `use ${SECRET} and retry` })],
+      reviewComments: async () => [{ path: 'src/a.py', line: 3, body: `the key is ${SECRET}`, url: 'https://github.com/other/lib/pull/5#discussion_r1' }],
+    })
+    await t.f.reconcile(t.following('other/lib#5'))
+    expect(t.received.map(r => (r.meta as { via?: string }).via), 'the comment, and the review with its code comments appended')
+      .toEqual(['comment', 'review'])
+    for (const r of t.received) expect(r.text, `nothing stored carries the token: ${r.text.slice(0, 60)}`).not.toContain(SECRET)
+    const joined = t.received.map(r => r.text).join('\n')
+    expect(joined).toContain('ghp_***')
+    expect(joined, 'the numbered code comment is masked too').toContain('1. src/a.py:3: the key is ghp_***')
+    expect(t.warned, 'the mask is said, with a count and no value').toContain('pull.ingest_credential_masked')
+  })
+
   it("turns a person's comment and review on another repository's pull request into triggers on its thread, once", async () => {
     const t = follower({
       pull: async () => openPull,

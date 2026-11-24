@@ -179,6 +179,33 @@ describe('the mask, on the way out', () => {
   })
 })
 
+describe('the mask knows Slack token shapes too', () => {
+  // Shape-true, value fake. Slack's shapes belong here because this pattern is the ingest guard's whole definition of "credential-shaped".
+  // From repeats, not literals: a shape-true Slack fixture is a blocked push (GH013, measured here), and the guard scans the assembled string.
+  const seg = (n: number, c: string) => c.repeat(n)
+  const SLACK = [
+    `xoxb-${seg(13, '1')}-${seg(13, '2')}-${seg(24, 'a')}`,
+    `xoxp-${seg(13, '1')}-${seg(13, '2')}-${seg(13, '3')}-${seg(32, 'a')}`,
+    `xapp-1-A${seg(11, '1')}-${seg(20, 'a')}-${seg(20, 'b')}`,
+    `xoxe.1.A${seg(11, '1')}.${seg(24, 'a')}`,
+  ]
+
+  it.each(SLACK)('masks %s', token => {
+    expect(holdsCredential(`bot token: ${token}`), 'recognised as a credential').toBe(true)
+    const masked = redactCredentials(`bot token: ${token}`)
+    expect(masked).not.toContain(token)
+    expect(masked).toContain(token.slice(0, 4)) // the family stays readable: xoxb, xapp, xoxe
+    expect(redactCredentials(masked), 'masking is idempotent: the mask is not a fresh finding').toBe(masked)
+    expect(countCredentials(masked)).toBe(0)
+  })
+
+  it('leaves prose that merely starts with the prefix alone', () => {
+    const prose = 'the xox package, the xoxb- notes file, xoxb-not-a-token'
+    expect(countCredentials(prose)).toBe(0)
+    expect(redactCredentials(prose)).toBe(prose)
+  })
+})
+
 describe('the guard where the router reads', () => {
   it('setupProblems reports a credential in a ticket checkout and a named watched checkout', () => {
     const root = tmp()
