@@ -64,6 +64,13 @@ describe('what the thread reads when a run ends', () => {
     expect(mixed).toMatch(/ends with the work that landed/)
   })
 
+  it('the end of a pull request quotes the question nobody answered, because the ticket keeps none', () => {
+    const pr = (n: number, outcome: 'merged' | 'closed') => ({ url: `https://github.com/o/r/pull/${n}`, outcome })
+    expect(pullEndText('#400', [pr(9, 'closed')], undefined, 'Leave it closed, yes or no?'))
+      .toMatch(/\*\*The question that was open when it ended:\*\* Leave it closed, yes or no\?$/)
+    expect(pullEndText('#400', [pr(9, 'merged')], undefined)).toBe('#400 merged: https://github.com/o/r/pull/9. This ticket is done.')
+  })
+
   it('a pull request end that leaves a check owed says the check still happens and the issue stays open', () => {
     const pr = (n: number, outcome: 'merged' | 'closed') => ({ url: `https://github.com/o/r/pull/${n}`, outcome })
     expect(pullEndText('#387', [pr(9, 'merged')], '2026-11-13T03:56:17.558Z')).toBe('#387: https://github.com/o/r/pull/9 merged. '

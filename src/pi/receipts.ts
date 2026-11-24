@@ -60,19 +60,23 @@ export function receiptText(thread: string, origin: ReportOrigin, run: ReportedR
 /**
  * The engine ends a ticket with its pull requests without a word; this is the word, on the issue. Each pull
  * carries its own outcome, because a ticket can open several: the engine ends it on the LAST close, and
- * naming every pull by that one outcome told the person that a merged pull request had been closed.
+ * naming every pull by that one outcome told the person that a merged pull request had been closed. A question the
+ * worker asked and nobody answered rides along, because the ticket's end clears it and this is the thread's last word.
  */
-export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; outcome: 'merged' | 'closed' }>, checkAt?: string): string {
+export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; outcome: 'merged' | 'closed' }>,
+                            checkAt?: string, question?: string): string {
   const urls = (list: string[]): string => list.join(', ') || 'its pull request'
+  const asked = question ? `\n\n**The question that was open when it ended:** ${question}` : ''
   const merged = pulls.filter(p => p.outcome === 'merged').map(p => p.url)
   const closed = pulls.filter(p => p.outcome === 'closed').map(p => p.url)
   if (checkAt) {
     const what = [merged.length ? `${urls(merged)} merged` : '', closed.length ? `${urls(closed)} closed without merging` : ''].filter(Boolean).join(' and ')
     return `${thread}: ${what || `${urls([])} ended`}. A fresh worker still makes the check the last one asked for at ${checkAt.slice(11, 16)} UTC, `
-      + 'and this issue stays open until it reports.'
+      + 'and this issue stays open until it reports.' + asked
   }
-  if (!closed.length) return `${thread} merged: ${urls(merged)}. This ticket is done.`
-  if (!merged.length) return `${thread}: ${urls(closed)} closed without merging, so this ticket ends. A comment here starts the work again.`
-  return `${thread}: ${urls(merged)} merged and ${urls(closed)} closed without merging, so this ticket ends with the work that landed. A comment here starts the work again.`
+  if (!closed.length) return `${thread} merged: ${urls(merged)}. This ticket is done.${asked}`
+  if (!merged.length) return `${thread}: ${urls(closed)} closed without merging, so this ticket ends. A comment here starts the work again.${asked}`
+  return `${thread}: ${urls(merged)} merged and ${urls(closed)} closed without merging, so this ticket ends with the work that landed. `
+    + `A comment here starts the work again.${asked}`
 }
 

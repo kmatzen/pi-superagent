@@ -616,7 +616,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
 
   // The engine ends a ticket with its pull request but posts nothing, so the issue hears it here, once per ticket.
-  const pullEnded = (ticketId: string): void => {
+  const pullEnded = (ticketId: string, question?: string): void => {
     const ticket = repos.tickets.get(ticketId)
     const outcome = ticket?.ended?.outcome
     const channel = ticket?.channels[0]
@@ -626,7 +626,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome }] : [] })
     // One note per end: a ticket resumed on a reopened issue ends again, and its first end's note id silenced the second (2026-11-13, #387).
     outbox.send({ id: `pull-end:${ticket.id}:${ticket.ended.at}`, channel, kind: 'notice', ticketId: ticket.id,
-      text: pullEndText(channel.thread, pulls, wakes()[ticket.id]?.at) })
+      text: pullEndText(channel.thread, pulls, wakes()[ticket.id]?.at, question) })
     // The merge was the work landing: with the pull request done, the ticket has nothing left to wait on.
     finishIssue(ticket.id)
   }
@@ -653,7 +653,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const follower = new PullFollower({
     home, api: pullApi,
     openThreads: () => github?.openThreads(), positions: repos.kv,
-    self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, now: () => Date.now(),
+    self: cfg.githubSelf ?? cfg.self, bots: cfg.bots,
+    // Every other sweep reads the router's clock; a 120 s cadence on the wall clock is one no test of a close can reach.
+    now: () => (deps.now ? Date.parse(deps.now()) : Date.now()),
     // The fan-out is bounded per pass, not left to the 120 s budget, which binds only while the loop keeps its
     // cadence (measured 2026-11-09: 41 follows due at once, 12.1 s per pass).
     ...(cfg.pullReadsPerTick === undefined ? {} : { maxReads: cfg.pullReadsPerTick }),
@@ -673,13 +675,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     },
     closed: (thread, pull, outcome, at, state) => {
       const key = `github:${thread.id}`
-      const waiting = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && !f.closed)).map(t => t.id)
+      const waiting = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && !f.closed))
+      // The engine's end clears `attention`, and this note is the last thing anybody reads on that thread.
+      const asked = new Map(waiting.map(t => [t.id, t.attention?.question]))
       engine.threadClosed(thread, outcome, at)
       log.line('info', 'pull.closed', { thread: thread.id, outcome, url: pullUrl(pull), tickets: waiting.length })
-      for (const id of waiting) {
-        pullEnded(id)
-        if (outcome === 'merged') mergedPart(id, thread, pull, at, state?.mergedBy)
-        refreshTracker(id)
+      for (const t of waiting) {
+        pullEnded(t.id, asked.get(t.id))
+        if (outcome === 'merged') mergedPart(t.id, thread, pull, at, state?.mergedBy)
+        refreshTracker(t.id)
       }
     },
     // The other half of `closed`: a close written down by a read that failed (GitHub answers 404 for a private
@@ -697,6 +701,43 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       return holding.length
     },
   })
+  // A ticket's conversation in ANOTHER repository is a thread this source never polls, so its close went unseen:
+  // 14 open tickets on threads closed since 2026-11-19, 5 asking a person about a thread nobody could reopen
+  // (agent-inbox#936). Bind it and its close ends the ticket, like the ticket's own pull requests do. The probe
+  // below is not ceremony: `owner/repo#7` is an issue too, and a ticket bound to it would end on the merge of a
+  // pull request that has nothing to do with it.
+  const knownPulls = new Map<string, PullRef>()
+  const notPulls = new Set<string>()
+  /** One `gh` round trip per answer, so a pass asks about a few; a failed read caches nothing. */
+  const CHANNEL_PROBES_PER_TICK = 4
+  const followConversations = async (): Promise<void> => {
+    let probes = 0
+    for (const ticket of repos.tickets.open()) {
+      for (const channel of ticket.channels) {
+        if (channel.source !== 'github' || channel.thread.startsWith('#')) continue
+        const ref = parseThread(channel.thread, home)
+        if (!ref) continue
+        const thread = threadOfPull(ref, home)
+        const key = thread.id
+        if (ticket.follows?.some(f => f.thread.toLowerCase() === `github:${key}`)) continue
+        let pull = knownPulls.get(key)
+        if (pull === undefined && !notPulls.has(key)) {
+          if (probes >= CHANNEL_PROBES_PER_TICK) continue
+          probes += 1
+          try {
+            if (await pullApi.pull(ref.repo, ref.number)) { knownPulls.set(key, ref); pull = ref } else notPulls.add(key)
+          } catch { continue }
+        }
+        if (!pull) continue
+        try {
+          engine.bindThread(ticket.id, threadOfPull(pull, home), true)
+          log.line('info', 'pull.channel_followed', { ticket: ticket.id, thread: key })
+        } catch (error) {
+          log.line('warn', 'pull.channel_follow_failed', { ticket: ticket.id, thread: key, error: String(error).slice(0, 200) })
+        }
+      }
+    }
+  }
   // Bound before the engine reads the report: a ready report completes a ticket that follows no open pull request.
   const follow = (ticket: Ticket, urls: readonly string[]): readonly string[] => {
     const followed: string[] = []
@@ -1016,6 +1057,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       }
     }
     const reconcileAt = Date.now()
+    enter('follows')
+    await followConversations()
     enter('reconcile')
     try {
       pulls = await follower.reconcile(repos.tickets.open())
