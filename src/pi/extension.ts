@@ -11,10 +11,10 @@ const runGit = promisify(execFile)
 import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type ThreadRef, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
-import {GithubSource, REPLY_MARKER, type GithubApi, type IssueState} from './source-github.ts'
+import {GithubSource, PRIORITY_GRANTS_PER_POLL, REPLY_MARKER, WON_SLOT_KEY, wonSlotReason, type GithubApi, type IssueState} from './source-github.ts'
 import { ghApi, ghCall, ghPulls } from './gh-api.ts'
 import { redactCredentials } from './git-credentials.ts'
-import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, type PullApi, type PullRef, type PullState, type ReconcileReport } from './pulls.ts'
+import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, wakeOnChecks, type ChecksState, type CheckWakePorts, type PullApi, type PullRef, type PullState, type ReconcileReport } from './pulls.ts'
 import { PullTracker } from './tracker.ts'
 import { CommentOutbox } from './outbox.ts'
 import { IssueCloser } from './issue-closer.ts'
@@ -69,7 +69,15 @@ export const standingAskEntitled = (
   return !liveWorkers.some(w => ticket.id !== undefined && w.ticketId === ticket.id)
 }
 
+/**
+ * Launches one issue gets from the standing queue per day when the operator sets nothing; the setting is
+ * `PI_SUPERAGENT_REGRANT_CAP`. Measured 2026-11-23: eight threads stuck at 2 of 2 with `starved=8
+ * oldestStarvedH=65.6`, and no knob — the lane was widened by editing this file, and the next install lost it.
+ */
 export const REGRANT_CAP = 2
+
+/** A labelled ask is an explicit operator request, so 6 a day (3x) where the queue gets 2: measured 2026-11-19, those 2 left 43 starved tickets and zero launches, and one launch per poll bounds the loop. */
+export const PRIORITY_REGRANT_CAP = 6
 
 /** May a thread be re-granted? An open ticket: by its work's state. No ticket ever: yes, it is starved work, unless
  *  its request is with the judge now. Only ended tickets: no, the work is decided (finished, awaiting its pull
@@ -82,11 +90,14 @@ export const regrantable = (
 ): boolean => open ? standingAskEntitled(open, liveWorkers) : !everTicketed() && !judging()
 export const REGRANT_KEY = 'router:regrant'
 export interface RegrantCounters { day: string, perIssue: Record<string, number> }
+/** Grants this issue already spent today. Counters from another day read as zero, which is what the day rollover means. */
+export const regrantUsed = (counters: RegrantCounters | undefined, key: string, day: string): number =>
+  counters?.day === day ? counters.perIssue[key] ?? 0 : 0
 export const regrantPlan = (counters: RegrantCounters | undefined, key: string, day: string,
                             cap = REGRANT_CAP): RegrantCounters | undefined => {
-  const today = counters?.day === day ? counters : { day, perIssue: {} }
-  const used = today.perIssue[key] ?? 0
-  return used >= cap ? undefined : { day, perIssue: { ...today.perIssue, [key]: used + 1 } }
+  const used = regrantUsed(counters, key, day)
+  return used >= cap ? undefined
+    : { day, perIssue: { ...(counters?.day === day ? counters.perIssue : {}), [key]: used + 1 } }
 }
 
 
@@ -200,6 +211,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     sdkPath: cfg.sdkPath ?? 'package-name', githubRepo: cfg.githubRepo ?? '',
     githubAs: cfg.githubTokenFile ? 'token file' : 'gh login',
     maxWorkers: cfg.maxConcurrent ?? 4, tickMs: cfg.tickMs ?? 30_000,
+    regrantCap: cfg.regrantCap ?? REGRANT_CAP, priorityRegrantCap: cfg.priorityRegrantCap ?? PRIORITY_REGRANT_CAP,
   })
   const issueOf = (m: OutboundMessage): string | undefined =>
     m.channel.source === 'github' ? (m.channel.address as { issue?: string } | undefined)?.issue : undefined
@@ -273,17 +285,22 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         onOpen: (open) => { openBoard = open },
         // The standing queue, given its launch back: the source offers every open issue that is not an ask to
         // the operator, this decides whether the work qualifies, and the counter decides how often.
-        regrant: (issue, key) => {
+        regrant: (issue, key, priority = false) => {
           const onThread = (t: Ticket): boolean => t.channels[0]?.thread === key
           const ask = repos.tickets.open().find(onThread)
           // A new issue's request sits with the judge for a poll or two, and granting it then spent the day's cap.
           const judging = (): boolean => { const thread = repos.threads.get(`github:${key}`); return !!thread?.evaluating || !!thread?.pending.length }
           if (!regrantable(ask, () => repos.tickets.list().some(onThread), executor.workers(), judging)) return false
           const day = (deps.now ? deps.now() : new Date().toISOString()).slice(0, 10)
-          const next = regrantPlan(repos.kv.get<RegrantCounters>(REGRANT_KEY), key, day)
-          if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day }); return false }
+          const cap = priority ? cfg.priorityRegrantCap ?? PRIORITY_REGRANT_CAP : cfg.regrantCap ?? REGRANT_CAP
+          const counters = repos.kv.get<RegrantCounters>(REGRANT_KEY)
+          const next = regrantPlan(counters, key, day, cap)
+          // A capped line with no counter read exactly like a healthy lane: eight threads were each at 2 of 2.
+          if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day, used: regrantUsed(counters, key, day), cap }); return false }
           repos.kv.set(REGRANT_KEY, next)
-          log.line('info', 'regrant.granted', { thread: key, issue, ticket: ask?.id, day })
+          const wonSlot = wonSlotReason(priority, (ask?.undelivered.length ?? 0) > 0)
+          repos.kv.set(WON_SLOT_KEY, { ...(repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {}), [key]: wonSlot })
+          log.line('info', 'regrant.granted', { thread: key, issue, ticket: ask?.id, day, wonSlot })
           return ask?.assignments.at(-1)?.id ?? `${day}.${next.perIssue[key]}`
         },
       }, repos.kv)
@@ -414,6 +431,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // Kept across restarts: rendered from an empty map, every status comment lost its titles and states for a pass.
   const PULL_STATES = 'router:pull-states'
   const pullStates = new Map<string, PullState>(Object.entries(repos.kv.get<Record<string, PullState>>(PULL_STATES) ?? {}))
+  // The follower's `checksSeen`: a running build, not an outcome, so it is stored and never wakes anybody.
+  const recordChecks = (id: string, checks: { sha: string; state: ChecksState }): void => {
+    const before = pullStates.get(id)
+    if (!before || (before.checks?.sha === checks.sha && before.checks.state === checks.state)) return
+    pullStates.delete(id)
+    pullStates.set(id, { ...before, checks })
+    for (const stale of [...pullStates.keys()].slice(0, Math.max(0, pullStates.size - 500))) pullStates.delete(stale)
+    repos.kv.set(PULL_STATES, Object.fromEntries(pullStates))
+  }
   const tracker = new PullTracker({
     kv: repos.kv, home: cfg.githubRepo ?? '', state: id => pullStates.get(id),
     ...(githubApi?.upsertComment ? { write: (issue: number, comment: number | undefined, body: string, repo?: string) => githubApi.upsertComment!(issue, comment, body, repo) } : {}),
@@ -425,6 +451,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     if (ticket) void tracker.refresh(ticket)
   }
 
+  // agent-inbox#667: the router can see this ticket's CI, so its next check is the checks finishing, not a timer.
+  const checksPending = (ticket: Ticket): boolean => (ticket.follows ?? []).some(follow =>
+    !follow.closed && follow.thread.startsWith('github:')
+      && pullStates.get(follow.thread.slice('github:'.length))?.checks?.state === 'pending')
   // One message per assignment, ending and text; a failed launch drops the text, since it retries every poll.
   const announce = (ticket: Ticket, assignmentId: string, origin: ReportOrigin, run: ReportedRun, relaunched: boolean): void => {
     const channel = ticket.channels[0]
@@ -432,7 +462,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const said = origin === 'launch' ? ''
       : createHash('sha1').update(JSON.stringify([run.state, run.summary, run.question ?? null, run.pullRequests ?? []])).digest('hex').slice(0, 12)
     outbox.send({ id: `report:${assignmentId}:${origin}:${said}`, channel, kind: 'reply', ticketId: ticket.id,
-      text: receiptText(channel.thread, origin, run, relaunched, tracker.url(ticket.id)) })
+      text: receiptText(channel.thread, origin, run, relaunched, tracker.url(ticket.id), checksPending(ticket)) })
   }
   // One fresh worker per crash, per ticket per process; the engine's retry requeues comments the dead one never read.
   const relaunched = new Set<string>()
@@ -496,6 +526,65 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // at a set time, and the router keeps that appointment without a session or a slot held in between.
   const WAKES = 'router:wakes'
   const wakes = (): Record<string, { at: string; note: string }> => repos.kv.get<Record<string, { at: string; note: string }>>(WAKES) ?? {}
+
+  // agent-inbox#667: the event that replaces the timer above. A worker that reported `waiting` scheduled a check at
+  // HH:MM; when the router already knows that outcome it calls the worker back now and spends the timer — 82 of 155
+  // status reports in one 24 h window were a session spent re-reading a check that had finished an hour earlier.
+  // The rules are `wakeOnChecks` in pulls.ts; this is its ports: the wake table, the fired journal, the recruit.
+  const CHECK_EVENTS = 'router:check-wakes'
+  const firedChecks = (): Record<string, string> => repos.kv.get<Record<string, string>>(CHECK_EVENTS) ?? {}
+  const checkWakePorts: CheckWakePorts = {
+    scheduled: ticketId => wakes()[ticketId]?.at,
+    spend: ticketId => {
+      const rows = wakes()
+      delete rows[ticketId]
+      repos.kv.set(WAKES, rows)
+    },
+    fired: (ticketId, sha, reason) => Boolean(firedChecks()[`${ticketId}:${sha}:${reason}`]),
+    mark: (ticketId, sha, reason) => {
+      const fired = firedChecks()
+      fired[`${ticketId}:${sha}:${reason}`] = deps.now ? deps.now() : new Date().toISOString()
+      // Without a bound this journal of every head SHA ever settled grows for the life of the database.
+      for (const stale of Object.keys(fired).sort().slice(0, Math.max(0, Object.keys(fired).length - 500))) delete fired[stale]
+      repos.kv.set(CHECK_EVENTS, fired)
+    },
+    recruit: (ticket, pull, checks, reason, scheduledAt) => {
+      const channel = ticket.channels[0]
+      if (!channel) return
+      const short = checks.sha.slice(0, 10)
+      const command = `gh pr checks --repo ${pull.repo} ${pull.number}`
+      const news = reason === 'checks_failed'
+        ? `The checks on ${pullUrl(pull)} finished FAILED at head ${short}. Read them with \`${command}\`, fix what they name, push, and report.`
+        : `The checks on ${pullUrl(pull)} finished PASSED at head ${short}, and auto-merge is not armed, so a person has `
+          + 'to merge it. Report the result, or make the follow-on change the pull request needs.'
+      const note = wakes()[ticket.id]?.note ?? ''
+      engine.receive({
+        id: `wake:${ticket.id}:checks:${checks.sha}:${reason}`, source: channel.source,
+        threads: [{ source: channel.source, id: channel.thread }],
+        actor: { source: channel.source, id: 'router' }, human: true,
+        at: deps.now ? deps.now() : new Date().toISOString(),
+        text: `Event, not a timer: ${news}\n\nThe last worker on this ticket asked for a check at ${scheduledAt.slice(11, 16)} UTC, and said:\n\n${note}`,
+        channel, meta: { via: 'checks', author: '' },
+      })
+    },
+    log: (ticketId, reason, url) => log.line('info', 'wake.event', { ticket: ticketId, reason, url }),
+  }
+  // A worker that reports `waiting` after its CI already went red must not wait for its own timer: the outcome sits
+  // in the states the last pull read left behind, so the wake fires the moment the timer is scheduled.
+  const wakeFromKnownChecks = (ticketId: string): void => {
+    const ticket = repos.tickets.get(ticketId)
+    if (!ticket || ticket.ended) return
+    for (const follow of ticket.follows ?? []) {
+      if (follow.closed || !follow.thread.startsWith('github:')) continue
+      const id = follow.thread.slice('github:'.length)
+      const state = pullStates.get(id)
+      const checks = state?.checks
+      const pull = parseThread(id, home)
+      if (!checks || !pull || checks.state === 'pending' || checks.state === 'none') continue
+      wakeOnChecks([ticket], { source: 'github', id }, pull, checks, state, checkWakePorts)
+      return
+    }
+  }
   const scheduleWake = (ticketId: string, run: ReportedRun): void => {
     const rows = wakes()
     if (!run.wakeAt && !rows[ticketId]) return
@@ -503,6 +592,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     else delete rows[ticketId]
     repos.kv.set(WAKES, rows)
     log.line('info', run.wakeAt ? 'wake.scheduled' : 'wake.cleared', { ticket: ticketId, ...(run.wakeAt ? { at: run.wakeAt } : {}) })
+    if (run.wakeAt) wakeFromKnownChecks(ticketId)
   }
   const fireWakes = (): void => {
     const rows = wakes()
@@ -580,7 +670,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       const author = String(trigger.meta?.author ?? trigger.actor?.id ?? '')
       if (author && isListed(author, new Set([cfg.githubSelf ?? cfg.self, ...(cfg.bots ?? [])]))) return false
       // 'label' is how a grant was spelled by triggers stored before the labels were deleted (2026-11-11).
-      return !['grant', 'label'].includes(String(trigger.meta?.via ?? 'comment'))
+      // 'checks' is this router's own event wake, not speech: a red build must not renew the ticket's licence to recruit.
+      return !['grant', 'label', 'checks'].includes(String(trigger.meta?.via ?? 'comment'))
     })
   const capRepeats = (ticket: Ticket, run: ReportedRun): void => {
     const cap = cfg.reportCap ?? 3
@@ -673,6 +764,16 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       for (const stale of [...pullStates.keys()].slice(0, Math.max(0, pullStates.size - 500))) pullStates.delete(stale)
       repos.kv.set(PULL_STATES, Object.fromEntries(pullStates))
     },
+    // Remembered for the schedule-time wake above, and handed to every ticket that follows this thread and asked for a check.
+    checksSettled: (thread, pull, checks, state) => {
+      const before = pullStates.get(thread.id)
+      pullStates.delete(thread.id)
+      pullStates.set(thread.id, { ...before, ...state, checks })
+      for (const stale of [...pullStates.keys()].slice(0, Math.max(0, pullStates.size - 500))) pullStates.delete(stale)
+      repos.kv.set(PULL_STATES, Object.fromEntries(pullStates))
+      wakeOnChecks(repos.tickets.open(), thread, pull, checks, state, checkWakePorts)
+    },
+    checksSeen: (thread, _pull, checks) => recordChecks(thread.id, checks),
     closed: (thread, pull, outcome, at, state) => {
       const key = `github:${thread.id}`
       const waiting = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && !f.closed))
@@ -907,6 +1008,16 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     },
     ...(cfg.maxConcurrent ? { maxConcurrent: cfg.maxConcurrent } : {}),
     launchBlocked: () => diskCritical,
+    // The label is the operator saying "this one next", and it rides the poll's own board read: no new GitHub request.
+    priorityOf: ticket => github?.isPriority(ticket.channels[0]?.thread ?? '') === true,
+    priorityPerTick: PRIORITY_GRANTS_PER_POLL,
+    laneWon: (ticket, _assignment, lane) => {
+      const key = ticket.channels[0]?.thread ?? ''
+      const wonSlot = wonSlotReason(lane === 'priority',
+        (repos.tickets.open().find(t => t.id === ticket.id)?.undelivered.length ?? 0) > 0)
+      repos.kv.set(WON_SLOT_KEY, { ...(repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {}), [key]: wonSlot })
+      log.line('info', 'launch.granted', { ticket: ticket.id, thread: key, lane, wonSlot })
+    },
   })
   executorRef = executor
 
@@ -927,8 +1038,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         a.kind = 'ignore' as AssessmentOutcome['kind']
         a.reason = `${thread} already has open ticket ${owner.id}; its worker gets this thread's messages`
       }
-      log.line('info', 'eval.decided', { eval: a.evalId, kind: a.kind, reason: (a.reason ?? '').slice(0, 300) })
       assessor.decide(a.evalId, a as unknown as AssessmentOutcome)
+      log.line('info', 'eval.decided', { eval: a.evalId, kind: a.kind, reason: (a.reason ?? '').slice(0, 300) })
       return text(`decided ${a.kind}`)
     },
   }
@@ -1741,8 +1852,8 @@ function checkoutsIn(dir: string, depth = 3): string[] {
 const realDirectory = (path: string): boolean => { try { return lstatSync(path).isDirectory() } catch { return false } }
 
 /** One checkout that holds work keeps the whole workspace: its clones may be each other's worktrees. */
-async function holdsWork(checkouts: readonly string[], pushed?: (checkout: string) => Promise<boolean>): Promise<boolean> {
-  for (const c of checkouts) if (await unsafeCheckout(c, pushed)) return true
+async function holdsWork(checkouts: readonly string[], pushed?: (checkout: string) => Promise<boolean>, home?: string): Promise<boolean> {
+  for (const c of checkouts) if (await unsafeCheckout(c, pushed, home)) return true
   return false
 }
 
@@ -1771,18 +1882,27 @@ export function lenders(root: string, names: readonly string[]): Set<string> {
  *  does not ignore (an agent's uncommitted script or note, and the agent may come back for it). Ignored files — the
  *  .venv, build output, downloaded models — do not count: they are rebuilt. A git that cannot answer is unsafe, and
  *  so is a repository with a second worktree: deleting either side breaks the other. */
-async function unsafeCheckout(dir: string, pushed?: (checkout: string) => Promise<boolean>): Promise<boolean> {
+async function unsafeCheckout(dir: string, pushed?: (checkout: string) => Promise<boolean>, home?: string): Promise<boolean> {
   if (await unpushedCommits(dir) > 0 && !(await pushed?.(dir))) return true
   for (const args of [['status', '--porcelain'], ['stash', 'list']]) {
     try {
       if ((await runGit('git', ['-C', dir, ...args], { timeout: 20_000 })).stdout.trim().length > 0) return true
     } catch { return true }
   }
+  // A worktree whose other half lives in another workspace breaks when this one goes. Inside the same workspace they
+  // go together: 39 of the checkouts the sweep kept on 2026-11-18 were a worker's own `worktrees/<repo>/<branch>`.
   try {
     const { stdout } = await runGit('git', ['-C', dir, 'worktree', 'list', '--porcelain'], { timeout: 20_000 })
-    if (stdout.split('\n').filter(l => l.startsWith('worktree ') && existsSync(l.slice(9))).length > 1) return true
+    const trees = stdout.split('\n').filter(l => l.startsWith('worktree ') && existsSync(l.slice(9))).map(l => l.slice(9))
+    if (home === undefined ? trees.length > 1 : trees.some(t => !within(t, home))) return true
   } catch { return true }
   return false
+}
+
+const within = (path: string, dir: string): boolean => {
+  const real = (p: string): string => { try { return realpathSync(p) } catch { return resolve(p) } }
+  const [p, d] = [real(path), real(dir)]
+  return p === d || p.startsWith(`${d}/`)
 }
 
 /**
@@ -1832,7 +1952,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
     if (!checkouts.length) {
       if (readdirSync(dir).length === 0) report.empty++; else report.bare++
     }
-    if (await holdsWork(checkouts, pressure.pushed)) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
+    if (await holdsWork(checkouts, pressure.pushed, dir)) { report.keptWork++; report.keptWorkIds.push(entry.name); continue }
     if (isOpen(entry.name) || borrowedFrom(entry.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++ } catch { /* a busy checkout lives to the next start */ }
   }
@@ -1845,7 +1965,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
   for (const e of kept.filter(e => !isOpen(e.name)).sort((a, b) => a.at - b.at)) {
     if (bytes <= maxBytes) break
     const dir = join(root, e.name)
-    if (await holdsWork(checkoutsIn(dir), pressure.pushed)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
+    if (await holdsWork(checkoutsIn(dir), pressure.pushed, dir)) { report.keptWork++; report.keptWorkIds.push(e.name); continue }
     const size = await sizeOf(dir)
     if (isOpen(e.name) || borrowedFrom(e.name)) continue
     try { await rm(dir, { recursive: true, force: true }); report.removed++; bytes -= size } catch { /* next sweep's problem */ }
@@ -1867,7 +1987,7 @@ export async function sweepWorktrees(root: string, open: ReadonlySet<string> | (
       await rm(join(root, e.name, WORKER_TMP), { recursive: true, force: true }).catch(() => {})
       const checkouts = checkoutsIn(join(root, e.name))
       if (!checkouts.length) continue
-      if (await holdsWork(checkouts, pressure.pushed)) {
+      if (await holdsWork(checkouts, pressure.pushed, join(root, e.name))) {
         // The work stays; its environments do not: a .venv is rebuilt from the lock file, and one was 7.6 GB.
         for (const c of checkouts) {
           if (!existsSync(join(c, '.venv'))) continue
@@ -2047,6 +2167,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const workerQuietMinutes = positiveNumber('PI_SUPERAGENT_WORKER_QUIET_MINUTES', env.PI_SUPERAGENT_WORKER_QUIET_MINUTES)
   const deadlineHours = positiveNumber('PI_SUPERAGENT_WORKER_DEADLINE_HOURS', env.PI_SUPERAGENT_WORKER_DEADLINE_HOURS)
   const reportCap = positiveNumber('PI_SUPERAGENT_REPORT_CAP', env.PI_SUPERAGENT_REPORT_CAP)
+  const regrantCap = positiveNumber('PI_SUPERAGENT_REGRANT_CAP', env.PI_SUPERAGENT_REGRANT_CAP)
+  const priorityRegrantCap = positiveNumber('PI_SUPERAGENT_PRIORITY_REGRANT_CAP', env.PI_SUPERAGENT_PRIORITY_REGRANT_CAP)
   const workerMemoryGb = positiveNumber('PI_SUPERAGENT_WORKER_MEMORY_GB', env.PI_SUPERAGENT_WORKER_MEMORY_GB)
   const workerCpus = positiveNumber('PI_SUPERAGENT_WORKER_CPUS', env.PI_SUPERAGENT_WORKER_CPUS)
   const workerTasks = positiveNumber('PI_SUPERAGENT_WORKER_TASKS', env.PI_SUPERAGENT_WORKER_TASKS)
@@ -2073,6 +2195,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(workerQuietMinutes === undefined ? {} : { workerQuietMinutes }),
     ...(deadlineHours === undefined ? {} : { workerDeadlineHours: deadlineHours }),
     ...(reportCap === undefined ? {} : { reportCap: Math.floor(reportCap) }),
+    ...(regrantCap === undefined ? {} : { regrantCap: Math.floor(regrantCap) }),
+    ...(priorityRegrantCap === undefined ? {} : { priorityRegrantCap: Math.floor(priorityRegrantCap) }),
     workerLimits: {
       ...(env.PI_SUPERAGENT_WORKER_LIMITS === 'off' ? { off: true } : {}),
       ...(workerMemoryGb === undefined ? {} : { memoryGb: workerMemoryGb }),

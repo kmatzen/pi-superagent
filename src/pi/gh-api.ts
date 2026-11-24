@@ -146,7 +146,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
 
     async issues(state) {
       // GitHub pages at 100; an unpaginated read hides every issue past the newest page, forever.
-      const rows: Array<{ number: number; title: string; body?: string | null; user?: { login: string }; author_association?: string; created_at: string; updated_at: string; pull_request?: unknown }> = []
+      const rows: Array<{ number: number; title: string; body?: string | null; user?: { login: string }; author_association?: string; created_at: string; updated_at: string; pull_request?: unknown; labels?: Array<{ name?: string }> }> = []
       for (let page = 1; ; page += 1) {
         const got = JSON.parse((await call(['api', `repos/${options.repo}/issues?state=${state}&per_page=100&page=${page}`])) || '[]')
         rows.push(...got)
@@ -156,6 +156,7 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       return rows.filter(r => !r.pull_request).map(r => ({
         issue: r.number, title: r.title, body: r.body ?? '',
         author: r.user?.login ?? 'anonymous', association: associationOf(r), createdAt: r.created_at, updatedAt: r.updated_at,
+        labels: (r.labels ?? []).map(l => l.name ?? '').filter(Boolean),
       }))
     },
 
@@ -235,6 +236,10 @@ export function ghApi(options: GithubApiOptions): GithubApi {
   }
 }
 
+// GitHub's rollup of one commit's checks: REST needs two calls for it and still misses one half.
+const CHECKS_QUERY = 'query($owner:String!,$name:String!,$ref:String!){ repository(owner:$owner,name:$name){'
+  + ' object(expression:$ref){ ... on Commit { statusCheckRollup { state } } } } }'
+
 /** Pull requests in any repository the operator's gh can read, by number: the ones tickets follow. */
 export function ghPulls(options: GhOptions = {}): PullApi {
   const call = ghCall(options)
@@ -268,17 +273,32 @@ export function ghPulls(options: GhOptions = {}): PullApi {
       try {
         const r = JSON.parse(await call(['api', `repos/${repo}/pulls/${number}`])) as
           { state: string; merged_at?: string | null; closed_at?: string | null; mergeable?: boolean | null; created_at: string;
-            title?: string; draft?: boolean; mergeable_state?: string; merged_by?: { login?: string } | null }
+            title?: string; draft?: boolean; mergeable_state?: string; merged_by?: { login?: string } | null;
+            head?: { sha?: string }; auto_merge?: unknown }
         const closedAt = r.merged_at ?? r.closed_at
         return { open: r.state === 'open', merged: Boolean(r.merged_at), mergeable: r.mergeable ?? null, createdAt: r.created_at, ...(closedAt ? { closedAt } : {}),
           ...(r.title ? { title: r.title } : {}), ...(r.draft !== undefined ? { draft: r.draft } : {}),
-          ...(r.mergeable_state ? { mergeableState: r.mergeable_state } : {}), ...(r.merged_by?.login ? { mergedBy: r.merged_by.login } : {}) }
+          ...(r.mergeable_state ? { mergeableState: r.mergeable_state } : {}), ...(r.merged_by?.login ? { mergedBy: r.merged_by.login } : {}),
+          ...(r.head?.sha ? { headSha: r.head.sha } : {}), ...(r.auto_merge !== undefined && r.auto_merge !== null ? { autoMergeArmed: true } : {}) }
       } catch (error) {
         if (!/HTTP 404|Not Found/i.test(String(error))) throw error
         if (await repoReadable(repo)) return undefined
         throw new Error(`HTTP 404 reading pull request ${repo}#${number}, and this account cannot read ${repo} either: `
           + 'GitHub answers 404 for a private repository it cannot see, so the pull request is unreadable, not absent')
       }
+    },
+    async checks(repo, sha) {
+      // `expression` takes the SHA as a String; as a GitObjectID variable GitHub answers Type mismatch.
+      const [owner, name] = repo.split('/')
+      const out = JSON.parse(await call(['api', 'graphql', '-f', `query=${CHECKS_QUERY}`, `-f=owner=${owner}`, `-f=name=${name}`, `-f=ref=${sha}`])) as
+        { data?: { repository?: { object?: { statusCheckRollup?: { state?: string } | null } } }, errors?: unknown[] }
+      if (out.errors?.length) throw new Error(`graphql check rollup for ${repo}@${sha.slice(0, 10)}: ${JSON.stringify(out.errors[0]).slice(0, 200)}`)
+      const state = out.data?.repository?.object?.statusCheckRollup?.state
+      if (state === undefined || state === null) return 'none'
+      if (state === 'SUCCESS') return 'passed'
+      // The enum's rest (ERROR, FAILURE, TIMED_OUT, CANCELLED, ACTION_REQUIRED) is a red build; EXPECTED is queued.
+      if (state === 'PENDING' || state === 'EXPECTED') return 'pending'
+      return 'failed'
     },
     async comments(repo, number, since) {
       return paged(call, page => `repos/${repo}/issues/${number}/comments?${since ? `since=${encodeURIComponent(since)}&` : ''}page=${page}`,
