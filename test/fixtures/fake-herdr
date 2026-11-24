@@ -1,12 +1,32 @@
 #!/usr/bin/env bash
 # herdr stand-in for scripts/superagent: workspaces, tabs and agents are files, so the script's contract is
 # testable without a terminal. JSON results on stdout, JSON errors on stderr with status 1, like herdr.
+#
+# The tab and the engine are separate knobs on purpose: a fixture that ties them together cannot express the
+# fault, which is one reporting up while the other is gone.
+#
+# Knobs a spec sets in the child's environment:
+#   FAKE_HERDR_DOWN          every call fails: no herdr server on this box
+#   FAKE_HERDR_BUSY=n        the tab's shell is still starting for the first n `agent start` attempts
+#   FAKE_HERDR_READY=FILE    an `agent start` writes FILE, standing in for pi writing $STATE/ready
+#   FAKE_HERDR_ENGINE=PILOT  an `agent start` spawns the engine too: PILOT is exec'd detached with
+#                            PI_SUPERAGENT_ROLE=router, recording its own pid in $DIR/engine.pid and, when
+#                            PI_SUPERAGENT_STATE is set, in $STATE/panel.pid — the file pi's extension writes
+#                            when its panel binds. PILOT must be an executable the engine probe can name: on
+#                            Linux the probe tests comm, and a copy of /bin/sleep is named `pi`.
+#   FAKE_HERDR_STUCK=1       pi ignores ctrl+c, so `stop` has to close the tab
 DIR="${FAKE_HERDR_DIR:?}"
 mkdir -p "$DIR"
 printf '%s\n' "$*" >> "$DIR/calls"
 fail() { printf '{"error":{"code":"%s","message":"%s"}}\n' "$1" "$2" >&2; exit 1; }
 [ -n "${FAKE_HERDR_DOWN:-}" ] && fail server_unreachable "no herdr server"
 arg() { local want="$1"; shift; while [ $# -gt 0 ]; do [ "$1" = "$want" ] && { echo "$2"; return; }; shift; done; }
+die_engine() {
+  [ -f "$DIR/engine.pid" ] || return 0
+  local e; e="$(cat "$DIR/engine.pid")"
+  { kill -TERM "$e" 2>/dev/null; sleep 0.3; kill -KILL "$e" 2>/dev/null; } || true
+  rm -f "$DIR/engine.pid"
+}
 
 case "$1 $2" in
   "workspace list")
@@ -24,7 +44,7 @@ case "$1 $2" in
   "tab rename"|"pane run") echo '{"result":{"type":"ok"}}' ;;
   "tab close")
     pane="w1:p${3#w1:t}"
-    for f in "$DIR"/agent.*; do [ -f "$f" ] && [ "$(cat "$f")" = "$pane" ] && rm -f "$f"; done
+    for f in "$DIR"/agent.*; do [ -f "$f" ] && [ "$(cat "$f")" = "$pane" ] && { rm -f "$f"; die_engine; }; done
     echo '{"result":{"type":"ok"}}' ;;
   "agent start")
     name="$3"; pane="$(arg --pane "$@")"
@@ -34,7 +54,18 @@ case "$1 $2" in
     [ -f "$DIR/agent.$name" ] && fail agent_name_in_use "agent $name already exists"
     printf '%s' "$pane" > "$DIR/agent.$name"
     printf '%s\n' "$*" > "$DIR/start.$name.args"
-    [ -n "${FAKE_HERDR_READY:-}" ] && : > "$FAKE_HERDR_READY"
+    if [ -n "${FAKE_HERDR_READY:-}" ]; then
+      printf '{"at":"%s","githubRepo":"o/r"}\n' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$FAKE_HERDR_READY"
+    fi
+    if [ -n "${FAKE_HERDR_ENGINE:-}" ]; then
+      [ -x "$FAKE_HERDR_ENGINE" ] || { printf 'fake-herdr: FAKE_HERDR_ENGINE=%s is no executable\n' "$FAKE_HERDR_ENGINE" >&2; exit 97; }
+      # The engine names its OWN pid: `setsid` can fork, and a pid naming a process that exited at once is
+      # the stale-panel.pid fault the probe defends against. pi writes this file when its panel binds.
+      setsid sh -c 'echo "$$" > "$2"; [ -n "$3" ] && echo "$$" > "$3"; exec env PI_SUPERAGENT_ROLE=router "$1" 600' \
+        sh "$FAKE_HERDR_ENGINE" "$DIR/engine.pid" "${PI_SUPERAGENT_STATE:+${PI_SUPERAGENT_STATE%/}/panel.pid}" \
+        >/dev/null 2>&1 < /dev/null &
+      for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$DIR/engine.pid" ] && break; sleep 0.1; done
+    fi
     printf '{"result":{"type":"agent_started","agent":{"name":"%s","pane_id":"%s","agent":"pi","agent_status":"idle"},"argv":[]}}\n' "$name" "$pane" ;;
   "agent get")
     [ -f "$DIR/agent.$3" ] || fail agent_not_found "agent target $3 not found"
@@ -42,7 +73,7 @@ case "$1 $2" in
   "agent send-keys")
     [ -f "$DIR/agent.$3" ] || fail agent_not_found "agent target $3 not found"
     # In pi a second ctrl+c exits, unless the test says this pi is stuck.
-    case " $* " in *" ctrl+c ctrl+c "*) [ -z "${FAKE_HERDR_STUCK:-}" ] && rm -f "$DIR/agent.$3" ;; esac
+    case " $* " in *" ctrl+c ctrl+c "*) [ -z "${FAKE_HERDR_STUCK:-}" ] && { rm -f "$DIR/agent.$3"; die_engine; } ;; esac
     echo '{"result":{"type":"ok"}}' ;;
   *) fail bad_request "unexpected: $*" ;;
 esac
