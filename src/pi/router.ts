@@ -65,6 +65,10 @@ export interface RouterConfig {
   policyVersion?: string
   /** Serve the panel and the management API on 127.0.0.1:port; unset means no panel. */
   panelPort?: number
+  /** Extra Host names the panel answers, for a reverse proxy on a box address. Localhost always answers. */
+  panelHosts?: string[]
+  /** Require the panel token on reads too, for a panel a proxy exposes beyond localhost. */
+  panelTokenAllRequests?: boolean
   prepare?: string
   githubRepo?: string
   githubSelf?: string
@@ -161,7 +165,7 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   '(make -j4, pytest -n4, not an unbounded fan-out), avoid pulling huge caches, and stop every process',
   'you started before you report.',
   'Its disk is shared and small, and it filled to 0 bytes twice: never download model weights, datasets or checkpoints',
-  'onto it — that work runs on a Pluto pod. Write scratch to $TMPDIR, which is inside your workspace, never to /tmp: /tmp is a',
+  'onto it — that work runs on a remote pod. Write scratch to $TMPDIR, which is inside your workspace, never to /tmp: /tmp is a',
   'small RAM disk. Before a ready report delete what you made that is not code (outputs, downloads, a .venv you no longer',
   'need). The router clears shared caches and idle checkouts when the disk runs low, and starts no new worker while it is',
   'nearly full.',

@@ -89,7 +89,7 @@ export const regrantable = (
   judging: () => boolean = () => false,
 ): boolean => open ? standingAskEntitled(open, liveWorkers) : !everTicketed() && !judging()
 export const REGRANT_KEY = 'router:regrant'
-export interface RegrantCounters { day: string, perIssue: Record<string, number> }
+export interface RegrantCounters { day: string, perIssue: Record<string, number>, cappedOn?: Record<string, string> }
 /** Grants this issue already spent today. Counters from another day read as zero, which is what the day rollover means. */
 export const regrantUsed = (counters: RegrantCounters | undefined, key: string, day: string): number =>
   counters?.day === day ? counters.perIssue[key] ?? 0 : 0
@@ -296,7 +296,16 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
           const counters = repos.kv.get<RegrantCounters>(REGRANT_KEY)
           const next = regrantPlan(counters, key, day, cap)
           // A capped line with no counter read exactly like a healthy lane: eight threads were each at 2 of 2.
-          if (!next) { log.line('info', 'regrant.capped', { thread: key, issue, day, used: regrantUsed(counters, key, day), cap }); return false }
+          if (!next) {
+            // Said once per thread per day: the queue polls every 45 seconds, and six threads that re-read their
+            // own body logged 480 refusals in an hour, which the operator read as the batch churning (2026-11-24).
+            if (counters?.cappedOn?.[key] !== day) {
+              log.line('info', 'regrant.capped', { thread: key, issue, day, used: regrantUsed(counters, key, day), cap })
+              repos.kv.set(REGRANT_KEY, { day, perIssue: counters?.perIssue ?? {},
+                cappedOn: { ...(counters?.cappedOn ?? {}), [key]: day } })
+            }
+            return false
+          }
           repos.kv.set(REGRANT_KEY, next)
           const wonSlot = wonSlotReason(priority, (ask?.undelivered.length ?? 0) > 0)
           repos.kv.set(WON_SLOT_KEY, { ...(repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {}), [key]: wonSlot })
@@ -451,7 +460,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     if (ticket) void tracker.refresh(ticket)
   }
 
-  // agent-inbox#667: the router can see this ticket's CI, so its next check is the checks finishing, not a timer.
+  // inbox#667: the router can see this ticket's CI, so its next check is the checks finishing, not a timer.
   const checksPending = (ticket: Ticket): boolean => (ticket.follows ?? []).some(follow =>
     !follow.closed && follow.thread.startsWith('github:')
       && pullStates.get(follow.thread.slice('github:'.length))?.checks?.state === 'pending')
@@ -527,7 +536,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const WAKES = 'router:wakes'
   const wakes = (): Record<string, { at: string; note: string }> => repos.kv.get<Record<string, { at: string; note: string }>>(WAKES) ?? {}
 
-  // agent-inbox#667: the event that replaces the timer above. A worker that reported `waiting` scheduled a check at
+  // inbox#667: the event that replaces the timer above. A worker that reported `waiting` scheduled a check at
   // HH:MM; when the router already knows that outcome it calls the worker back now and spends the timer — 82 of 155
   // status reports in one 24 h window were a session spent re-reading a check that had finished an hour earlier.
   // The rules are `wakeOnChecks` in pulls.ts; this is its ports: the wake table, the fired journal, the recruit.
@@ -707,7 +716,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
 
   // The engine ends a ticket with its pull request but posts nothing, so the issue hears it here, once per ticket.
-  const pullEnded = (ticketId: string): void => {
+  const pullEnded = (ticketId: string, question?: string): void => {
     const ticket = repos.tickets.get(ticketId)
     const outcome = ticket?.ended?.outcome
     const channel = ticket?.channels[0]
@@ -717,7 +726,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome }] : [] })
     // One note per end: a ticket resumed on a reopened issue ends again, and its first end's note id silenced the second (2026-11-13, #387).
     outbox.send({ id: `pull-end:${ticket.id}:${ticket.ended.at}`, channel, kind: 'notice', ticketId: ticket.id,
-      text: pullEndText(channel.thread, pulls, wakes()[ticket.id]?.at) })
+      text: pullEndText(channel.thread, pulls, wakes()[ticket.id]?.at, question) })
     // The merge was the work landing: with the pull request done, the ticket has nothing left to wait on.
     finishIssue(ticket.id)
   }
@@ -744,7 +753,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const follower = new PullFollower({
     home, api: pullApi,
     openThreads: () => github?.openThreads(), positions: repos.kv,
-    self: cfg.githubSelf ?? cfg.self, bots: cfg.bots, now: () => Date.now(),
+    self: cfg.githubSelf ?? cfg.self, bots: cfg.bots,
+    // Every other sweep reads the router's clock; a 120 s cadence on the wall clock is one no test of a close can reach.
+    now: () => (deps.now ? Date.parse(deps.now()) : Date.now()),
     // The fan-out is bounded per pass, not left to the 120 s budget, which binds only while the loop keeps its
     // cadence (measured 2026-11-09: 41 follows due at once, 12.1 s per pass).
     ...(cfg.pullReadsPerTick === undefined ? {} : { maxReads: cfg.pullReadsPerTick }),
@@ -774,13 +785,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     checksSeen: (thread, _pull, checks) => recordChecks(thread.id, checks),
     closed: (thread, pull, outcome, at, state) => {
       const key = `github:${thread.id}`
-      const waiting = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && !f.closed)).map(t => t.id)
+      const waiting = repos.tickets.open().filter(t => t.follows?.some(f => f.thread === key && !f.closed))
+      // The engine's end clears `attention`, and this note is the last thing anybody reads on that thread.
+      const asked = new Map(waiting.map(t => [t.id, t.attention?.question]))
       engine.threadClosed(thread, outcome, at)
       log.line('info', 'pull.closed', { thread: thread.id, outcome, url: pullUrl(pull), tickets: waiting.length })
-      for (const id of waiting) {
-        pullEnded(id)
-        if (outcome === 'merged') mergedPart(id, thread, pull, at, state?.mergedBy)
-        refreshTracker(id)
+      for (const t of waiting) {
+        pullEnded(t.id, asked.get(t.id))
+        if (outcome === 'merged') mergedPart(t.id, thread, pull, at, state?.mergedBy)
+        refreshTracker(t.id)
       }
     },
     // The other half of `closed`: a close written down by a read that failed (GitHub answers 404 for a private
@@ -798,6 +811,43 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       return holding.length
     },
   })
+  // A ticket's conversation in ANOTHER repository is a thread this source never polls, so its close went unseen:
+  // 14 open tickets on threads closed since 2026-11-19, 5 asking a person about a thread nobody could reopen
+  // (inbox#936). Bind it and its close ends the ticket, like the ticket's own pull requests do. The probe
+  // below is not ceremony: `owner/repo#7` is an issue too, and a ticket bound to it would end on the merge of a
+  // pull request that has nothing to do with it.
+  const knownPulls = new Map<string, PullRef>()
+  const notPulls = new Set<string>()
+  /** One `gh` round trip per answer, so a pass asks about a few; a failed read caches nothing. */
+  const CHANNEL_PROBES_PER_TICK = 4
+  const followConversations = async (): Promise<void> => {
+    let probes = 0
+    for (const ticket of repos.tickets.open()) {
+      for (const channel of ticket.channels) {
+        if (channel.source !== 'github' || channel.thread.startsWith('#')) continue
+        const ref = parseThread(channel.thread, home)
+        if (!ref) continue
+        const thread = threadOfPull(ref, home)
+        const key = thread.id
+        if (ticket.follows?.some(f => f.thread.toLowerCase() === `github:${key}`)) continue
+        let pull = knownPulls.get(key)
+        if (pull === undefined && !notPulls.has(key)) {
+          if (probes >= CHANNEL_PROBES_PER_TICK) continue
+          probes += 1
+          try {
+            if (await pullApi.pull(ref.repo, ref.number)) { knownPulls.set(key, ref); pull = ref } else notPulls.add(key)
+          } catch { continue }
+        }
+        if (!pull) continue
+        try {
+          engine.bindThread(ticket.id, threadOfPull(pull, home), true)
+          log.line('info', 'pull.channel_followed', { ticket: ticket.id, thread: key })
+        } catch (error) {
+          log.line('warn', 'pull.channel_follow_failed', { ticket: ticket.id, thread: key, error: String(error).slice(0, 200) })
+        }
+      }
+    }
+  }
   // Bound before the engine reads the report: a ready report completes a ticket that follows no open pull request.
   const follow = (ticket: Ticket, urls: readonly string[]): readonly string[] => {
     const followed: string[] = []
@@ -823,8 +873,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const grouped = group ? (deps.capWorkerGroup ?? capWorkerGroup)(group) : false
   if (group && grouped) log.line('info', 'worker.group_limits', { memoryMaxBytes: group.memoryMaxBytes, cpuPercent: group.cpuPercent })
   else if (group) log.line('warn', 'worker.group_limits_unavailable', { reason: 'systemctl set-property failed; each worker keeps its own cap only' })
+  const herdr = deps.herdr ?? herdrCli(cfg.herdrBin)
   const herdrWorkers = cfg.workers === 'herdr'
-    ? new HerdrWorkers({ herdr: deps.herdr ?? herdrCli(cfg.herdrBin), stateDir: cfg.dataDir, log,
+    ? new HerdrWorkers({ herdr, stateDir: cfg.dataDir, log,
       ...(cfg.herdrWorkspace ? { workspaceLabel: cfg.herdrWorkspace } : {}), ...deps.workerTiming, ...(cfg.workerStartMs ? { startTimeoutMs: cfg.workerStartMs } : {}) })
     : undefined
 
@@ -1126,6 +1177,15 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       }
     }
     const reconcileAt = Date.now()
+    enter('follows')
+    await followConversations()
+    // The question has to be read before the end, which clears it: the closing note is the thread's last word.
+    const asked = new Map(repos.tickets.open().filter(t => t.attention).map(t => [t.id, t.attention?.question]))
+    for (const id of engine.closeAnsweredAsks(deps.now?.())) {
+      pullEnded(id, asked.get(id))
+      refreshTracker(id)
+      log.line('info', 'ticket.ask_moot', { ticket: id, outcome: repos.tickets.get(id)?.ended?.outcome })
+    }
     enter('reconcile')
     try {
       pulls = await follower.reconcile(repos.tickets.open())
@@ -1541,10 +1601,26 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // Made at startup, not at the first write: the operator reads this file to pause the fleet by hand.
   if (cfg.panelPort) panelToken(cfg.dataDir)
 
+  const workerTab = herdrWorkers
+    ? (ticketId: string) => {
+      const rec = herdrWorkers.forTicket(ticketId)
+      if (!rec) throw new Error(`no worker tab for ticket ${ticketId}`)
+      return rec
+    }
+    : undefined
+
   const panel = cfg.panelPort
     ? createPanelServer({
       repos, engine, assessor, config: cfg,
       load: () => panelLoad(), isPaused: () => paused, workers: () => executor.workers(),
+      ...(workerTab ? {
+        workerPane: async (ticketId: string, lines: number) => {
+          const rec = workerTab(ticketId)
+          return { tab: rec.tabId, agent: rec.agent, text: await herdr.paneRead(rec.paneId, lines) }
+        },
+        workerPrompt: async (ticketId: string, text: string) => { await herdr.agentPrompt(workerTab(ticketId).agent, text) },
+        workerKeys: async (ticketId: string, keys: string[]) => { await herdr.agentSendKeys(workerTab(ticketId).agent, keys) },
+      } : {}),
       health: () => { try { return JSON.parse(readFileSync(`${cfg.dataDir}/health.json`, 'utf8')) as Record<string, unknown> } catch { return {} } },
       log: (level, event, fields) => log.line(level, event, fields), setPaused: (v: boolean) => { paused = v },
       token: () => panelToken(cfg.dataDir),
@@ -1769,7 +1845,7 @@ export function ticketsInUse(root: string, proc = '/proc'): Set<string> {
 }
 
 /** Every git checkout in a ticket's workspace: the ticket directory, `repo`, or a clone named for its repository
- *  (`caramel`, `repos/caramel`, `worktrees/caramel/<branch>`), which is the layout most tickets on the box use and the
+ *  (`widget`, `repos/widget`, `worktrees/widget/<branch>`), which is the layout most tickets on the box use and the
  *  one the sweeps never saw (2026-11-18): the pressure pass skipped it, and the settled pass called it bare and deleted
  *  it without asking git. Real directories only, so a symlink never leads a delete outside the workspace. */
 function checkoutsIn(dir: string, depth = 3): string[] {
@@ -2090,6 +2166,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const pullReadsPerTick = positiveNumber('PI_SUPERAGENT_PULL_READS_PER_TICK', env.PI_SUPERAGENT_PULL_READS_PER_TICK)
   const pullReadBudgetMs = positiveNumber('PI_SUPERAGENT_PULL_READ_BUDGET_MS', env.PI_SUPERAGENT_PULL_READ_BUDGET_MS)
   const panelPort = positiveNumber('PI_SUPERAGENT_PANEL_PORT', env.PI_SUPERAGENT_PANEL_PORT)
+  const panelHosts = (env.PI_SUPERAGENT_PANEL_HOSTS ?? '').split(',').map(s => s.trim()).filter(Boolean)
+  const panelTokenAll = env.PI_SUPERAGENT_PANEL_TOKEN_ALL === '1'
   const keepWorktrees = positiveNumber('PI_SUPERAGENT_KEEP_WORKTREES', env.PI_SUPERAGENT_KEEP_WORKTREES)
   const minFreeGb = positiveNumber('PI_SUPERAGENT_MIN_FREE_GB', env.PI_SUPERAGENT_MIN_FREE_GB)
   const workerTokenFile = env.PI_SUPERAGENT_WORKER_TOKEN_FILE?.trim()
@@ -2115,6 +2193,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(pullReadsPerTick === undefined ? {} : { pullReadsPerTick: Math.floor(pullReadsPerTick) }),
     ...(pullReadBudgetMs === undefined ? {} : { pullReadBudgetMs }),
     ...(panelPort === undefined ? {} : { panelPort }),
+    ...(panelHosts.length === 0 ? {} : { panelHosts }),
+    ...(panelTokenAll ? { panelTokenAllRequests: true } : {}),
     ...(keepWorktrees === undefined ? {} : { keepWorktrees: Math.floor(keepWorktrees) }),
     ...(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB) === undefined ? {} : { workBudgetGb: Math.floor(positiveNumber('PI_SUPERAGENT_WORK_BUDGET_GB', env.PI_SUPERAGENT_WORK_BUDGET_GB)!) }),
     ...(minFreeGb === undefined ? {} : { minFreeGb: Math.floor(minFreeGb) }),

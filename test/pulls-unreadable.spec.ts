@@ -3,7 +3,7 @@ import { PARK_AFTER_FAILURES, PullFollower, unreadableKey, type PullApi, type Pu
 import type { Ticket, Trigger } from '../src/core/index.ts'
 
 /**
- * agent-inbox#883, live shape: 92 `pull.read_failed` WARNs in 24 h from 7 threads the account cannot read (404),
+ * inbox#883, live shape: 92 `pull.read_failed` WARNs in 24 h from 7 threads the account cannot read (404),
  * one per thread per router start, because the backoff lived in memory. Each spec runs on a store that survives a
  * restart, which is the whole difference, so `run` is a router start and every start in the finding is one spec.
  */

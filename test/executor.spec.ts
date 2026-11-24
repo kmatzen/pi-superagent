@@ -99,7 +99,7 @@ describe('PiExecutor', () => {
   })
 
   it('a priority:high launch wins the free slot ahead of the queued work that arrived first', async () => {
-    // agent-inbox#660: the operator labels an ask urgent and it takes the next slot; age is the tie-break, not the rule.
+    // inbox#660: the operator labels an ask urgent and it takes the next slot; age is the tie-break, not the rule.
     const lanes: string[] = []
     const f = fixture({ maxConcurrent: 1, slotPollMs: 5, priorityOf: t => t.id === 'T3',
                         laneWon: (t, _a, lane) => lanes.push(`${t.id}:${lane}`) })
