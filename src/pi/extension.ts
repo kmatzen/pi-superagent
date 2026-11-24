@@ -723,7 +723,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     if (!ticket || !channel || ticket.ended?.by !== 'executor' || (outcome !== 'merged' && outcome !== 'closed')) return
     const pulls = (ticket.follows ?? []).filter(f => f.own && f.closed)
       .flatMap(f => { const pull = parseThread(f.thread.replace(/^github:/, ''), home)
-        return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome }] : [] })
+        // To the thread's reader the pull request did not merge, whoever ended the wait on it.
+        return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome === 'merged' ? 'merged' as const : 'closed' as const }] : [] })
     // One note per end: a ticket resumed on a reopened issue ends again, and its first end's note id silenced the second (2026-11-13, #387).
     outbox.send({ id: `pull-end:${ticket.id}:${ticket.ended.at}`, channel, kind: 'notice', ticketId: ticket.id,
       text: pullEndText(channel.thread, pulls, wakes()[ticket.id]?.at, question) })

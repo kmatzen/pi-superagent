@@ -4,7 +4,7 @@ import type { PullState } from '../src/pi/pulls.ts'
 import type { Ticket } from '../src/core/index.ts'
 
 const created = '2026-11-12T00:00:00Z'
-const ticket = (follows: Array<{ thread: string; closed?: 'merged' | 'closed' }>, issue = '382'): Ticket => ({
+const ticket = (follows: Array<{ thread: string; closed?: 'merged' | 'closed' | 'abandoned' }>, issue = '382'): Ticket => ({
   id: 't1', channels: [{ source: 'github', thread: `#${issue}`, address: { issue } }],
   follows: follows.map(f => ({ thread: f.thread, own: true, ...(f.closed ? { closed: { at: created, outcome: f.closed } } : {}) })),
 } as unknown as Ticket)
@@ -33,6 +33,16 @@ describe('the status of a ticket with several pull requests', () => {
       ['merged', ''], ['needs approval or checks', '**you: review**'], ['merge conflict', 'worker: resolve the conflict'],
     ])
     expect(trackerText('#382', rows)).toContain('1 of 3 merged')
+  })
+
+  it('names a pull request the operator wrote off as abandoned, and counts it done', () => {
+    // Measured 2026-11-24: the fork's duplicate stays open in a repository GitHub answers "read-only" to, so a row that
+    // reads "open" forever tells the person to act on a pull request nobody can act on.
+    const t = ticket([{ thread: 'github:org/kit#343', closed: 'merged' }, { thread: 'github:old/kit#14', closed: 'abandoned' }])
+    const rows = trackerRows(t, ['https://github.com/org/kit/pull/343', 'https://github.com/old/kit/pull/14'],
+      states({ 'old/kit#14': {} }), 'o/inbox', true)
+    expect(rows.map(r => [r.label, r.status, r.next])).toEqual([['kit#343', 'merged', ''], ['kit#14', 'abandoned by the operator', '']])
+    expect(trackerText('#382', rows)).toContain('1 of 2 merged')
   })
 
   it('shows an open pull request the latest report left out, and leaves out a closed one', () => {

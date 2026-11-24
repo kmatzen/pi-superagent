@@ -19,8 +19,10 @@ const key = (ticketId: string): string => `tracker:${ticketId}`
 
 type Verdict = { status: string; done: boolean; you?: string; worker?: string }
 
-function verdict(state: PullState | undefined, closed: 'merged' | 'closed' | undefined): Verdict {
+function verdict(state: PullState | undefined, closed: 'merged' | 'closed' | 'abandoned' | undefined): Verdict {
   if (closed === 'merged' || state?.merged) return { status: 'merged', done: true }
+  // A person's word, not GitHub's: the pull stays open in a repository the fleet cannot write to. Say who ended it.
+  if (closed === 'abandoned') return { status: 'abandoned by the operator', done: true }
   if (closed === 'closed' || (state && !state.open)) return { status: 'closed without merging', done: true }
   if (state?.draft) return { status: 'draft', done: false, you: 'review, then mark it ready' }
   if (state?.mergeable === false || state?.mergeableState === 'dirty') return { status: 'merge conflict', done: false, worker: 'resolve the conflict' }
