@@ -834,6 +834,55 @@ describe('the router extension', () => {
     expect(b.receipts('470')).toContain('ready: image bumped')
   })
 
+  it('a restart with more surviving workers than slots adopts the cap, retires the surplus, and relaunches its ticket', async () => {
+    // #811: the cap guarded the launch path only, so takeover adopted every survivor a restart left behind.
+    const h = memoryHerdr()
+    const starts = () => h.calls.filter(c => c === 'agentStart').length
+    const open511 = { issue: 511, title: 'DO: bump the base image', author: 'octocat', association: 'OWNER',
+      createdAt: '2026-11-04T09:00:00Z', updatedAt: '2026-11-05T09:00:00Z' }
+    const a = fixture(true, undefined, undefined, h.herdr)
+    a.addComment('511', 'octocat', 'bump the base image')
+    await a.running.tick()
+    await settle()
+    a.decide('accept')
+    await a.running.tick()
+    a.running.stop()
+
+    // A second router, and a second ask: two herdr workers are alive when this router dies.
+    const b = fixture(true, undefined, a.dir, h.herdr, { issues: [open511] })
+    await b.running.tick()
+    expect(starts(), 'the survivor is taken over, not started again').toBe(1)
+    b.addComment('512', 'octocat', 'rotate the api tokens')
+    await b.running.tick()
+    // Poll for the ask before the accept: `decide` on an ask that has not landed answers nothing, and 15 ms is tight on a loaded box.
+    await until(() => b.judge.prompts.length > 0, 2000)
+    b.decide('accept')
+    await b.running.tick()
+    await until(() => starts() === 2, 2000)
+    expect(starts(), 'two workers, no cap yet').toBe(2)
+    b.running.stop()
+
+    // The restarted router has one slot for those two survivors.
+    const c = fixture(true, undefined, a.dir, h.herdr, { maxConcurrent: 1, issues: [
+      open511,
+      { issue: 512, title: 'DO: rotate the api tokens', author: 'octocat', association: 'OWNER',
+        createdAt: '2026-11-04T09:00:00Z', updatedAt: '2026-11-05T09:00:00Z' },
+    ] })
+    await c.running.tick()
+    const log = readFileSync(join(a.dir, 'engine.log'), 'utf8')
+    expect(log.match(/worker\.adopt_refused/g), 'the second survivor is outside the one slot').toHaveLength(1)
+    expect(log, 'the other is refused, with the numbers a person reads').toMatch(/worker\.adopt_refused .*cap=1/)
+    expect(c.running.load().running, 'the cap bounds the restarted router too').toBeLessThanOrEqual(c.running.load().maxWorkers)
+    expect(h.calls, 'the retired worker leaves no process behind: its tab closes').toContain('tabClose')
+    const retired = new SqliteRepositories(`${a.dir}/tickets.db`).tickets.open()
+      .find(t => t.assignments.some(a => /worker slots? full/.test(a.report?.summary ?? '')))
+    expect(retired, 'the retired ticket says its slots were full, not that its worker died').toBeTruthy()
+    const said = retired!.assignments.filter(a => /worker slots? full/.test(a.report?.summary ?? '')).at(-1)!
+    expect(retired!.assignments.at(-1)!.id, 'and a fresh assignment waits its turn at the cap').not.toBe(said.id)
+    await until(() => starts() > 2, 2000)
+    expect(starts(), 'the retired ticket gets a fresh worker under the cap').toBe(3)
+  })
+
   it('a conversation closed on GitHub stops its ticket and receipts the issue', async () => {
     const f = fixture()
     f.addComment('481', 'octocat', 'rotate the api tokens')
