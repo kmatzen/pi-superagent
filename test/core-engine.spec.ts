@@ -558,7 +558,7 @@ describe('follow-up owners', () => {
     }
   })
   it('ends the ticket whose question its closes made moot, and leaves one whose worker is still on it', () => {
-    // Measured 2026-11-24: agent-inbox#855 asked "keep this watch running?" over four pull requests that had all
+    // Measured 2026-11-24: inbox#855 asked "keep this watch running?" over four pull requests that had all
     // merged. A close recorded while work was busy ends nothing then, and a blocked report never re-checks it.
     for (const running of [false, true]) {
       const h = harness()

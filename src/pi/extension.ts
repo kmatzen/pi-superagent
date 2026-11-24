@@ -460,7 +460,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     if (ticket) void tracker.refresh(ticket)
   }
 
-  // agent-inbox#667: the router can see this ticket's CI, so its next check is the checks finishing, not a timer.
+  // inbox#667: the router can see this ticket's CI, so its next check is the checks finishing, not a timer.
   const checksPending = (ticket: Ticket): boolean => (ticket.follows ?? []).some(follow =>
     !follow.closed && follow.thread.startsWith('github:')
       && pullStates.get(follow.thread.slice('github:'.length))?.checks?.state === 'pending')
@@ -536,7 +536,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   const WAKES = 'router:wakes'
   const wakes = (): Record<string, { at: string; note: string }> => repos.kv.get<Record<string, { at: string; note: string }>>(WAKES) ?? {}
 
-  // agent-inbox#667: the event that replaces the timer above. A worker that reported `waiting` scheduled a check at
+  // inbox#667: the event that replaces the timer above. A worker that reported `waiting` scheduled a check at
   // HH:MM; when the router already knows that outcome it calls the worker back now and spends the timer — 82 of 155
   // status reports in one 24 h window were a session spent re-reading a check that had finished an hour earlier.
   // The rules are `wakeOnChecks` in pulls.ts; this is its ports: the wake table, the fired journal, the recruit.
@@ -813,7 +813,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   })
   // A ticket's conversation in ANOTHER repository is a thread this source never polls, so its close went unseen:
   // 14 open tickets on threads closed since 2026-11-19, 5 asking a person about a thread nobody could reopen
-  // (agent-inbox#936). Bind it and its close ends the ticket, like the ticket's own pull requests do. The probe
+  // (inbox#936). Bind it and its close ends the ticket, like the ticket's own pull requests do. The probe
   // below is not ceremony: `owner/repo#7` is an issue too, and a ticket bound to it would end on the merge of a
   // pull request that has nothing to do with it.
   const knownPulls = new Map<string, PullRef>()
@@ -1845,7 +1845,7 @@ export function ticketsInUse(root: string, proc = '/proc'): Set<string> {
 }
 
 /** Every git checkout in a ticket's workspace: the ticket directory, `repo`, or a clone named for its repository
- *  (`caramel`, `repos/caramel`, `worktrees/caramel/<branch>`), which is the layout most tickets on the box use and the
+ *  (`widget`, `repos/widget`, `worktrees/widget/<branch>`), which is the layout most tickets on the box use and the
  *  one the sweeps never saw (2026-11-18): the pressure pass skipped it, and the settled pass called it bare and deleted
  *  it without asking git. Real directories only, so a symlink never leads a delete outside the workspace. */
 function checkoutsIn(dir: string, depth = 3): string[] {

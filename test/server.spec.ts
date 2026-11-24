@@ -369,28 +369,28 @@ describe('the panel worker screen', () => {
 describe('the panel behind a reverse proxy', () => {
 
   it('answers the proxy name it was configured with, and no other name', async () => {
-    const s = await serve(source({ config: { githubRepo: 'o/r', panelHosts: ['superagent.corp.adobe.com'] } }))
+    const s = await serve(source({ config: { githubRepo: 'o/r', panelHosts: ['superagent.example.net'] } }))
     const get = (host: string) => rawRequest(s.port, `GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`)
-    expect((await get('superagent.corp.adobe.com')).startsWith('HTTP/1.1 200'), 'the proxy Host is an answerable name').toBe(true)
-    expect((await get('elsewhere.corp.adobe.com')).startsWith('HTTP/1.1 403'), 'a name nobody configured is refused').toBe(true)
+    expect((await get('superagent.example.net')).startsWith('HTTP/1.1 200'), 'the proxy Host is an answerable name').toBe(true)
+    expect((await get('elsewhere.example.net')).startsWith('HTTP/1.1 403'), 'a name nobody configured is refused').toBe(true)
     expect((await get(`127.0.0.1:${s.port}`)).startsWith('HTTP/1.1 200'), 'localhost stays answerable, so the tunnel keeps working').toBe(true)
     await s.close()
   })
 
   it('demands the token on a read once the panel is exposed, and takes it as a Basic password', async () => {
-    const s = await serve(source({ config: { githubRepo: 'o/r', panelHosts: ['superagent.corp.adobe.com'], panelTokenAllRequests: true } }))
-    const anon = await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: 'superagent.corp.adobe.com' } })
+    const s = await serve(source({ config: { githubRepo: 'o/r', panelHosts: ['superagent.example.net'], panelTokenAllRequests: true } }))
+    const anon = await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: 'superagent.example.net' } })
     expect(anon.status, 'past localhost, a read needs the token').toBe(401)
     expect(anon.headers.get('www-authenticate'), 'the browser gets a prompt it can fill').toContain('Basic')
     const basic = Buffer.from(`:${'sekret'}`).toString('base64')
-    const authed = await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: 'superagent.corp.adobe.com', authorization: `Basic ${basic}` } })
+    const authed = await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: 'superagent.example.net', authorization: `Basic ${basic}` } })
     expect(authed.status).toBe(200)
     const write = await fetch(`http://127.0.0.1:${s.port}/api/executor/pause`, {
-      method: 'POST', headers: { host: 'superagent.corp.adobe.com', 'x-superagent-request': '1', 'content-type': 'application/json', authorization: `Basic ${basic}` },
+      method: 'POST', headers: { host: 'superagent.example.net', 'x-superagent-request': '1', 'content-type': 'application/json', authorization: `Basic ${basic}` },
       body: JSON.stringify({ paused: true }),
     })
     expect(write.status, 'the Basic password serves a write as well as the header does').toBe(200)
-    const headerToken = await fetch(`http://127.0.0.1:${s.port}/api/state`, { headers: { host: 'superagent.corp.adobe.com', 'x-superagent-request': '1', 'x-superagent-token': 'sekret' } })
+    const headerToken = await fetch(`http://127.0.0.1:${s.port}/api/state`, { headers: { host: 'superagent.example.net', 'x-superagent-request': '1', 'x-superagent-token': 'sekret' } })
     expect(headerToken.status, 'scripts keep the header path').toBe(200)
     await s.close()
   })

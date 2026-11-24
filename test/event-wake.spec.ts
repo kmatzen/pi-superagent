@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { PullFollower, wakeOnChecks, type CheckReason, type CheckWakePorts, type ChecksState, type PullApi, type PullRef, type PullState } from '../src/pi/pulls.ts'
 import type { Ticket } from '../src/core/index.ts'
 
-// agent-inbox#667: a waiting ticket is called back by the checks it waits for, not by a timer.
+// inbox#667: a waiting ticket is called back by the checks it waits for, not by a timer.
 const PULL: PullRef = { repo: 'o/r', number: 7 }
 const THREAD = 'github:#7'
 const at = (h: string) => `2026-11-20T${h}:00.000Z`
@@ -70,7 +70,7 @@ describe('event wake on pull checks', () => {
     expect(f.recruited).toHaveLength(1)
   })
 
-  it('a build that is still running is published as pending, and recruits nobody: the receipt reads it (agent-inbox#667)', async () => {
+  it('a build that is still running is published as pending, and recruits nobody: the receipt reads it (inbox#667)', async () => {
     const f = fixture()
     f.waiting()
     await f.follower.reconcile(f.tickets)
