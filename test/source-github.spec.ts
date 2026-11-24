@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { GithubSource, REPLY_MARKER, type GithubApi, type IssueComment, type IssueState, type PrReview } from '../src/pi/source-github.ts'
+import { GithubSource, REPLY_MARKER, commentTriggerId, type GithubApi, type IngestSurface, type IssueComment, type IssueState, type PrReview } from '../src/pi/source-github.ts'
 
 // Dates live one hour back from the run: a cold start reads a day, and pinned fixture dates expire.
 const HOUR = 3_600_000
@@ -16,7 +16,8 @@ const review = (over: Partial<PrReview> = {}): PrReview => ({
   pr: 77, repo: 'o/r', id: 500, author: 'octocat', association: 'OWNER', state: 'CHANGES_REQUESTED', at: at, body: 'use the cursor, not a scan', ...over,
 })
 
-function fixture(comments: IssueComment[], issues: IssueState[], reviews: PrReview[] = []) {
+function fixture(comments: IssueComment[], issues: IssueState[], reviews: PrReview[] = [],
+                 onCredentialMasked?: (count: number, where: IngestSurface) => void) {
   const kv = new Map<string, unknown>()
   const store = { get: <T,>(k: string) => kv.get(k) as T | undefined, set: (k: string, v: unknown) => { kv.set(k, v) } }
   const posted: Array<{ issue: number; body: string }> = []
@@ -26,7 +27,10 @@ function fixture(comments: IssueComment[], issues: IssueState[], reviews: PrRevi
     postComment: async (issue, body) => { posted.push({ issue, body }) },
     reviews: async sinceId => reviews.filter(r => r.id > sinceId),
   }
-  const source = new GithubSource(api, { repo: 'o/r', self: 'superagent[bot]', bots: new Set(['github-actions[bot]']) }, store)
+  const source = new GithubSource(api, {
+    repo: 'o/r', self: 'superagent[bot]', bots: new Set(['github-actions[bot]']),
+    ...(onCredentialMasked ? { onCredentialMasked } : {}),
+  }, store)
   return { source, api, kv, store, posted }
 }
 
@@ -373,5 +377,65 @@ describe('GithubSource', () => {
     source.bootstrap()
     expect(await source.poll(), 'the source asks, and the router answers no').toHaveLength(0)
     expect(called).toBe(1)
+  })
+})
+
+describe('the mask, on the way in', () => {
+  // Shape-true, value fake, the exact length of the token that reached three workers on 2026-11-24.
+  const SECRET = `ghp_${'x'.repeat(36)}`
+
+  it('masks a token in a comment before the engine gets the text to store', async () => {
+    const f = fixture([comment({ body: `use it\n\n${SECRET}` })], [])
+    f.source.bootstrap()
+    const [trigger] = await f.source.poll()
+    expect(trigger!.text).not.toContain(SECRET)
+    expect(trigger!.text).toContain('ghp_***') // the shape stays readable, so a reader knows what was masked
+    expect(trigger!.text).toContain('use it') // and the ask itself survives the mask
+  })
+
+  it('masks an issue body and a review body, the other two doors', async () => {
+    const issues: IssueState[] = []
+    const f = fixture([], issues)
+    f.source.bootstrap()
+    await f.source.poll() // first look treats open issues as history
+    issues.push(issue({ body: `deploy with ${SECRET} now` }))
+    const [issued] = await f.source.poll()
+    expect(issued!.text).not.toContain(SECRET)
+    expect(issued!.text).toContain('ghp_***')
+
+    const reviews: PrReview[] = []
+    const g = fixture([], [], reviews)
+    g.source.bootstrap()
+    await g.source.poll() // first sight seeds the review cursor; a review after it is a live one
+    reviews.push(review({ body: `ship it, token is ${SECRET}` }))
+    const [reviewed] = await g.source.poll()
+    expect(reviewed!.text).not.toContain(SECRET)
+    expect(reviewed!.text).toContain('token is ghp_***')
+  })
+
+  it('says that it masked, with a count and no value', async () => {
+    const seen: Array<{ count: number, where: string }> = []
+    const f = fixture([comment({ body: `${SECRET} and github_pat_${'y'.repeat(36)}` })], [], [],
+      (count, where) => seen.push({ count, where }))
+    f.source.bootstrap()
+    await f.source.poll()
+    expect(seen).toEqual([{ count: 2, where: 'comment' }])
+    expect(JSON.stringify(seen)).not.toContain(SECRET)
+  })
+
+  it('fires no alert for an ordinary comment, so the log means what it says', async () => {
+    const seen: string[] = []
+    const f = fixture([comment()], [], [], (_count, where) => seen.push(where))
+    f.source.bootstrap()
+    await f.source.poll()
+    expect(seen).toEqual([])
+  })
+
+  it('keeps the id of a masked comment: the re-read window must not re-fire it as a fresh request', async () => {
+    const c = comment({ body: `use it\n\n${SECRET}` })
+    const f = fixture([c], [])
+    f.source.bootstrap()
+    const [trigger] = await f.source.poll()
+    expect(trigger!.id).toBe(commentTriggerId(c))
   })
 })

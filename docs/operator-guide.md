@@ -189,6 +189,16 @@ skips it. It cannot cover what a worker publishes by itself — a worker's `gh p
 own shell — which is why moving the credential out of the URL, and rotating one that URL exposed, stay the
 primary controls and this is the backstop.
 
+**The router masks what it reads.** A token pasted into an issue body, a comment, a review, or a followed pull
+request's thread is masked on the way in, so the trigger text the engine stores — and re-reads to every later
+worker on that ticket — carries `ghp_***`, not the value. Shapes covered: `gh[pousr]_`, `github_pat_`, `xox*`,
+`xapp-`, and `://user:password@`. The log records the count only (`github.ingest_credential_masked`,
+`pull.ingest_credential_masked`). It protects the agent's store, not the board: the comment a person pasted
+stays on GitHub, visible to every reader of the repository, until that person deletes it — and the token stays
+live until they revoke it at <https://github.com/settings/tokens>. Measured 2026-11-24: one `repo`-scoped
+classic token pasted into a board issue reached three workers over two hours, and the router published it to
+seven more issues before anyone noticed.
+
 Move the credential out of the URL and into a file only you can read:
 
 ```sh
