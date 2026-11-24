@@ -265,3 +265,39 @@ a fact this document now has to carry: the stalled-launch sweep and the duplicat
 and the quiet rule runs after the launch loop, because its release depends on the report it files in the
 same step. A move that keeps that order provable needs the three sweeps' tests to move with them, and the
 first attempt at the move lost scope twice in the splice. It is a half-day of careful work, not a fold.
+
+## The ready sweep (2026-11-24, agent-inbox#963)
+
+Every lane above reacts to something: a comment, a report, a crash, a label. Intake is activity-driven, so an
+issue that has been quiet since its last comment produces no trigger and never gets a worker, however many slots
+stand idle. Measured 2026-11-24: six ready issues — no ticket, nobody on them, no label parking them — idle 62 to
+84 hours with five of eight slots free.
+
+The tick now ends its intake stage with a pass that asks. Every tick, when `running < maxWorkers` and nothing is
+queued for Eval, it reads the watched repo's open issues and keeps those with no live ticket, no `waiting-on-human`
+label, and no activity newer than the sweep's stored cursor; it ranks them `priority:high` first, then oldest
+`updated_at`; and it emits **one** synthetic trigger for the best, into the Eval path a person's message uses. The
+judge decides, and `ignore` is an answer: the lane asks, it does not launch. One issue per day (`SWEEP_CAP`, the
+re-grant counter's shape on its own key `router:sweep`), so a declined issue is asked about once a day and not once
+a tick.
+
+Two rules carry the weight, and each is pinned twice in code and once in a model:
+
+- **A sweep trigger is never a person's request.** `SweepCandidate` has no `human` field and the emitter hard-codes
+  `human: false`; `Intake.receive` throws `sweepNotHuman` for any trigger carrying `meta.sweep` that also claims
+  `human` — that check sits on the one door every path walks through, because `resumes` inside it is what wakes a
+  ticket its author stopped; and `formal/Intake.tla` C7 (`SweepClaimingHuman` is a model action, so the guard's
+  absence is a witnessed violation) with `formal/Sweep.tla` SW1. The judge is told too: a swept candidate's prompt
+  says the sweep sent it, and the gate admits it only as `inferred`, which cannot stop a ticket, resume one, or
+  speak as an operator's order.
+- **A stopped ticket is terminal, not merely absent.** `mandateWithdrawn` (a `stopped` outcome that did not come
+  from the conversation closing) ends the thread's claim on a slot, and so does any ended ticket on it — the lane
+  does not re-open work a worker reported finished, which is the churn `standingAskEntitled` exists to prevent.
+
+`formal/Sweep.tla` checks the lane's own rules — capacity at the ask, one per day, the stopped and decided thread
+skipped, quiet-past-cursor required, a quiet issue eventually asked about — and `formal/Intake.tla` checks the
+trigger at the intake seam. The two are split because the product of the poll model's state space and the sweep's
+does not close; every sweep step leaves the poll variables alone, so C1-C6 carry over unchanged.
+
+The panel says so: `swept` joins the load line (issues the sweep asked the judge about today), and a ticket opened
+by a swept ask shows `swept` in its `wonSlot` column, which is the answer to "why is this running?".

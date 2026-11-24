@@ -89,6 +89,15 @@ export const regrantable = (
   judging: () => boolean = () => false,
 ): boolean => open ? standingAskEntitled(open, liveWorkers) : !everTicketed() && !judging()
 export const REGRANT_KEY = 'router:regrant'
+/** The ready sweep's day counter, kept apart from `REGRANT_KEY` so taking a slot on a quiet issue spends no re-grant. */
+export const SWEEP_KEY = 'router:sweep'
+/** The sweep's read position: the moment its last pass read the board up to (see `Intake.sweep`'s cursor rule). */
+export const SWEEP_CURSOR_KEY = 'router:sweep:cursor'
+/** One sweep per issue per day. The sweep is a liveness lane, not a launcher: the judge's answer is not a promise. */
+export const SWEEP_CAP = 1
+/** Sweeps spent today, from the same day-keyed counter shape the re-grant lane uses: the panel's `swept` number. */
+export const sweepCount = (counters: RegrantCounters | undefined, day: string): number =>
+  counters?.day === day ? Object.values(counters.perIssue).reduce((used, n) => used + n, 0) : 0
 export interface RegrantCounters { day: string, perIssue: Record<string, number>, cappedOn?: Record<string, string> }
 /** Grants this issue already spent today. Counters from another day read as zero, which is what the day rollover means. */
 export const regrantUsed = (counters: RegrantCounters | undefined, key: string, day: string): number =>
@@ -160,7 +169,7 @@ export interface RunningRouter {
   setPaused(v: boolean): void
   isPaused(): boolean
   /** Workers on a run (against the cap), parked between runs, and queued: the panel's load line. */
-  load(): { running: number; parked: number; queued: number; maxWorkers: number; starved: number; oldestStarvedH: number; unanswered: number }
+  load(): { running: number; parked: number; queued: number; maxWorkers: number; starved: number; oldestStarvedH: number; unanswered: number; swept: number }
 }
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] })
@@ -318,6 +327,34 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     : undefined
   github?.bootstrap()
   let paused = false
+
+  /**
+   * The ready sweep's pass, between intake and the judge: free slots, a judge with nothing queued, open asks nobody
+   * is on (agent-inbox#963). One trigger per pass, one per issue per day; the judge decides the rest.
+   */
+  const readySweep = (): void => {
+    if (!github) return
+    const at = deps.now ? deps.now() : new Date().toISOString()
+    const day = at.slice(0, 10)
+    const counters = repos.kv.get<RegrantCounters>(SWEEP_KEY)
+    const out = engine.sweepReady({
+      slots: executor.capacity - executor.running,
+      cursor: repos.kv.get<string>(SWEEP_CURSOR_KEY) ?? at,
+      day,
+      board: github.sweepBoard(),
+      cooled: (thread, day) => regrantUsed(counters, thread, day) >= SWEEP_CAP,
+      spend: (thread, day) => {
+        const next = regrantPlan(counters, thread, day, SWEEP_CAP)
+        if (next) repos.kv.set(SWEEP_KEY, next)
+      },
+    })
+    // The position advances only over ground a pass read.
+    if (!out.skipped) repos.kv.set(SWEEP_CURSOR_KEY, at)
+    if (!out.swept) return
+    // Named on the panel's ticket row and in the log, because the question a sweep raises is "why is this running?".
+    repos.kv.set(WON_SLOT_KEY, { ...(repos.kv.get<Record<string, string>>(WON_SLOT_KEY) ?? {}), [out.swept]: 'swept' })
+    log.line('info', 'sweep.emitted', { thread: out.swept, day, passed: out.passed?.length ?? 0 })
+  }
 
   // Judgement prompts go to a headless session. Sending them into this session is what made the operator's
   // pane look wedged: one model turn per candidate, every keystroke queued behind it.
@@ -1234,6 +1271,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     // evaluateDue runs on every pass: it is the only thing that expires a stuck eval, and gating it once left
     // 54 stale judgements in flight forever. The judge's load is bounded by the assessor, one question at a time.
     sweeps += 1
+    // Before `evaluateDue`, so the sweep's trigger is judged in this pass: queued behind it, it waits a whole tick.
+    enter('sweep')
+    readySweep()
     enter('evaluate')
     const evaluateAt = Date.now()
     engine.evaluateDue()
@@ -1690,6 +1730,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       queued: open.filter(t => { const a = t.assignments.at(-1); return !a || a.state === 'pending' }).length,
       maxWorkers: cfg.maxConcurrent ?? 4,
       ...starvation(),
+      // Work the ready sweep asked the judge about today: the answer to "why is this running?" when nobody asked.
+      swept: sweepCount(repos.kv.get<RegrantCounters>(SWEEP_KEY), (deps.now ? deps.now() : new Date().toISOString()).slice(0, 10)),
     }
   }
 

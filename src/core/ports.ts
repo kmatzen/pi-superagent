@@ -85,6 +85,8 @@ export interface Outbox {
 /** What the Engine reports after a change, by event type. */
 export interface DomainEvents {
   'trigger.received': { triggerId: string; threads: string[] }
+  /** The ready sweep asked the judge about an idle open ask: `passed` is each issue it ranked over, with the rule. */
+  'trigger.swept': { triggerId: string; threadKey: string; passed: { thread: string; reason: string }[] }
   'eval.started': { evalId: string; threadKey: string; triggerIds: string[]; strength: Strength }
   'decision.recorded': { decisionId: string; kind: DecisionKind; threadKey: string }
   'ticket.created': { ticketId: string; decisionId: string; strength: Strength }

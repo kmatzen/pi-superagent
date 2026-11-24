@@ -121,6 +121,8 @@ export type MandateBasis = Received & { sender?: string; rules?: string[] } & (
   | { via: 'followup'; authority?: string }
   | { via: 'admission'; cell: AdmissionCell; addressed?: 'mention' | 'direct'; observation?: { mode: AcceptMode } }
   | { via: 'listed'; addressed?: 'mention' | 'direct'; observation?: { mode?: AcceptMode }; authority?: string }
+  /** The ready sweep's request for a free slot: the router asking, so never an explicit ask, a stop, or a resume. */
+  | { via: 'sweep'; observation: { mode: AcceptMode } }
   /** A message of a bot on its Source's bot list: an inferred candidate at most, never an explicit request or a stop. */
   | { via: 'bot'; addressed?: 'mention' | 'direct'; observation: { mode: AcceptMode } }
 )
