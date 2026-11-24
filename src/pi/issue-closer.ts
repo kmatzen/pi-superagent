@@ -100,11 +100,12 @@ export class IssueCloser {
   }
 
   /** Operator, 2026-11-10: an issue stays open until every linked pull request is merged or closed. GitHub answers,
-   *  not the ticket's memory (a failed read can record a close), and an unknown is not a merge. */
+   *  not the ticket's memory (a failed read can record a close), and an unknown is not a merge. One exception: a pull a
+   *  person abandoned is never asked again, because GitHub answers "open" to that one forever. */
   private async openPullsOn(ticket: Ticket | undefined): Promise<string[]> {
     const blocking: string[] = []
     for (const follow of ticket?.follows ?? []) {
-      if (!follow.thread.startsWith('github:')) continue
+      if (!follow.thread.startsWith('github:') || follow.closed?.outcome === 'abandoned') continue
       const pull = parseThread(follow.thread.slice('github:'.length), this.o.home)
       if (!pull) continue
       try {
