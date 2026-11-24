@@ -2193,6 +2193,7 @@ describe('the state a router start leaves behind', () => {
       const report = await sweepWorktrees(root, new Set(['tk-open']), 2)
       expect(report.removed).toBe(1)
       expect(report.keptWork).toBe(0)
+      // Written this second, so the prune refuses it: a young file still counts, and readdirSync never sees it.
       expect(report.strays, 'a file, not a directory, is counted and skipped, never swept by readdirSync').toBe(1)
       expect(readdirSync(root).sort()).toEqual(['apps-cap-355.log', 'mid', 'new', 'tk-open'])
     } finally { rmSync(root, { recursive: true, force: true }) }
@@ -2200,7 +2201,7 @@ describe('the state a router start leaves behind', () => {
 
   it('says nothing when there are no checkouts yet', async () => {
     expect(await sweepWorktrees(join(tmpdir(), 'sa-sweep-absent'), new Set(), 20))
-      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, keptWorkIds: [], clonesDropped: 0, venvsDropped: 0, lent: 0 })
+      .toEqual({ removed: 0, keptWork: 0, checkouts: 0, bare: 0, empty: 0, strays: 0, straysRemoved: [], keptWorkIds: [], clonesDropped: 0, venvsDropped: 0, lent: 0 })
   })
 
   it('makes one panel secret per state directory, readable only by its owner', () => {
