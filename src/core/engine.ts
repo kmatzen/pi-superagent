@@ -64,6 +64,13 @@ export class Engine {
     this.repo.atomic(() => { this.tickets.threadClosed(thread, outcome, isoTime(at)) })
   }
 
+  /** End tickets whose question the closes made moot (see `Tickets.closeAnsweredAsks`), returning the ids, for the note. */
+  closeAnsweredAsks(at?: string): string[] {
+    let ended: string[] = []
+    this.repo.atomic(() => { ended = this.tickets.closeAnsweredAsks(isoTime(at ?? new Date().toISOString())) })
+    return ended
+  }
+
   // The clock
 
   /**

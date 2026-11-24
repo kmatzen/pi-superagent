@@ -190,6 +190,14 @@ issue as easily as a pull request, and a ticket bound to an issue would end on t
 request sharing its number. A question the worker asked and nobody answered rides along in the
 closing note, because the ticket's end clears it.
 
+**A question the closes made moot ends the ticket on a later pass.** A close recorded while the ticket's
+work was busy ends nothing at that moment, and a blocked report never re-reads a close it already has,
+so an ask can outlive the work it asked about: measured 2026-11-24, agent-inbox#855 asked "keep this
+watch running?" over four pull requests that had all merged. A pass ends such a ticket when every
+thread it is done with has closed and no worker runs, with the closes' own outcome, and the closing
+note quotes the question the end makes moot (see `Tickets.closeAnsweredAsks`). A worker on the ticket
+decides it, so the pass leaves it alone.
+
 **Every end closes the issue, and a promised check survives a merge.** A ticket resumed on a reopened
 issue can end again, and each end posts its own note and closes the issue again; both were once per
 ticket, so on 2026-11-13 #387's second end left it open in silence. A merge that ends a ticket whose

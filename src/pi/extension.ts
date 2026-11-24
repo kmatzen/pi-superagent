@@ -1059,6 +1059,13 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const reconcileAt = Date.now()
     enter('follows')
     await followConversations()
+    // The question has to be read before the end, which clears it: the closing note is the thread's last word.
+    const asked = new Map(repos.tickets.open().filter(t => t.attention).map(t => [t.id, t.attention?.question]))
+    for (const id of engine.closeAnsweredAsks(deps.now?.())) {
+      pullEnded(id, asked.get(id))
+      refreshTracker(id)
+      log.line('info', 'ticket.ask_moot', { ticket: id, outcome: repos.tickets.get(id)?.ended?.outcome })
+    }
     enter('reconcile')
     try {
       pulls = await follower.reconcile(repos.tickets.open())
