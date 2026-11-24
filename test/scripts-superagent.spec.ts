@@ -33,11 +33,17 @@ const portFree = () => vi.waitFor(() => new Promise<void>((resolve, reject) => {
 }), { timeout: 5000 })
 
 let state: string, herdrDir: string
+// The probe counts an engine by name (`comm`), so the pilot is a copy of /bin/sleep named `pi`: without it
+// every `started()` here is a tab with no engine behind it, which `status` now calls code 2, not healthy.
+const pilotDir = mkdtempSync(join(tmpdir(), 'pi-sa-pilot-'))
+const PILOT = join(pilotDir, 'pi')
+copyFileSync('/bin/sleep', PILOT)
 // Every run of this file takes its env through here, so a case that needs its own setting says so in one
 // place — and so the guard's cases can run the same command from a binary of their choosing.
 const envFor = (extra: Record<string, string> = {}) => ({
   ...process.env, PI_SUPERAGENT_STATE: state, PI_SUPERAGENT_HERDR: FAKE, PI_SUPERAGENT_GRACE: '1', FAKE_HERDR_DIR: herdrDir,
   PI_SUPERAGENT_PANEL_PORT: String(PANEL_PORT), FAKE_HERDR_READY: join(state, 'ready'),
+  FAKE_HERDR_ENGINE: PILOT,
   // The checkout these tests run from is often mid-edit; the guard on it has its own test.
   PI_SUPERAGENT_ALLOW_DIRTY: '1', ...extra,
 })
@@ -59,9 +65,20 @@ beforeEach(() => {
   mkdirSync(state, { recursive: true }); mkdirSync(herdrDir, { recursive: true })
   for (const key of Object.keys(process.env)) if (key.startsWith('PI_SUPERAGENT_GITHUB')) delete process.env[key]
 })
-afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }) })
+afterAll(() => {
+  // The fixture's engine names itself only in the file it records, and a `sleep 600` left per case is a leak.
+  for (const d of dirs) {
+    try { process.kill(Number(readFileSync(join(d, 'herdr', 'engine.pid'), 'utf8')), 'SIGKILL') } catch { /* never started */ }
+    rmSync(d, { recursive: true, force: true })
+  }
+  rmSync(pilotDir, { recursive: true, force: true })
+})
 
 // Each run starts several processes (bash, node for herdr's JSON, the fake herdr): seconds under a full suite.
+// A restart now proves the engine stopped — SIGTERM, the grace, SIGKILL, the panel port — so
+// the cases that run several of them need more than the file's 30s when the box is busy.
+const restartCase = { timeout: 90_000 }
+
 describe('scripts/superagent', { timeout: 30_000 }, () => {
   it('refuses to kill a process on the panel port that is not this router', async () => {
     // The scheduled health check runs `start`, and `start` frees the panel's port. A dev server that owns the
@@ -281,7 +298,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(existsSync(join(state, 'watchdog-restart')), 'no restart, so no restart record').toBe(false)
   })
 
-  it('remedy restarts a router that is up and not beating: start refuses it, so only a restart recovers', () => {
+  it('remedy restarts a router that is up and not beating: start refuses it, so only a restart recovers', restartCase, () => {
     // The gap this closes: with the tick loop parked, `status` failed and the job's one remedy, `start`,
     // answered "already running" — every five minutes, forever, with the board stopped.
     started()
@@ -299,7 +316,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(run(['status']).status, 'the stall is gone, so the remedy is over').toBe(0)
   })
 
-  it('a health.json nobody rewrote restarts too: the loop that writes it is the loop that died', () => {
+  it('a health.json nobody rewrote restarts too: the loop that writes it is the loop that died', restartCase, () => {
     started()
     const file = join(state, 'health.json')
     writeFileSync(file, '{"runtime":{"state":"ready"},"tick":{"state":"ok","n":12}}')
@@ -310,7 +327,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(existsSync(join(state, 'watchdog-restart'))).toBe(true)
   })
 
-  it('a healthy beat clears the restart cooldown: a loop that dies in the boot after a watchdog restart dies within reach of the watchdog again', () => {
+  it('a healthy beat clears the restart cooldown: a loop that dies in the boot after a watchdog restart dies within reach of the watchdog again', restartCase, () => {
     // The 2026-11-11 outage lasted 25 min: the watchdog restarted the router, the loop died in that boot, and
     // the cooldown refused to touch it for its full window.
     started()
@@ -344,7 +361,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(readdirSync(join(state, 'archive')).length, 'today plus the 13 newest').toBe(14)
   })
 
-  it('the stall restart is rate limited, so a fault a restart cannot fix cannot restart the router forever', () => {
+  it('the stall restart is rate limited, so a fault a restart cannot fix cannot restart the router forever', restartCase, () => {
     started()
     const stalled = '{"runtime":{"state":"ready"},"tick":{"state":"error","stage":"poll"}}'
     writeFileSync(join(state, 'health.json'), stalled)
@@ -377,7 +394,7 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(existsSync(join(herdrDir, 'agent.superagent'))).toBe(false)
   })
 
-  it('a remedy whose restart fails leaves no stop marker, so the next pass sees a router that is down', () => {
+  it('a remedy whose restart fails leaves no stop marker, so the next pass sees a router that is down', restartCase, () => {
     // `stop` writes the manual-stop marker as a matter of record. Left behind by a start that failed, it reads
     // as "the operator stopped this on purpose": code 0, and the health check goes quiet on a router that is
     // simply not running.
@@ -424,7 +441,9 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     writeFileSync(join(other, 'config.env'), 'PI_SUPERAGENT_GITHUB_REPO=o/other\n')
     writeFileSync(join(state, 'config.env'), 'PI_SUPERAGENT_GITHUB_REPO=o/live\n')
     const flags = ['--state', other]
-    expect(run([...flags, 'start'], { FAKE_HERDR_READY: join(other, 'ready') }).status, portHint()).toBe(0)
+    // The pilot engine names the state directory it serves, so it has to be told the one --state moved to.
+    const startOther = { FAKE_HERDR_READY: join(other, 'ready'), PI_SUPERAGENT_STATE: other }
+    expect(run([...flags, 'start'], startOther).status, portHint()).toBe(0)
     expect(routerTab()).toContain('--env PI_SUPERAGENT_GITHUB_REPO=o/other')
     expect(existsSync(join(other, 'router.herdr'))).toBe(true)
     expect(run([...flags, 'stop']).status).toBe(0)
