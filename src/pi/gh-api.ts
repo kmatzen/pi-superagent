@@ -192,6 +192,17 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       return (await openPulls()).map(pr => pr.number)
     },
 
+    async createIssue(title, body, repo) {
+      // The same mask and shape as every other post (agent-inbox#928); its marker also stops ingest waking a worker on the router's own alert.
+      const hits = countCredentials(body)
+      if (hits) options.onCredentialRedacted?.(hits, `${repo ?? options.repo}#new-issue`)
+      const payload = JSON.stringify({ title, body: publishBody(body) })
+      const row = JSON.parse(await call(['api', '-X', 'POST', `repos/${repo ?? options.repo}/issues`, '--input', '-'], payload)) as { number?: number }
+      // A create that answers no number did not create anything the caller can follow up on.
+      if (typeof row.number !== 'number') throw new Error(`gh issue create answered no number for "${title.slice(0, 60)}"`)
+      return row.number
+    },
+
     async reviews(sinceId) {
       // Only the watched repository's: a followed pull elsewhere belongs to PullFollower, which owns its thread name, cursor and budget, and reading it here too cost 21 serialized round trips a poll for trigger ids already produced (measured 2026-11-07, seven foreign follows, 20 s ticks).
       const targets = options.followed().filter(p => p.repo.toLowerCase() === options.repo.toLowerCase())

@@ -255,6 +255,25 @@ export class HerdrWorkers {
   }
 
   /**
+   * The engine's tabs. `superagent start` opens one labelled `engine` each time and a dead pi leaves it behind:
+   * 10 leaked, `agent_status=unknown`, survived a restart on 2026-11-25 (agent-inbox#1022). `unknown` is herdr's
+   * word for a tab with no pi in it, so closing one ends no session; a live tab answers idle/working, and the
+   * log tail is labelled `engine log`, so both are kept. Worker tabs belong to closeStaleTabs, not here.
+   */
+  async closeDeadEngineTabs(workspaceLabel: string): Promise<string[]> {
+    const ws = (await this.options.herdr.workspaces()).find(w => w.label === workspaceLabel)?.workspace_id
+    if (!ws) return []
+    const closed: string[] = []
+    for (const tab of await this.options.herdr.tabList().catch(() => [])) {
+      if (tab.workspaceId !== ws || tab.label !== 'engine' || tab.agentStatus !== 'unknown') continue
+      await this.options.herdr.tabClose(tab.tabId).catch((error: unknown) =>
+        this.options.log.line('warn', 'engine.tab_close_failed', { tab: tab.tabId, error: String(error).slice(0, 160) }))
+      closed.push(tab.tabId)
+    }
+    return closed
+  }
+
+  /**
    * A worker's files are the audit trail for its ticket, for a while. Kept forever they grew by ~60 directories
    * a day, and every sweep reads every one of them, so the price of the trail landed on each router start.
    */

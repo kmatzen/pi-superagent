@@ -171,6 +171,8 @@ export interface RunningRouter {
   isPaused(): boolean
   /** Workers on a run (against the cap), parked between runs, and queued: the panel's load line. */
   load(): { running: number; parked: number; queued: number; maxWorkers: number; starved: number; oldestStarvedH: number; unanswered: number; swept: number }
+  /** The judge: last decision's age in seconds, its counters, and whether the watchdog calls it stalled. */
+  judgeState(): Record<string, unknown>
 }
 
 const text = (value: unknown) => ({ content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] })
@@ -198,12 +200,14 @@ export interface TickHealth {
  *  tick block goes second, before the source block, and its `detail` field is short enough to survive the cut.
  *  A healthy tick writes `"state": "ok"`, which fails nothing. */
 function writeHealth(dir: string, source: { state: string; detail?: string } | null, tick?: TickHealth,
-                     launch?: { state: string; detail: string } | null): void {
+                     launch?: { state: string; detail: string } | null,
+                     judge?: Record<string, unknown> | null): void {
   writeFileSync(`${dir}/health.json`, JSON.stringify({
     runtime: { state: 'ready', at: new Date().toISOString() },
     ...(tick ? { tick } : {}),
     ...(source ? { source } : {}),
     ...(launch ? { launch } : {}),
+    ...(judge ? { judge } : {}),
   }, null, 1))
 }
 
@@ -366,12 +370,43 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   // start its own: the log showed eight judges open at once and the panel unable to answer a request.
   let judgeOpening: Promise<void> | undefined
   const openTheJudge = (): Promise<void> => judgeOpening ??= doOpenJudge()
+  const evalIdOf = (body: string): string => /Assess eval (\S+)/.exec(body)?.[1] ?? ''
+  // The numbers the 47-minute wedge on 2026-11-25 was read from by hand afterwards (agent-inbox#1022): 182
+  // prompts, 80 runs, 69 settles, and no line in the trail that said "nothing has decided for 47 minutes".
+  const judgeStats = { prompts: 0, runs: 0, settled: 0 }
+  /** The last decision the engine recorded, and the evals delivered since. Together they are the stall. */
+  let lastDecisionAt = Date.now()
+  let lastDecisionKind = ''
+  let deliveriesSinceDecision = 0
+  const reapJudge = (reason: string): void => {
+    const dead = judge
+    judge = undefined
+    judgeOpening = undefined
+    // The pane is the fallback from here: the operator's session answers, and `superagent restart` rebuilds the
+    // judge. Leaving `judgeFailed` false would park every later judgement in a queue that nothing drains.
+    judgeFailed = true
+    dead?.dispose()
+    // Every judgement the dead session held goes back, in the one place that knows both its id and its queue.
+    // `release` frees the in-flight slot, and the eval's own deadline requeues its triggers: the retry is the
+    // engine's, and 11 evals piled up unheld on 2026-11-25 only because nothing said "ask again".
+    const back = new Set<string>()
+    const inFlight = assessor.inFlightEval
+    if (inFlight) back.add(inFlight)
+    for (const body of judgeQueue.splice(0)) { const id = evalIdOf(body); if (id) back.add(id) }
+    for (const id of back) { log.line('warn', 'judge.eval_requeued', { eval: id, reason }); assessor.release(id) }
+    log.line('error', 'judge.reaped', { reason, session: dead?.sessionId ?? 'none', requeued: back.size })
+  }
   const doOpenJudge = async (): Promise<void> => {
     if (judge) return
     try {
       const sdk = deps.sdk ?? await loadSdk(cfg)
       judge = await openJudge(sdk, {
         cwd: cfg.dataDir, tools: [decideTool], ...(cfg.judgeThinking ? { thinking: cfg.judgeThinking } : {}), log,
+        ...(cfg.judgeReadyMs ? { readyTimeoutMs: cfg.judgeReadyMs } : {}),
+        // A session that takes a prompt and starts no run answers nothing: feed it nothing, hand its evals back,
+        // and let the next judge be asked. This is the wedge of 2026-11-25, which nothing noticed for 47 minutes.
+        onUnready: reason => reapJudge(reason),
+        onActivity: what => { judgeStats[what === 'prompt' ? 'prompts' : what === 'run_end' ? 'runs' : 'settled'] += 1 },
         // A turn that ended without ticket_decide holds the one in-flight slot until the eval's deadline;
         // free it now, and the engine's expiry requeues the eval.
         onSettled: () => {
@@ -391,17 +426,18 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
   const pilot: SessionPilot = {
     deliver: body => {
-      const evalId = /Assess eval (\S+)/.exec(body)?.[1] ?? ''
-      if (judge) {
+      const evalId = evalIdOf(body)
+      deliveriesSinceDecision += 1
+      if (judge && !judge.wedged) {
         log.line('info', 'eval.deliver', { eval: evalId, bytes: body.length, target: 'judge' })
         judge.prompt(body)
         return
       }
       // Never park a judgement in the operator's pane while the judge is merely starting: it is answered
       // twice, and the pane is the thing that must stay usable. The pane is the fallback only when the
-      // judge cannot open at all.
+      // judge cannot open at all, or failed the readiness probe.
       judgeQueue.push(body)
-      if (judgeFailed) {
+      if (judgeFailed || judge?.wedged) {
         log.line('warn', 'eval.deliver', { eval: evalId, bytes: body.length, target: 'pane-fallback' })
         pi.sendUserMessage(body, { deliverAs: 'followUp' })
         return
@@ -410,6 +446,25 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       void openTheJudge()
     },
   }
+  /** What a decision is worth to the watchdog: the engine's own record, whoever answered (judge, memo, person). */
+  const noteDecision = (kind: string): void => {
+    lastDecisionAt = Date.now()
+    lastDecisionKind = kind
+    deliveriesSinceDecision = 0
+  }
+  /** The judge's state in one object, for the panel, `/api/state` and health.json. */
+  const judgeState = (): Record<string, unknown> => ({
+    session: judge?.sessionId ?? '',
+    ready: judge?.ready === true,
+    wedged: judge?.wedged === true,
+    prompts: judgeStats.prompts, runs: judgeStats.runs, settled: judgeStats.settled,
+    queued: judgeQueue.length,
+    lastDecisionAt: new Date(lastDecisionAt).toISOString(),
+    lastDecisionAgeSec: Math.max(0, Math.round((Date.now() - lastDecisionAt) / 1000)),
+    deliveriesSinceDecision,
+    stalled: judgeStallAt > 0,
+  })
+
   let engine!: Engine
   let executorRef: PiExecutor | undefined
   // Answers to trigger sets judged before, so an engine that re-asks costs no model turn (assessor.ts).
@@ -439,6 +494,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     scope: scopeOf(cfg),
     policy,
     assessor,
+    // The engine's record, not the judge tool's call: a memo-answered eval decides work and reaches no tool,
+    // and a watchdog keyed on the tool alone alarms on a fleet that is deciding fine.
+    emit: event => { if (event.type === 'decision.recorded') noteDecision(event.data.kind) },
     executor: {
       start: (ticket, assignment) => afterCommit('start', () => {
         // A poll can launch the assignment before this callback, and a crash can already have replaced it.
@@ -1337,6 +1395,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     outbox.flush()
     // The disk floor is checked every beat, and swept only when breached: the startup pass only runs at startup.
     void checkDisk()
+    // Leaked `engine` tabs are swept the same way: a start whose pi died leaves its tab, and only a sweep that
+    // runs while the router is up can close the ones a restart made after the router booted.
+    void sweepEngineTabs()
     // The launches this pass queued get a bounded start, and no more. `executor.idle()` is the launch queue's
     // tail and that queue is gated on a free worker slot, so awaiting it made the loop enterable only when the
     // fleet went quiet — hourly, at 20 workers against a cap of 8. That is the stall #303 was filed for.
@@ -1356,6 +1417,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     if (mine !== generation) return
     lastTickEnd = finished
     noteLaunches(finished)
+    noteJudge(finished)
     log.line('info', 'tick', {
       n: sweeps, inflight: repos.threads.active().filter(t => t.evaluating).length,
       running: executor.running, parked: executor.parked, cap: executor.capacity,
@@ -1426,6 +1488,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     try {
       for (const r of await herdrWorkers.retireOrphans(adopted)) log.line('info', 'worker.retired', { ticket: r.ticketId, agent: r.agent, tab: r.tabId })
       for (const tab of await herdrWorkers.closeStaleTabs(cfg.herdrWorkspace ?? 'superagent')) log.line('info', 'worker.stale_tab_closed', { tab })
+      for (const tab of await herdrWorkers.closeDeadEngineTabs(cfg.herdrWorkspace ?? 'superagent')) log.line('info', 'engine.tab_closed', { tab })
     } catch (error) {
       log.line('error', 'recover.sweep_failed', { error: String(error).slice(0, 200) })
     }
@@ -1511,6 +1574,18 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
 
   let pollFailures = 0
+  /** The window between sweeps of the engine's own tabs: the census is a herdr call, not a statfs. */
+  const TAB_SWEEP_MS = 15 * 60_000
+  let lastTabSweep = 0
+  const sweepEngineTabs = async (): Promise<void> => {
+    if (!herdrWorkers || Date.now() - lastTabSweep < TAB_SWEEP_MS) return
+    lastTabSweep = Date.now()
+    try {
+      for (const tab of await herdrWorkers.closeDeadEngineTabs(cfg.herdrWorkspace ?? 'superagent')) {
+        log.line('info', 'engine.tab_closed', { tab, note: 'a tab labelled engine with no pi in it (agent_status=unknown)' })
+      }
+    } catch (error) { log.line('warn', 'engine.tab_sweep_failed', { error: String(error).slice(0, 160) }) }
+  }
   /** The GitHub source's own state, published into health.json next to the tick's. */
   let sourceHealth: { state: string; detail: string } | null = null
 
@@ -1587,7 +1662,76 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
       ? { state: 'error', detail: `${executor.pendingLaunches} launch(es) waiting with ${free} free slot(s) for ${Math.round((now - since) / 60_000)} min: no worker is starting` }
       : null
   }
-  const publishHealth = (tick?: TickHealth): void => writeHealth(cfg.dataDir, sourceHealth, tick, launchHealth)
+  const publishHealth = (tick?: TickHealth): void => writeHealth(cfg.dataDir, sourceHealth, tick, launchHealth, judgeHealth)
+
+  // ── The judge watchdog ────────────────────────────────────────────────────
+  // Triage stopped deciding for 47 minutes on 2026-11-25 while the engine kept ticking and kept handing prompts
+  // to a judge that answered none (agent-inbox#1022). Every existing check said "running"; the one number that
+  // moved was the age of the last decision, and nothing published it. So publish it, and alarm on it.
+  const judgeStallMs = cfg.judgeStallMs ?? 15 * 60_000
+  const judgeStallReportMs = cfg.judgeStallReportMs ?? Math.max(300_000, tickMs)
+  /** When the current stall began, 0 while the judge is deciding. */
+  let judgeStallAt = 0
+  let lastJudgeReport = 0
+  let judgeHealth: Record<string, unknown> | null = null
+  /** One alert per issue per day: the poll beats every 30 s, and 480 alerts a day teach nobody to read them. */
+  const JUDGE_ALERT_KEY = 'router:judge-alert'
+  const alertStall = (ageSec: number): void => {
+    const day = (deps.now ? deps.now() : new Date().toISOString()).slice(0, 10)
+    const said = repos.kv.get<{ day: string; issue?: number }>(JUDGE_ALERT_KEY)
+    if (said?.day === day) return
+    if (!githubApi) { log.line('warn', 'judge.stall_unreportable', { reason: 'no github source' }); return }
+    const s = judgeState()
+    const body = [
+      `**The judge has decided nothing for ${Math.round(ageSec / 60)} minutes** while the engine kept delivering evals to it.`,
+      '',
+      `- Last decision: \`${s.lastDecisionAt}\` (${lastDecisionKind || 'none since boot'}), ${s.lastDecisionAgeSec}s ago.`,
+      `- Prompts fed to the judge: ${s.prompts}, runs that ended: ${s.runs}, turns that settled: ${s.settled}, queued: ${s.queued}.`,
+      `- Judge session \`${s.session || 'none'}\`: ready=${s.ready}, wedged=${s.wedged}.`,
+      `- Evals delivered since the last decision: ${s.deliveriesSinceDecision}.`,
+      '',
+      'The panel shows the same numbers at `/api/state` (`lastDecisionAgeSec`), and `health.json` carries them as a failing part.',
+      'The remedy that worked last time is `superagent restart`: it rebuilds the judge session and adopts every worker.',
+    ].join('\n')
+    const title = `fleet: the judge decided nothing for ${Math.round(ageSec / 60)} minutes (${cfg.githubRepo ?? 'no repo'})`
+    const saidOn = cfg.alertIssue
+      ? githubApi.postComment(cfg.alertIssue, body).then(() => cfg.alertIssue)
+      : githubApi.createIssue?.(title, body) ?? Promise.reject(new Error('this github api cannot file an issue'))
+    void saidOn.then(issue => {
+      repos.kv.set(JUDGE_ALERT_KEY, { day, issue })
+      log.line('info', 'judge.stall_reported', { issue, day, ageSec })
+    }).catch((error: unknown) => log.line('warn', 'judge.stall_report_failed', { error: String(error).slice(0, 200) }))
+  }
+  const noteJudge = (now: number): void => {
+    const ageSec = Math.round((now - lastDecisionAt) / 1000)
+    // Deliveries tell a wedged judge from a quiet board: alarming on an old decision alone alarms every night.
+    const stalled = !paused && deliveriesSinceDecision > 0 && now - lastDecisionAt > judgeStallMs
+    if (!stalled) {
+      if (judgeStallAt) log.line('info', 'judge.stall_cleared', { afterMs: now - judgeStallAt, kind: lastDecisionKind })
+      judgeStallAt = 0
+      // The age belongs in health.json every beat, not only with the alarm: a health job sets its own threshold,
+      // and an operator sees the number climbing before anything is red.
+      judgeHealth = { state: 'ok', detail: lastDecisionKind ? `last decision ${lastDecisionKind}` : 'no decision since boot',
+        at: new Date(now).toISOString(), lastDecisionAgeSec: ageSec, deliveriesSinceDecision, wedged: judge?.wedged === true }
+      return
+    }
+    if (!judgeStallAt) {
+      judgeStallAt = now
+      lastJudgeReport = now
+      alertStall(ageSec)
+    } else if (now - lastJudgeReport < judgeStallReportMs) return
+    const s = judgeState()
+    const detail = `no decision for ${Math.round(ageSec / 60)} min while ${deliveriesSinceDecision} eval(s) were delivered`
+    log.line('error', 'judge.stalled', {
+      ageSec, thresholdSec: Math.round(judgeStallMs / 1000), detail,
+      prompts: s.prompts, runs: s.runs, settled: s.settled, queued: s.queued,
+      session: s.session, ready: s.ready, wedged: s.wedged,
+      evaluating: repos.threads.active().filter(t => t.evaluating).length, running: executor.running, cap: executor.capacity,
+    })
+    lastJudgeReport = now
+    judgeHealth = { state: 'error', detail, at: new Date(now).toISOString(), lastDecisionAgeSec: ageSec,
+      deliveriesSinceDecision, prompts: s.prompts, runs: s.runs, settled: s.settled, session: s.session, wedged: s.wedged }
+  }
 
   // Ticks cost 1-5 s and every settled agent asks for one: five workers settling at once used to start
   // five full GitHub polls. One runs, and the demand to run again after it is remembered.
@@ -1696,6 +1840,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     ? createPanelServer({
       repos, engine, assessor, config: cfg,
       load: () => panelLoad(), isPaused: () => paused, workers: () => executor.workers(),
+      judge: () => judgeState(),
       ...(workerTab ? {
         workerPane: async (ticketId: string, lines: number) => {
           const rec = workerTab(ticketId)
@@ -1760,8 +1905,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     setPaused: (v: boolean) => { paused = v },
     isPaused: () => paused,
     load: panelLoad,
+    judgeState,
     stop: () => {
       clearInterval(timer); off(); panel?.server.close(); executor.detach()
+      // Every /reload builds a new router, and a judge session it does not own runs on behind it.
+      judge?.dispose(); judge = undefined
       process.off('uncaughtException', onUncaught)
       process.off('unhandledRejection', onRejection)
     },
@@ -2295,6 +2443,10 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const regrantCap = positiveNumber('PI_SUPERAGENT_REGRANT_CAP', env.PI_SUPERAGENT_REGRANT_CAP)
   const priorityRegrantCap = positiveNumber('PI_SUPERAGENT_PRIORITY_REGRANT_CAP', env.PI_SUPERAGENT_PRIORITY_REGRANT_CAP)
   const workerMemoryGb = positiveNumber('PI_SUPERAGENT_WORKER_MEMORY_GB', env.PI_SUPERAGENT_WORKER_MEMORY_GB)
+  const judgeReadyMs = positiveNumber('PI_SUPERAGENT_JUDGE_READY_MS', env.PI_SUPERAGENT_JUDGE_READY_MS)
+  const judgeStallMs = positiveNumber('PI_SUPERAGENT_JUDGE_STALL_MS', env.PI_SUPERAGENT_JUDGE_STALL_MS)
+  const judgeStallReportMs = positiveNumber('PI_SUPERAGENT_JUDGE_STALL_REPORT_MS', env.PI_SUPERAGENT_JUDGE_STALL_REPORT_MS)
+  const alertIssue = positiveNumber('PI_SUPERAGENT_ALERT_ISSUE', env.PI_SUPERAGENT_ALERT_ISSUE)
   const workerCpus = positiveNumber('PI_SUPERAGENT_WORKER_CPUS', env.PI_SUPERAGENT_WORKER_CPUS)
   const workerTasks = positiveNumber('PI_SUPERAGENT_WORKER_TASKS', env.PI_SUPERAGENT_WORKER_TASKS)
   return {
@@ -2317,6 +2469,10 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(workerTokenFile ? { workerTokenFile } : {}),
     ...(claimsFile ? { claimsFile } : {}),
     ...(workerStartMs ? { workerStartMs } : {}),
+    ...(judgeReadyMs === undefined ? {} : { judgeReadyMs }),
+    ...(judgeStallMs === undefined ? {} : { judgeStallMs }),
+    ...(judgeStallReportMs === undefined ? {} : { judgeStallReportMs }),
+    ...(alertIssue === undefined ? {} : { alertIssue: Math.floor(alertIssue) }),
     ...(workerQuietMinutes === undefined ? {} : { workerQuietMinutes }),
     ...(deadlineHours === undefined ? {} : { workerDeadlineHours: deadlineHours }),
     ...(reportCap === undefined ? {} : { reportCap: Math.floor(reportCap) }),

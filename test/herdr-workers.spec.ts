@@ -592,3 +592,49 @@ describe('herdr workers', () => {
     expect(m.calls.filter(c => c.startsWith('tabClose')), 'the operator may be using it').toEqual(['tabClose w1:t1'])
   })
 })
+
+describe("the engine's own tabs (agent-inbox#1022)", () => {
+  // Measured on the fleet box 2026-11-25: the workspace held 24 tabs, 10 of them labelled `engine` with
+  // `agent_status=unknown` — one per `superagent start` whose pi died. `closeStaleTabs` only knows tabs a worker
+  // record owns, so nothing closed these, and `superagent restart` left all ten standing.
+  const census = (leaks: number) => [
+    { tabId: 'w1:t1', label: 'engine', workspaceId: 'w1', agentStatus: 'idle' },
+    { tabId: 'w1:t2', label: 'engine log', workspaceId: 'w1', agentStatus: 'unknown' },
+    ...Array.from({ length: leaks }, (_, i) => ({ tabId: `w1:l${i}`, label: 'engine', workspaceId: 'w1', agentStatus: 'unknown' })),
+    ...Array.from({ length: 9 }, (_, i) => ({ tabId: `w1:w${i}`, label: `#1${i} · DO: the thing`, workspaceId: 'w1', agentStatus: 'working' })),
+  ]
+
+  it('ten leaked engine tabs go, the live ones stay, and the count returns to its baseline', async () => {
+    const dir = tmp()
+    let tabs = census(10)
+    const closed: string[] = []
+    const m = memoryHerdr({ tabList: async () => tabs })
+    m.herdr.tabClose = async (id: string) => { closed.push(id); tabs = tabs.filter(t => t.tabId !== id) }
+    const workers = new HerdrWorkers({ ...options(dir, m.herdr) })
+    const baseline = tabs.length - 10
+
+    expect(await workers.closeDeadEngineTabs('superagent')).toHaveLength(10)
+    expect(closed.sort()).toEqual(Array.from({ length: 10 }, (_, i) => `w1:l${i}`).sort())
+    expect(tabs.map(t => t.tabId).sort(), 'the live engine tab, the log tab and every worker tab survive')
+      .toEqual(['w1:t1', 'w1:t2', ...Array.from({ length: 9 }, (_, i) => `w1:w${i}`)].sort())
+    expect(tabs).toHaveLength(baseline)
+    expect(await workers.closeDeadEngineTabs('superagent'), 'a second sweep finds nothing left to close').toEqual([])
+  })
+
+  it('a tab labelled engine with a pi in it is never a leak, however odd its status', async () => {
+    // The census is the only proof here — no worker record owns an engine tab — so the rule is `unknown`, and a
+    // working, idle, blocked or done agent keeps its tab. Closing a live one would end a running router.
+    const dir = tmp()
+    const tabs = [
+      { tabId: 'w1:a', label: 'engine', workspaceId: 'w1', agentStatus: 'working' },
+      { tabId: 'w1:b', label: 'engine', workspaceId: 'w1', agentStatus: 'blocked' },
+      { tabId: 'w1:c', label: 'engine', workspaceId: 'w1', agentStatus: 'done' },
+      { tabId: 'w1:d', label: 'engine', workspaceId: 'w2', agentStatus: 'unknown' },
+    ]
+    const closed: string[] = []
+    const m = memoryHerdr({ tabList: async () => tabs })
+    m.herdr.tabClose = async (id: string) => { closed.push(id) }
+    expect(await new HerdrWorkers({ ...options(dir, m.herdr) }).closeDeadEngineTabs('superagent')).toEqual([])
+    expect(closed, 'and a workspace that is not the router\'s is not touched').toEqual([])
+  })
+})

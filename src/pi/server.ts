@@ -16,6 +16,8 @@ export interface PanelSource {
   load(): { running: number; parked: number; queued: number; maxWorkers: number; starved?: number; oldestStarvedH?: number; unanswered?: number; swept?: number }
   /** The router's live workers: which ticket, where, and when each last spoke. */
   workers(): Array<{ ticketId: string; sessionId: string; workspace: string; lastEventAt: string; events: number; quietSeconds: number; watch?: string; busy?: boolean }>
+  /** The judge session, the age of the last decision in seconds, and the watchdog's verdict. */
+  judge?(): Record<string, unknown>
   /** The panel shares the router's event loop, so a slow request is evidence of starvation, not noise. */
   log(level: 'info' | 'warn' | 'error', event: string, fields?: Record<string, unknown>): void
   /** The same document `superagent status` reads, so the panel and the exit code cannot disagree. */
@@ -63,11 +65,15 @@ export function readModel(src: PanelSource) {
   const filtered = threads.flatMap(t => src.repos.triggersOfThread(t.ref))
     .map(tr => ({ trigger: tr, disposition: src.repos.triggers.disposition(tr.id) }))
   const recent = filtered.filter(f => within(f.trigger.at, day, now))
+  const judge = src.judge?.() ?? {}
   return {
     now,
     paused: src.isPaused(),
     health: src.health(),
     load: src.load(),
+    // The stall as one number: `superagent status`, the panel and a health job all read this, not a log line.
+    judge,
+    lastDecisionAgeSec: typeof judge.lastDecisionAgeSec === 'number' ? judge.lastDecisionAgeSec : -1,
     needsPerson: open.filter(t => t.attention).map(t => {
       const r = t.assignments.at(-1)?.report
       const summary = String(r?.summary ?? '')
@@ -131,6 +137,7 @@ export function renderPanel(m: Model): string {
   }
   return page('superagent', `
 <section id="overview"><h2>Needs a person <span class="count">(${m.needsPerson.length})</span></h2>${asks}
+${m.judge.stalled === true ? `<div class="ask"><strong>The judge has decided nothing for ${Math.round(Number(m.judge.lastDecisionAgeSec ?? 0) / 60)} minutes</strong> while ${esc(m.judge.deliveriesSinceDecision)} eval(s) were delivered to it.<div class="muted">session ${esc(m.judge.session)} · ready=${esc(m.judge.ready)} · wedged=${esc(m.judge.wedged)} · prompts ${esc(m.judge.prompts)} · runs ${esc(m.judge.runs)} · settled ${esc(m.judge.settled)} · queued ${esc(m.judge.queued)} · last decision ${esc(m.judge.lastDecisionAt)}</div></div>` : ''}
 <ul class="count">${quiet(m.load.running, 'workers on a run')}${quiet(m.load.parked, 'workers parked between runs')}${quiet(m.load.starved ?? 0, `labelled asks waiting for a slot${m.load.oldestStarvedH ? `, oldest ${m.load.oldestStarvedH}h` : ''}`)}${quiet(m.load.unanswered ?? 0, 'labelled asks with nobody on them')}${quiet(m.load.swept ?? 0, 'ready issues the sweep asked the judge about today')}${quiet(m.counts.evaluating, 'evals in progress')}${quiet(m.counts.filtered24h, 'triggers filtered in 24 h')}${m.paused ? '<li><strong>processing is paused</strong></li>' : ''}</ul></section>
 <section id="source"><h2>Source <span class="count">(${m.source.repo ? `GitHub issues: ${esc(m.source.repo)}` : 'no source configured'})</span></h2>
 <p class="count">${m.counts.triggers24h} triggers in the last 24 h, ${m.counts.filtered24h} filtered, ${m.counts.threads} threads known.</p>
@@ -235,7 +242,7 @@ export function createPanelServer(src: PanelSource): { server: Server; url(port:
       json(res, 403, { error: 'a POST needs the panel token in x-superagent-token' }); return
     }
     const m = readModel(src)
-    if (url.pathname === '/api/state') return json(res, 200, { paused: m.paused, load: m.load, counts: m.counts, health: m.health, workers: m.workers })
+    if (url.pathname === '/api/state') return json(res, 200, { paused: m.paused, load: m.load, counts: m.counts, health: m.health, judge: m.judge, lastDecisionAgeSec: m.lastDecisionAgeSec, workers: m.workers })
     if (url.pathname === '/api/settings') return json(res, 200, { policyVersion: m.policy.version, paused: m.paused, revision: 1 })
     if (url.pathname === '/api/sources') return json(res, 200, [{ id: 'github', state: m.source.repo ? 'ready' : 'off', stats: { triggers24h: m.counts.triggers24h, filtered24h: m.counts.filtered24h } }])
     if (url.pathname === '/api/tickets') return json(res, 200, m.open)

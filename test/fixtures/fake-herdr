@@ -42,7 +42,22 @@ case "$1 $2" in
     printf '%s\n' "$*" > "$DIR/tab.$n.args"
     printf '{"result":{"type":"tab_created","tab":{"tab_id":"w1:t%s"},"root_pane":{"pane_id":"w1:p%s"}}}\n' "$n" "$n" ;;
   "tab rename"|"pane run") echo '{"result":{"type":"ok"}}' ;;
+  "tab list")
+    # label from the create args, and the agent status from the agent files: a tab with no live agent on its
+    # pane is `unknown`, which is exactly the census the engine's reaper acts on.
+    printf '{"result":{"tabs":[%s]}}\n' "$(
+      n=0; out=''
+      for f in "$DIR"/tab.*.args; do
+        [ -f "$f" ] || continue
+        base="${f##*/}"; base="${base#tab.}"; n=$(( 10#${base%.args} ))
+        label="$(arg --label $(cat "$f"))"
+        status=unknown
+        for a in "$DIR"/agent.*; do [ -f "$a" ] && [ "$(cat "$a")" = "w1:p$n" ] && { status=idle; break; }; done
+        out="${out:+$out,}{\"tab_id\":\"w1:t$n\",\"label\":\"$label\",\"workspace_id\":\"w1\",\"agent_status\":\"$status\"}"
+      done
+      printf '%s' "$out")" ;;
   "tab close")
+    printf '%s\n' "$3" >> "$DIR/closed"
     pane="w1:p${3#w1:t}"
     for f in "$DIR"/agent.*; do [ -f "$f" ] && [ "$(cat "$f")" = "$pane" ] && { rm -f "$f"; die_engine; }; done
     echo '{"result":{"type":"ok"}}' ;;

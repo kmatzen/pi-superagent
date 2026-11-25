@@ -111,6 +111,18 @@ which engine you are talking to.
 
 In a checkout, the same script is `scripts/superagent`.
 
+A third failure shows up in neither word: the **judge** — the headless session that decides every new request —
+takes a prompt and starts no run. Measured 2026-11-25: 182 prompts, 80 runs, 69 settles, and triage decided
+nothing for 47 minutes with `engine: up` the whole time. The router now probes the judge with its first prompt;
+a session that starts no run inside `PI_SUPERAGENT_JUDGE_READY_MS` (120 s) is disposed, its evals are re-asked,
+and judgements go to the operator pane until `superagent restart` opens a fresh session. A judge that was
+healthy and stops deciding fails `status` with a `judge` part (`no decision for 47 min while 6 eval(s) were
+delivered`), puts the age of the last decision in `health.json` and on the panel as `lastDecisionAgeSec`, writes
+`judge.stalled` to `engine.log` every five minutes, and posts one board comment per day. That part is a 4, so
+`remedy` leaves it alone and the comment names the fix: `superagent restart`. A quiet board never raises it —
+deliveries with no decision behind them are what it measures. `start` also closes the tabs a dead pi left
+behind: 10 labelled `engine` with no pi in them survived the restart that day, and each `start` added one.
+
 Settings live in `~/.pi/superagent/config.env`. [`config.example.env`](../config.example.env), shipped
 with the package, explains each setting and its default. Restart to apply a change.
 

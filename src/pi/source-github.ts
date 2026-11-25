@@ -65,6 +65,8 @@ export interface GithubApi {
   issueState?(issue: number): Promise<'open' | 'closed' | 'unknown'>
   /** Closes an issue: the terminal end of a ticket that finished with nothing left to wait on. */
   closeIssue?(issue: number): Promise<void>
+  /** Files an issue and returns its number: how a fleet fault reaches a person who is not ssh'd in. */
+  createIssue?(title: string, body: string, repo?: string): Promise<number>
 }
 
 export interface PrReview {
