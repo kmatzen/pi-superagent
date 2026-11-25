@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import superagent, { activationRefusal, clearCaches, createRouterExtension, pushedTo, sweepTmp, ticketsInUse, workerTmp, configFrom, duplicateLiveTickets, panelToken, stalledTickets, sweepWorktrees, type PiLike, type RegisteredTool } from '../src/pi/extension.ts'
 import type { RouterConfig, SdkSurface } from '../src/pi/router.ts'
-import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
+import { HUMAN_LABEL, REPLY_MARKER, type GithubApi, type IssueComment, type IssueState } from '../src/pi/source-github.ts'
 import { SqliteRepositories } from '../src/pi/store.ts'
 import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
 import type { ChecksState, PullApi, PullState } from '../src/pi/pulls.ts'
@@ -627,8 +627,10 @@ describe('the router extension', () => {
   it('an ask whose ticket finished is not waiting for a slot, though its open issue still waits on a person', async () => {
     // 2026-11-12: a merged ask and a completed one, both left open, read as "waiting for a slot" with every slot free.
     const at = new Date(Date.now() - 3.6e6).toISOString()
+    // `waiting-on-human` is what this issue is: its work is reported done and a person has to read it. The label
+    // is also what keeps the ready sweep off it, so the sweep's ask cannot become the accept this test decides.
     const issues: IssueState[] = [{ issue: 467, title: 'Bump the base image', body: 'Bump it to the new one.',
-      author: 'octocat', association: 'OWNER', createdAt: at, updatedAt: at }]
+      author: 'octocat', association: 'OWNER', createdAt: at, updatedAt: at, labels: [HUMAN_LABEL] }]
     const githubApi: GithubApi = { comments: async () => [] as IssueComment[], issues: async () => [...issues], postComment: async () => {} }
     const f = fixture(true, undefined, undefined, undefined, { githubApi })
     await f.running.tick()
@@ -2912,3 +2914,78 @@ describe('who may re-earn the launch', () => {
     expect(reads, 'an open ticket answers without reading every ticket').toBe(0)
   })
 })
+
+describe('the ready sweep: a free slot asks about a quiet issue', () => {
+  // The board, as the poll's listing spells it: `updatedAt` is the thread's last activity, and an issue the sweep
+  // is for has had none since the cursor passed it.
+  const idle = (issue: number, minutesAgo: number, labels?: string[]): IssueState => ({
+    issue, title: `DO: rotate the keys ${issue}`, author: 'octocat', association: 'OWNER',
+    createdAt: '2026-11-04T09:00:00Z', updatedAt: new Date(Date.parse('2026-11-05T12:00:00Z') - minutesAgo * 60_000).toISOString(),
+    ...(labels ? { labels } : {}),
+  })
+  const asks = (f: { judge: Spy }) => f.judge.prompts.filter(p => p.includes('The ready sweep sent this')).length
+  const asked = (f: { judge: Spy }, issue: number) => f.judge.prompts.some(p => p.includes(`Thread github:#${issue} `))
+  // The sweep's ask is inferred, so the judge's accept has to name the rule it matched: that is the gate, not the test's ceremony.
+  const acceptAsk = (f: { pi: FakePi, judge: Spy }) => {
+    const evalId = /Assess eval (\S+)/.exec(f.judge.prompts.at(-1) ?? '')?.[1]!
+    invoke0(f.pi, 'ticket_decide', { evalId, kind: 'accept', reason: 'work an agent can take now', title: 'Rotate the keys',
+      scope: 'the staging keys', acknowledgement: 'on it', rules: ['swept-ready-ask'] })
+  }
+
+  it('asks the judge about the oldest open issue, and its worker runs on the accept', async () => {
+    let now = Date.parse('2026-11-05T12:00:00Z')
+    const f = fixture(true, undefined, undefined, undefined, { clock: () => now, issues: [idle(30, 90), idle(21, 300), idle(44, 120)] })
+    await f.running.tick()
+    await f.running.tick()
+    await settle()
+    expect(asked(f, 21), 'the oldest issue on the board').toBe(true)
+    expect(f.judge.prompts.join('\n'), 'the judge is told nobody spoke, so it answers no person').toContain('The ready sweep sent this, not a person')
+    expect(asked(f, 30) || asked(f, 44), 'one trigger per tick').toBe(false)
+    acceptAsk(f)
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    expect(f.running.load().swept, 'the panel counts what the sweep asked the judge about today').toBe(1)
+    expect(f.receipts('21'), 'an ask posts nothing on the issue').toBe('')
+  })
+
+  it('asks about an issue once a day, and asks again the next day', async () => {
+    let now = Date.parse('2026-11-05T12:00:00Z')
+    const f = fixture(true, undefined, undefined, undefined, { clock: () => now, issues: [idle(21, 300)] })
+    // Every pass answers the judge: an Eval it leaves unanswered is a queue the sweep will not queue behind, and
+    // the standing-ask lane queues its own evals for the same thread.
+    const answer = async (passes: number) => {
+      for (let i = 0; i < passes; i++) { await f.running.tick(); await settle(); f.decide('ignore') }
+    }
+    await answer(4)
+    expect(asks(f)).toBe(1)
+    await answer(6)
+    expect(asks(f), 'the judge said no, and the day is spent: the sweep is a liveness lane, not a launcher').toBe(1)
+    now += 25 * 60 * 60_000
+    await answer(3)
+    expect(asks(f), 'tomorrow the rules decide again').toBe(2)
+  })
+
+  it('asks about nobody when every slot is busy', async () => {
+    let now = Date.parse('2026-11-05T12:00:00Z')
+    const f = fixture(true, undefined, undefined, undefined, { clock: () => now, maxConcurrent: 1, issues: [idle(21, 300), idle(22, 200)] })
+    await f.running.tick()
+    await settle()
+    acceptAsk(f)
+    await f.running.tick()
+    expect(f.workers).toHaveLength(1)
+    for (let i = 0; i < 5; i++) { await f.running.tick(); await settle() }
+    expect(asks(f), 'running = maxWorkers: a trigger with no slot behind it is a request nobody will take').toBe(1)
+    expect(f.running.load().swept).toBe(1)
+  })
+
+  it('leaves an issue the board parked under waiting-on-human, and the priority label wins the slot', async () => {
+    let now = Date.parse('2026-11-05T12:00:00Z')
+    const f = fixture(true, undefined, undefined, undefined,
+      { clock: () => now, issues: [idle(21, 300, ['waiting-on-human']), idle(30, 200), idle(22, 100, ['priority:high'])] })
+    await f.running.tick()
+    await settle()
+    expect(asked(f, 22), 'the label ranks ahead of age').toBe(true)
+    expect(asked(f, 21), 'a parked issue’s next move is a human’s').toBe(false)
+  })
+})
+

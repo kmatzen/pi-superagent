@@ -8,7 +8,8 @@ the model closest to the code you’re changing.
 | Specification | Code it models | Distinct states |
 | --- | --- | ---: |
 | [Ticket.tla](Ticket.tla) | Ticket lifecycle in `src/core/` | 924,784 |
-| [Intake.tla](Intake.tla) | GitHub polling in `src/pi/source-github.ts` | 113,281 |
+| [Intake.tla](Intake.tla) | GitHub polling in `src/pi/source-github.ts`, and the ready sweep's trigger at `engine.receive` | 385,777 |
+| [Sweep.tla](Sweep.tla) | The ready sweep's own rules in `Intake.sweep` (`src/core/intake.ts`) | 482 |
 | [Workers.tla](Workers.tla) | Worker records and herdr tabs in `src/pi/herdr-workers.ts` | 94 |
 
 Each accompanying `.cfg` file sets the bounds and selects the properties to check.

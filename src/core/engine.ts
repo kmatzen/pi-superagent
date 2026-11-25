@@ -6,7 +6,7 @@ import type { Candidate, Repositories } from './ports.ts'
 import type { EngineOptions } from './part.ts'
 import { Assignments, type WorkerReport } from './assignments.ts'
 import { Evals, type Outcome } from './evals.ts'
-import { Intake, type ReceiveResult } from './intake.ts'
+import { Intake, type ReceiveResult, type SweepPass, type SweepResult } from './intake.ts'
 import { Replies, type Reply, type ReplyRequest } from './replies.ts'
 import { Tickets } from './tickets.ts'
 
@@ -14,6 +14,7 @@ export type { EngineOptions } from './part.ts'
 export type { WorkerReport } from './assignments.ts'
 export type { Outcome } from './evals.ts'
 export type { ReceiveResult } from './intake.ts'
+export type { SweepCandidate, SweepPass, SweepResult } from './intake.ts'
 export type { Reply, ReplyRequest } from './replies.ts'
 
 /**
@@ -46,6 +47,13 @@ export class Engine {
    * Triggers that arrive while an Eval of that Thread runs wait together for the next one.
    */
   receive(trigger: Trigger): ReceiveResult { return this.repo.atomic(() => this.intake.receive(trigger)) }
+  /**
+   * The tick's ready sweep: free worker slots, nothing queued for Eval, and open asks on the Source's board that no
+   * ticket is on. Emits at most one synthetic Trigger, as the router's own request, for the board's highest-ranked
+   * such ask (see `Intake.sweep`); the judge decides on it like any other unowned candidate.
+   * @returns the thread swept, or why nothing was.
+   */
+  sweepReady(pass: SweepPass): SweepResult { return this.repo.atomic(() => this.intake.sweep(pass)) }
   /**
    * A Source's request to make an open ticket follow one of its Threads, such as a pull request's, `own` when the ticket
    * opened it: the ticket subscribes to it, and a ready report ends it only once `followsDone` holds (see `Tickets.followsDone`).

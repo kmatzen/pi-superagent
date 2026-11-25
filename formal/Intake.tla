@@ -15,9 +15,19 @@
   commit rewinds to the committed cursor: replay, dedup, no loss. Committing at read
   time instead makes C3 false, which is the bug this model found in shipped code.
 
+  The ready sweep (Intake.sweep, wired into the router's tick) is modelled here at the one
+  point where it touches this module: its trigger enters `engine.receive` like any other,
+  and intake's guard refuses a sweep trigger that claims to be a person's message. C7 is
+  that guard — the door a person's message walks through to wake a ticket its author
+  stopped, so a sweep that faked provenance could override a stop the operator ordered.
+  C8 is the emission's own rule: one trigger in flight, one per pass. Its capacity,
+  cooldown, ticket and cursor rules are in Sweep.tla; this model's 113,281 states of poll
+  and comment interleaving times the sweep's state does not close, and every sweep step
+  leaves the poll's variables alone, so C1-C6 carry over unchanged.
+
   Leaves out: reviews (they follow the same deferred cursor), pull requests and the
   stop on a closed thread, pagination, edited or deleted comments, comment bodies.
-  Bounds: two issues, two comments, one crash.
+  Bounds: two issues, two comments, one crash; one sweep emission, on i1.
 *)
 EXTENDS Integers, FiniteSets
 
@@ -38,11 +48,16 @@ VARIABLES
   opened, posted,                                       (* the outside world *)
   seen, cursor, seenStaged, cursorStaged,               (* committed and staged positions *)
   acceptedCm, acceptedHuman, acceptedIss,               (* engine.receive, dedup by id *)
-  pendCm, pendIss, openCnt                              (* emissions in flight *)
+  pendCm, pendIss, openCnt,                             (* emissions in flight *)
+  pendSweep, claim, sweptIss, sweptHuman                (* the sweep: emission, its human claim, what entered *)
 
 vars == <<crashes, seeded, firstSeeded, reopened, opened, posted, seen, cursor,
           seenStaged, cursorStaged, acceptedCm, acceptedHuman, acceptedIss,
-          pendCm, pendIss, openCnt>>
+          pendCm, pendIss, openCnt, pendSweep, claim, sweptIss, sweptHuman>>
+
+(* The sweep's own state. It is in every older action's UNCHANGED list and every sweep
+   action leaves the poll's state alone, so C1-C6 are untouched by the sweep. *)
+sweepVars == <<pendSweep, claim, sweptIss, sweptHuman>>
 
 Init ==
   /\ crashes = 0
@@ -52,6 +67,7 @@ Init ==
   /\ seen = {} /\ cursor = 1 /\ seenStaged = {} /\ cursorStaged = 1
   /\ acceptedCm = {} /\ acceptedHuman = {} /\ acceptedIss = {}
   /\ pendCm = {} /\ pendIss = {} /\ openCnt = [i \in Issues |-> 0]
+  /\ pendSweep = {} /\ claim = FALSE /\ sweptIss = {} /\ sweptHuman = {}
 
 (* ---- the outside world ---- *)
 (* Posting causality: a comment materializes at wall time, never behind the newest
@@ -63,7 +79,7 @@ PostComment(c) ==
   /\ posted' = posted \cup {c}
   /\ UNCHANGED <<crashes, seeded, firstSeeded, reopened, opened, seen, cursor,
                  seenStaged, cursorStaged, acceptedCm, acceptedHuman, acceptedIss,
-                 pendCm, pendIss, openCnt>>
+                 pendCm, pendIss, openCnt, sweepVars>>
 
 OpenIssue(i) ==
   /\ i \notin opened
@@ -71,7 +87,7 @@ OpenIssue(i) ==
   /\ openCnt' = [openCnt EXCEPT ![i] = 0]   (* a fresh open interval may fire once *)
   /\ UNCHANGED <<crashes, seeded, firstSeeded, reopened, posted, seen, cursor,
                  seenStaged, cursorStaged, acceptedCm, acceptedHuman, acceptedIss,
-                 pendCm, pendIss>>
+                 pendCm, pendIss, sweepVars>>
 
 CloseIssue(i) ==
   /\ i \in opened
@@ -79,7 +95,7 @@ CloseIssue(i) ==
   /\ openCnt' = [openCnt EXCEPT ![i] = 0]
   /\ reopened' = [reopened EXCEPT ![i] = TRUE]
   /\ UNCHANGED <<crashes, seeded, firstSeeded, posted, seen, cursor, seenStaged,
-                 cursorStaged, acceptedCm, acceptedHuman, acceptedIss, pendCm, pendIss>>
+                 cursorStaged, acceptedCm, acceptedHuman, acceptedIss, pendCm, pendIss, sweepVars>>
 
 (* ---- the source: first poll seeds; later polls commit, then stage ---- *)
 
@@ -97,7 +113,7 @@ FirstPoll ==
   /\ cursorStaged' = IF pendCm' = {} THEN cursor ELSE 1 + MaxNat({CmOf(c).at : c \in pendCm'})
   /\ pendIss' = {}
   /\ UNCHANGED <<crashes, reopened, opened, posted, cursor,
-                 acceptedCm, acceptedHuman, acceptedIss, openCnt>>
+                 acceptedCm, acceptedHuman, acceptedIss, openCnt, sweepVars, sweepVars>>
 
 (* A later poll: commit the previous stage — only once every trigger it emitted has
    been accepted (the deferred-commit rule). Then stage the next look. *)
@@ -112,7 +128,7 @@ Poll ==
      /\ seenStaged' = (seenStaged \cup newIss) \cap opened
      /\ cursorStaged' = IF pendCm' = {} THEN cursor' ELSE 1 + MaxNat({CmOf(c).at : c \in pendCm'})
   /\ UNCHANGED <<crashes, seeded, firstSeeded, reopened, opened, posted,
-                 acceptedCm, acceptedHuman, acceptedIss, openCnt>>
+                 acceptedCm, acceptedHuman, acceptedIss, openCnt, sweepVars>>
 
 (* The engine takes each emitted trigger once. Ids are content hashes, so a replayed
    trigger is processed as a no-op (engine.receive reports a duplicate) rather than
@@ -123,7 +139,7 @@ AcceptComment(c) ==
   /\ acceptedHuman' = IF CmOf(c).human THEN acceptedHuman \cup {c} ELSE acceptedHuman
   /\ pendCm' = pendCm \ {c}
   /\ UNCHANGED <<crashes, seeded, firstSeeded, reopened, opened, posted, seen, cursor,
-                 seenStaged, cursorStaged, acceptedIss, pendIss, openCnt>>
+                 seenStaged, cursorStaged, acceptedIss, pendIss, openCnt, sweepVars>>
 
 AcceptIssue(i) ==
   /\ i \in pendIss
@@ -131,7 +147,50 @@ AcceptIssue(i) ==
   /\ pendIss' = pendIss \ {i}
   /\ openCnt' = IF i \in acceptedIss THEN openCnt ELSE [openCnt EXCEPT ![i] = openCnt[i] + 1]
   /\ UNCHANGED <<crashes, seeded, firstSeeded, reopened, opened, posted, seen, cursor,
-                 seenStaged, cursorStaged, acceptedCm, acceptedHuman, pendCm>>
+                 seenStaged, cursorStaged, acceptedCm, acceptedHuman, pendCm, sweepVars>>
+
+(* ---- the ready sweep: the router's own request for an idle issue ---- *)
+
+(* The board is quiesced: the pass's live gates are a free slot and an empty eval queue, and
+   a trigger queued for Eval or an Eval in progress is the judge's work. The thread must be
+   on the board the poll read (`i1 \in seen`) — the sweep reads that board, it does not
+   re-read GitHub — and open. `claim` is the emitter's `human` flag as it stands in the
+   source, and the model lets it be either value: C7 then checks the guard in Intake.receive
+   rather than restating the flag, which is the shape of a careless later edit. *)
+EmitSweep(claiming) ==
+  /\ seeded /\ pendCm = {} /\ pendIss = {} /\ pendSweep = {} /\ sweptIss = {}
+  /\ i1 \in seen /\ i1 \in opened
+  /\ pendSweep' = {i1}
+  /\ claim' = claiming
+  /\ UNCHANGED <<crashes, seeded, firstSeeded, reopened, opened, posted, seen, cursor,
+                 seenStaged, cursorStaged, acceptedCm, acceptedHuman, acceptedIss,
+                 pendCm, pendIss, openCnt, sweptIss, sweptHuman>>
+
+Sweep == EmitSweep(FALSE)
+
+(* The emitter after the careless edit: the same pass, setting `human: true`. *)
+SweepClaimingHuman == EmitSweep(TRUE)
+
+(* Intake.receive: a trigger carrying the sweep's marker and `human: true` is refused —
+   nothing recorded, the emission dropped, no slot taken. A sweep can never walk the
+   `resumes` door and wake a ticket its author stopped. *)
+RefuseSweep ==
+  /\ pendSweep # {} /\ claim
+  /\ pendSweep' = {} /\ claim' = FALSE
+  /\ UNCHANGED <<crashes, seeded, firstSeeded, reopened, opened, posted, seen, cursor,
+                 seenStaged, cursorStaged, acceptedCm, acceptedHuman, acceptedIss,
+                 pendCm, pendIss, openCnt, sweptIss, sweptHuman>>
+
+(* The engine takes the sweep's request: a trigger like any other, recorded as swept and
+   never in `sweptHuman`, whatever the emission claimed. *)
+AcceptSweep ==
+  /\ pendSweep # {} /\ ~claim
+  /\ sweptIss' = sweptIss \cup pendSweep
+  /\ sweptHuman' = sweptHuman \cup {i \in Issues \cap sweptIss' : claim}
+  /\ pendSweep' = {} /\ claim' = FALSE
+  /\ UNCHANGED <<crashes, seeded, firstSeeded, reopened, opened, posted, seen, cursor,
+                 seenStaged, cursorStaged, acceptedCm, acceptedHuman, acceptedIss,
+                 pendCm, pendIss, openCnt>>
 
 (* Crash: the staged position dies with the process; committed state and accepted
    triggers survive; emissions in flight are lost and replay from the committed cursor.
@@ -144,7 +203,7 @@ Crash ==
   /\ seenStaged' = seen
   /\ pendCm' = {} /\ pendIss' = {}
   /\ UNCHANGED <<seeded, firstSeeded, reopened, opened, posted, seen, cursor,
-                 acceptedCm, acceptedHuman, acceptedIss, openCnt>>
+                 acceptedCm, acceptedHuman, acceptedIss, openCnt, sweepVars>>
 
 Terminate == UNCHANGED vars
 
@@ -157,6 +216,10 @@ Next ==
   \/ Poll
   \/ \E c \in Comments : AcceptComment(c)
   \/ \E i \in Issues : AcceptIssue(i)
+  \/ Sweep
+  \/ SweepClaimingHuman
+  \/ RefuseSweep
+  \/ AcceptSweep
   \/ Crash
 
 Fairness ==
@@ -178,6 +241,8 @@ TypeOK ==
   /\ acceptedIss \in SUBSET Issues
   /\ pendCm \in SUBSET Comments /\ pendIss \in SUBSET Issues
   /\ openCnt \in [Issues -> 0..2] /\ reopened \in [Issues -> BOOLEAN]
+  /\ pendSweep \in SUBSET Issues /\ claim \in BOOLEAN
+  /\ sweptIss \in SUBSET Issues /\ sweptHuman \in SUBSET Issues
 
 (* C1. The first look is silent: a seeded issue fires only after a real close and
    reopen. *)
@@ -202,5 +267,15 @@ C5_BotNeverHuman == acceptedHuman \subseteq {c \in acceptedCm : CmOf(c).human}
    every issue opened after the seed fires. The model allows one crash; the replay
    argument is the same for each further one. *)
 C6_NoLoss == []<>(posted \subseteq acceptedCm /\ \A i \in opened : i \in acceptedIss \/ i \in firstSeeded)
+
+(* C7. A sweep trigger never enters the engine as a person's request. `SweepClaimingHuman`
+   is the emitter after a careless edit, so this checks the guard in Intake.receive: let
+   AcceptSweep ignore `claim` — the code before the guard — and C7 fails. That is the door
+   a sweep would use to wake a ticket its author stopped. *)
+C7_SweepNeverHuman == sweptHuman = {}
+
+(* C8. One sweep trigger in flight: the pass emits at most one, and the next pass waits for
+   the engine to take it. *)
+C8_OneSweepInFlight == Cardinality(pendSweep) <= 1
 
 =====================
