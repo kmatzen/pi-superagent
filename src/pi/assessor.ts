@@ -1,6 +1,7 @@
 /** The Assessor port: renders each Candidate and sends it to the judge, one at a time; the judge's
  *  `ticket_decide` call brings the answer back. */
 import { UserError, type Assessor, type AssessmentOutcome, type Candidate, type Engine } from '../core/index.ts'
+import { ACK_FORMAT } from './firstpost.ts'
 import { threadUrl } from './pulls.ts'
 
 export interface SessionPilot {
@@ -36,7 +37,8 @@ export const renderCandidate = (c: Candidate): string => [
   c.tickets.length ? `Tickets already on this thread:\n${c.tickets.map(t => `- ${t.id} ${t.title}${t.ended ? ' (ended)' : ' (open)'}`).join('\n')}` : 'No tickets on this thread yet.',
   'Answer with ticket_decide: accept (title, scope, reason, acknowledgement for the asker, rules you matched, '
   + 'name, note for the worker), ignore (reason), stop (ticketId, reason), or unavailable (reason). '
-  + 'Ignore is the answer for chatter, and for a request someone else already owns.',
+  + 'Ignore is the answer for chatter, and for a request someone else already owns.\n'
+  + `The acknowledgement is the first post on the asker's issue, and an accept is refused without it rendering in blocks: ${ACK_FORMAT}`,
 ].join('\n')
 
 /** GitHub threads carry only `#<issue>`; the judge should see the URL it describes and what counts as a request. */

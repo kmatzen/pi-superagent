@@ -1,5 +1,6 @@
 /** The router's shared surface: config, the SDK seam, the worker brief, and the admissibility policy. */
 import { isListed } from './authors.ts'
+import { POST_STRUCTURE } from './firstpost.ts'
 import type { Policy, SourceScope, Ticket } from '../core/index.ts'
 import type { GhOptions } from './gh-api.ts'
 
@@ -154,6 +155,7 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   'Do not edit the ticket and do not post reply comments: the router writes receipts, you report.',
   'Write in English: every pull request title and body, issue comment, commit message, code comment and ticket_report,',
   'whatever language you think in. Text in another language is refused before it is sent.',
+  'Every post you publish is GitHub markdown in blocks. ' + POST_STRUCTURE,
   'Someone always watches what you start. If you leave something running (a training job, CI, a deploy), report waiting',
   'with wakeInMinutes, when it should next be checked, and say in notes what to check: a fresh worker is called',
   'back then. Report ready only when nothing you started still runs. While you hold a GPU job claim, a report or a question',

@@ -154,6 +154,20 @@ describe('the worker role', () => {
     expect(verdict('bash', { command: `grep -rn "${chinese}" docs/` }), 'searching is not publishing').toBeUndefined()
   })
 
+  it('refuses a pull request body that would render as one run-on paragraph, and lets a body in blocks through', () => {
+    // agent-inbox#1005: the first post on an issue arrived as one wall of text, because only a report had a rule.
+    const f = fakePi()
+    workerRole(f.pi, { PI_SUPERAGENT_ROLE: 'worker', PI_SUPERAGENT_WORKER_DIR: tmp(), PI_SUPERAGENT_WORKSPACE: '/w' })
+    const wall = 'This pull request fixes the first post on a thread. ' + 'The writer kept no blank lines, so GitHub rendered every word as one paragraph, and the person who asked could not read it. '.repeat(7)
+    const blocks = 'Fix the first post formatting.\n\n## What changed\n\n- Keep every newline from the writer to GitHub.\n- Refuse a body that lands as one wall of text.'
+    const verdict = (command: string) => f.emit('tool_call', { toolName: 'bash', input: { command } }).find(v => v)
+    expect(verdict(`gh pr create --title Fix --body "${wall}"`)).toMatchObject({ block: true })
+    expect((verdict(`gh pr create --title Fix --body "${wall}"`) as { reason: string }).reason).toContain('blank line between every paragraph')
+    expect(verdict(`gh pr create --title Fix --body "${blocks}"`), 'a body in blocks is never refused for its shape').toBeUndefined()
+    expect(verdict('gh pr create --title Fix --body "On it, five minutes."'), 'a short body is legal').toBeUndefined()
+    expect(verdict(`grep -rn "${wall}" docs/`), 'searching is not publishing').toBeUndefined()
+  })
+
   it('with no claims ledger configured, no claim holds a report back: the engine names no ledger of its own', () => {
     const dir = tmp()
     const home = tmp()

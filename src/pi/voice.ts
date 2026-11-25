@@ -4,7 +4,7 @@
 /** The router puts `#123 ready:` in front of line 1, so the summary's own line 1 leaves two of the 25 words free. */
 export const LEAD_WORDS = 23
 const HEAD_WORDS = 160
-const PARA_WORDS = 80
+export const PARA_WORDS = 80
 const BLOCK_LINES = 8
 const TABLE_ROWS = 5
 const DETAIL_BULLETS = 6
@@ -52,13 +52,13 @@ function prose(text: string): string {
   return out.join('\n')
 }
 
-function leadProblems(lead: string): string[] {
+function leadProblems(lead: string, leadLimit: number): string[] {
   if (!lead) return ['there is no first sentence: start with the news or the ask']
   if (/^(?:#|-|\*|```|\||>)/.test(lead)) return ['line 1 is a heading, list or code, not a sentence: start with one plain sentence']
   const out: string[] = []
   const plain = lead.replace(URL, ' ')
   const n = words(plain)
-  if (n > LEAD_WORDS) out.push(`line 1 is ${n} words (at most ${LEAD_WORDS}): keep it to the news, and move the rest down`)
+  if (n > leadLimit) out.push(`line 1 is ${n} words (at most ${leadLimit}): keep it to the news, and move the rest down`)
   const insider = INSIDER.find(([pattern]) => pattern.test(plain))
   if (insider) out.push(`line 1 contains ${insider[1]} (${plain.match(insider[0])![0].slice(0, 40)}): the reader has no context for it, so move it to Details`)
   const jargon = JARGON.filter(w => new RegExp(`\\b${escape(w)}\\b`, 'i').test(plain))
@@ -66,7 +66,14 @@ function leadProblems(lead: string): string[] {
   return out
 }
 
-export function voiceProblems(summary: string, question?: string | null): string[] {
+export interface VoiceOptions {
+  leadWords?: number
+  /** A first post may quote the failing line, so a fenced block is structure there; in a report, code goes last. */
+  allowCode?: boolean
+}
+
+export function voiceProblems(summary: string, question?: string | null, options: VoiceOptions = {}): string[] {
+  const leadWords = options.leadWords ?? LEAD_WORDS
   const lines = summary.split('\n')
   const leadAt = lines.findIndex(line => line.trim())
   const lead = leadAt < 0 ? '' : lines[leadAt]!.trim()
@@ -75,7 +82,7 @@ export function voiceProblems(summary: string, question?: string | null): string
   const main = (cut < 0 ? rest : rest.slice(0, cut)).join('\n')
   const details = cut < 0 ? '' : rest.slice(cut + 1).join('\n')
   const head = leadAt < 0 ? main : `${lines[leadAt]}\n${main}`
-  const out = leadProblems(lead)
+  const out = leadProblems(lead, leadWords)
   const headWords = words(prose(head))
   if (headWords > HEAD_WORDS) out.push(`${headWords} words come before the Details line (at most ${HEAD_WORDS}): keep three short result lines, move the rest under Details or into notes`)
   stripCode(head).split(/\n\s*\n/).forEach((para, i) => {
@@ -86,7 +93,7 @@ export function voiceProblems(summary: string, question?: string | null): string
     run = line.trim() && !FENCE.test(line) ? run + 1 : 0
     if (run === BLOCK_LINES + 1) { out.push(`more than ${BLOCK_LINES} lines run together with no blank line: one idea per line, blank lines between blocks`); break }
   }
-  if (head.split('\n').some(line => FENCE.test(line))) out.push('a code or log block comes before the Details line: code goes last, or into notes')
+  if (!options.allowCode && head.split('\n').some(line => FENCE.test(line))) out.push('a code or log block comes before the Details line: code goes last, or into notes')
   const body = `${summary}\n${question ?? ''}`.split('\n')
   const rows = body.filter(line => TABLE_ROW.test(line) && !/^\s*\|[\s:|-]+\|\s*$/.test(line)).length
   if (rows > TABLE_ROWS) out.push(`a table has ${rows} rows (at most ${TABLE_ROWS}): summarise it in a few lines, and put the table in the pull request`)
@@ -101,8 +108,8 @@ export function voiceProblems(summary: string, question?: string | null): string
   return out
 }
 
-export const VOICE_REFUSED = (problems: readonly string[]): string => 'Not reported: the summary is posted on the issue for the person who asked, '
+export const VOICE_REFUSED = (problems: readonly string[], leadWords = LEAD_WORDS): string => 'Not reported: the summary is posted on the issue for the person who asked, '
   + `and it fails the plain-language check:\n${problems.map(p => `- ${p}`).join('\n')}\n`
-  + `What passes: line 1 is the news or the ask, in at most ${LEAD_WORDS} plain words; then at most three short lines of results; `
+  + `What passes: line 1 is the news or the ask, in at most ${leadWords} plain words; then at most three short lines of results; `
   + `then a line "Details (skippable):" and at most ${DETAIL_BULLETS} short bullets. File paths, code names, commit ids, logs and what `
   + 'to check next go in notes, which only the next worker on this ticket reads. Call ticket_report again.'

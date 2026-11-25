@@ -3,6 +3,7 @@
 import { isListed } from './authors.ts'
 import { createHash } from 'node:crypto'
 import { countCredentials, redactCredentials } from './git-credentials.ts'
+import { normalizePost } from './firstpost.ts'
 import type { SweepCandidate, Trigger } from '../core/index.ts'
 
 export interface IssueComment {
@@ -134,6 +135,10 @@ export const CURSOR_LAG_MS = 120_000
 /** A solo operator posts from the same login the agent replies from, so the author cannot identify the
  *  agent's own writing; the footer can. */
 export const REPLY_MARKER = '<!-- superagent -->'
+
+/** The bytes every router post publishes. The router's retry dedupe compares this exact text, so the masking and
+ *  the normalization live here rather than in the two callers that would drift apart. */
+export const publishBody = (text: string): string => `${normalizePost(redactCredentials(text))}\n\n${REPLY_MARKER}`
 
 export const commentTriggerId = (c: IssueComment): string =>
   // The id hashes the raw body: the cursor re-reads a two-minute window, so an id that moved with masking rules would re-fire stored comments.

@@ -1,8 +1,8 @@
 /** GitHub through the `gh` CLI, as the account it is signed in as or as the one a token file names. */
 import { spawn } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
-import { REPLY_MARKER, type GithubApi, type IssueComment, type IssueState, type PrReview } from './source-github.ts'
-import { countCredentials, redactCredentials } from './git-credentials.ts'
+import { publishBody, type GithubApi, type IssueComment, type IssueState, type PrReview } from './source-github.ts'
+import { countCredentials } from './git-credentials.ts'
 import type { PullApi } from './pulls.ts'
 
 export interface GhOptions {
@@ -167,14 +167,14 @@ export function ghApi(options: GithubApiOptions): GithubApi {
       // that told the worker to paste. Counted, so the router logs that it masked without logging what.
       const hits = countCredentials(body)
       if (hits) options.onCredentialRedacted?.(hits, `${repo ?? options.repo}#${issue}`)
-      const payload = JSON.stringify({ body: `${redactCredentials(body)}\n\n${REPLY_MARKER}` })
+      const payload = JSON.stringify({ body: publishBody(body) })
       await call(['api', '-X', 'POST', `repos/${repo ?? options.repo}/issues/${issue}/comments`, '--input', '-'], payload)
     },
 
     async upsertComment(issue, commentId, body, repo) {
       const hits = countCredentials(body)
       if (hits) options.onCredentialRedacted?.(hits, `${repo ?? options.repo}#${issue}`)
-      const payload = JSON.stringify({ body: `${redactCredentials(body)}\n\n${REPLY_MARKER}` })
+      const payload = JSON.stringify({ body: publishBody(body) })
       const target = repo ?? options.repo
       const written = (out: string) => { const r = JSON.parse(out) as { id: number; html_url: string }; return { id: r.id, url: r.html_url } }
       if (commentId) {
