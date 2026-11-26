@@ -2989,3 +2989,58 @@ describe('the ready sweep: a free slot asks about a quiet issue', () => {
   })
 })
 
+
+describe('the first post on a thread (agent-inbox#1005)', () => {
+  // The judge's own words, in the shape that reached the operator: one line, no break, hundreds of words.
+  const RUN_ON_ACK = 'On it — and the word that diagnoses this is "first." '
+    + 'If only the initial post runs on and later comments format correctly, the writer of the first post is the layer at fault. '
+      .repeat(9)
+  const GOOD_ACK = ['On it — the first post runs on because its writer never put a break in it.',
+    '',
+    'I will fix the layer that drops the breaks, not the renderer.',
+    '',
+    '- Keep every newline from the writer to GitHub',
+    '- Refuse a post that lands as one wall of text',
+    '- Prove it on a real issue'].join('\n')
+
+  const judge = (f: { judge: Spy, pi: FakePi }) => {
+    const evalId = /Assess eval (\S+)/.exec(f.judge.prompts.at(-1) ?? f.pi.sent.at(-1) ?? '')?.[1]!
+    return (acknowledgement: string) => invoke0(f.pi, 'ticket_decide',
+      { evalId, kind: 'accept', reason: 'the operator asked', title: 'Fix the first post formatting', scope: 'the first post', acknowledgement })
+      .content[0]!.text
+  }
+
+  it('refuses a first post that would render as one run-on paragraph, and posts the rewrite in blocks', async () => {
+    const f = fixture()
+    f.addComment('900', 'octocat', 'the first post on my issue is one run-on paragraph, fix it')
+    await f.running.tick()
+    await settle()
+    const answer = judge(f)
+    expect(answer(RUN_ON_ACK), 'the judge is told what to fix, in the rule\'s own words').toContain('run-on paragraph')
+    for (let pass = 0; pass < 3; pass++) { await f.running.tick(); await settle() }
+    expect(f.feed.posts, 'nothing reaches the person while the first post is refused').toHaveLength(0)
+    expect(answer(GOOD_ACK), 'the rewrite is accepted').toBe('decided accept')
+    for (let pass = 0; pass < 3; pass++) { await f.running.tick(); await settle() }
+    const ack = f.feed.posts.filter(p => p.issue === 900).map(p => p.body).join('\n')
+    expect(ack, 'the first post keeps its blank lines, heading-free prose and list').toBe(GOOD_ACK)
+    expect(ack.split('\n\n').length, 'blocks, not one line').toBeGreaterThan(2)
+    expect(ack).toContain('\n- Keep every newline from the writer to GitHub\n')
+  })
+
+  it('writes the first post from the accept fields when the judge will not satisfy the gate, so the accept lands', async () => {
+    const f = fixture()
+    f.addComment('901', 'octocat', 'fix the run-on first post')
+    await f.running.tick()
+    await settle()
+    const answer = judge(f)
+    expect(answer(RUN_ON_ACK)).toContain('run-on paragraph')
+    expect(answer(RUN_ON_ACK)).toContain('run-on paragraph')
+    expect(answer(RUN_ON_ACK), 'the third answer is decided: the router composes the post itself').toBe('decided accept')
+    for (let pass = 0; pass < 4; pass++) { await f.running.tick(); await settle() }
+    expect(f.workers, 'the work starts: a ticket is never lost over formatting').toHaveLength(1)
+    const ack = f.feed.posts.filter(p => p.issue === 901).map(p => p.body).join('\n')
+    expect(ack, 'the composed first post is in blocks').toBe('On it.\n\nI\'m working on: Fix the first post formatting.\n\n'
+      + 'A worker runs this now. It reports on this issue, and a comment here reaches it.')
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/ack\.replaced .*Fix the first post formatting/)
+  })
+})

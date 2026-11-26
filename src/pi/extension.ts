@@ -11,12 +11,13 @@ const runGit = promisify(execFile)
 import { join, resolve } from 'node:path'
 import { Engine, type AssessmentOutcome, type Assessor, type Candidate, type OutboundMessage, type Policy, type ThreadRef, type Ticket, type TicketInput, type Trigger } from '../core/index.ts'
 import { SqliteRepositories } from './store.ts'
-import {GithubSource, PRIORITY_GRANTS_PER_POLL, REPLY_MARKER, WON_SLOT_KEY, wonSlotReason, type GithubApi, type IssueState} from './source-github.ts'
+import {GithubSource, PRIORITY_GRANTS_PER_POLL, WON_SLOT_KEY, publishBody, wonSlotReason, type GithubApi, type IssueState} from './source-github.ts'
 import { ghApi, ghCall, ghPulls } from './gh-api.ts'
-import { redactCredentials } from './git-credentials.ts'
 import { followedPulls, parsePull, parseThread, pullUrl, PullFollower, threadOfPull, wakeOnChecks, type ChecksState, type CheckWakePorts, type PullApi, type PullRef, type PullState, type ReconcileReport } from './pulls.ts'
 import { PullTracker } from './tracker.ts'
 import { CommentOutbox } from './outbox.ts'
+import { ACK_FORMAT, ACK_LEAD_WORDS, ACK_REFUSED, MAX_ACK_REFUSALS, fallbackAcknowledgement, runOnProblems } from './firstpost.ts'
+import { voiceProblems } from './voice.ts'
 import { IssueCloser } from './issue-closer.ts'
 import { PiExecutor } from './executor.ts'
 import { renderCandidateFor, SessionAssessor, type SessionPilot } from './assessor.ts'
@@ -134,7 +135,7 @@ export const DECIDE_SCHEMA = {
     evalId: { type: 'string' },
     kind: { type: 'string', enum: ['accept', 'ignore', 'stop', 'unavailable'] },
     title: { type: 'string' }, scope: { type: 'string' }, reason: { type: 'string' },
-    acknowledgement: { type: 'string' }, rules: { type: 'array', items: { type: 'string' } },
+    acknowledgement: { type: 'string', description: ACK_FORMAT }, rules: { type: 'array', items: { type: 'string' } },
     name: { type: 'string' }, note: { type: 'string' }, ticketId: { type: 'string' },
   },
   required: ['evalId', 'kind', 'reason'],
@@ -236,7 +237,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         // comparison is against the body as it will be posted — credentials masked — because the masked text is
         // what GitHub has, and comparing the unmasked original would post a duplicate on every retry.
         const seen = retry && githubApi.commentsFor ? await githubApi.commentsFor(issue, repo) : []
-        const posted = `${redactCredentials(body)}\n\n${REPLY_MARKER}`
+        const posted = publishBody(body)
         if (seen.some(c => c.body.trimEnd() === posted)) return
         await githubApi.postComment(issue, body, repo)
       } catch (error) {
@@ -1070,9 +1071,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   })
   executorRef = executor
 
+  const ackRefusals = new Map<string, number>()
   const decideTool: RegisteredTool = {
     name: 'ticket_decide', label: 'Judge a candidate',
-    description: 'Answer one eval the engine delivered: accept (title, scope, reason, acknowledgement), ignore, stop (ticketId), or unavailable.',
+    description: 'Answer one eval the engine delivered: accept (title, scope, reason, acknowledgement), ignore, stop (ticketId), '
+      + 'or unavailable. The acknowledgement is the first post on the person\'s issue and is refused unless it renders in blocks.',
     parameters: DECIDE_SCHEMA,
     execute: (_id, args) => {
       const a = args as unknown as { evalId: string; kind: AssessmentOutcome['kind'] } & Record<string, string>
@@ -1087,7 +1090,24 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         a.kind = 'ignore' as AssessmentOutcome['kind']
         a.reason = `${thread} already has open ticket ${owner.id}; its worker gets this thread's messages`
       }
+      // The one post with no writing rule: 99 of the newest 239 router posts stored zero newlines, all of them
+      // acknowledgements (#1005). Past the gate's refusals the first post is composed from the accept's own fields.
+      if (a.kind === 'accept' && a.acknowledgement) {
+        const problems = [...voiceProblems(a.acknowledgement, null, { leadWords: ACK_LEAD_WORDS, allowCode: true }), ...runOnProblems(a.acknowledgement)]
+        if (problems.length) {
+          const tries = (ackRefusals.get(a.evalId) ?? 0) + 1
+          if (tries <= MAX_ACK_REFUSALS) {
+            ackRefusals.set(a.evalId, tries)
+            log.line('warn', 'ack.refused', { eval: a.evalId, tries, problems: problems.join('; ').slice(0, 300) })
+            return text(ACK_REFUSED(problems))
+          }
+          a.acknowledgement = fallbackAcknowledgement(a.title ?? '')
+          ackRefusals.delete(a.evalId)
+          log.line('warn', 'ack.replaced', { eval: a.evalId, title: (a.title ?? '').slice(0, 120) })
+        }
+      }
       assessor.decide(a.evalId, a as unknown as AssessmentOutcome)
+      ackRefusals.delete(a.evalId)
       log.line('info', 'eval.decided', { eval: a.evalId, kind: a.kind, reason: (a.reason ?? '').slice(0, 300) })
       return text(`decided ${a.kind}`)
     },

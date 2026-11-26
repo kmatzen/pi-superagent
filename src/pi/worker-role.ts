@@ -4,6 +4,7 @@ import { basename, join } from 'node:path'
 import { reportTool } from './report-tool.ts'
 import { guardExtension } from './workspace.ts'
 import { NOT_ENGLISH, nonEnglish, publishedText } from './english.ts'
+import { PUBLISH_REFUSED, runOnProblems } from './firstpost.ts'
 import { closesBoardIssue, closingRefused } from './closing.ts'
 
 export interface WorkerPi {
@@ -115,6 +116,10 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
       : call.toolName === 'bash' && typeof call.input?.command === 'string'
         ? publishedText(call.input.command, env.PI_SUPERAGENT_WORKSPACE ?? process.cwd()) : undefined
     if (text && nonEnglish(text)) return { block: true, reason: NOT_ENGLISH }
+    // The same hook already refuses a Chinese body and a closing keyword; a body with no blank line renders on
+    // GitHub as one run-on paragraph, so the rule that covers a report covers a pull request body too (#1005).
+    const runOn = call.toolName === 'bash' && text ? runOnProblems(text) : []
+    if (runOn.length) return { block: true, reason: PUBLISH_REFUSED(runOn) }
     const closing = call.toolName === 'bash' && text ? closesBoardIssue(text, env.PI_SUPERAGENT_HOME_REPO ?? '') : undefined
     if (closing) return { block: true, reason: closingRefused(closing) }
   })
