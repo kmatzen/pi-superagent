@@ -79,12 +79,11 @@ afterAll(() => {
   }
 })
 
-// The process table is Linux's; on macOS the script reads the recorded panel.pid instead.
-const linux = process.platform === 'linux'
 
 // These cases need the author's box: on a clean ubuntu-latest runner 42 of the 62 fail (run 45894229219),
 // and on a macOS box running a router, 38 fail, all of them `start` exiting 2 on a panel port that lsof
 // reports as held by nobody. Skipped on Linux with that on record: https://github.com/kmatzen/pi-superagent/issues/160
+// The second suite was `describe.skipIf(!linux)`, Linux-only, so with this gate the file runs on no platform.
 const liveEngine = describe.skipIf(process.platform === 'linux')
 
 liveEngine('scripts/superagent: the engine, apart from its tab', { timeout: 30_000 }, () => {
@@ -155,7 +154,7 @@ liveEngine('scripts/superagent: the engine, apart from its tab', { timeout: 30_0
   })
 })
 
-describe.skipIf(!linux)('scripts/superagent: the proof that the engine stopped', { timeout: 30_000 }, () => {
+liveEngine('scripts/superagent: the proof that the engine stopped', { timeout: 30_000 }, () => {
   it('stop proves the engine died and takes back the ready file a kill leaves behind', () => {
     expect(run(['start']).status).toBe(0)
     const pid = Number(readFileSync(join(herdrDir, 'engine.pid'), 'utf8'))
