@@ -338,6 +338,8 @@ describe('the router extension', () => {
     await f.running.tick()
     await until(() => f.workers.length > 1, 500)
     expect(f.workers, 'the freed slot starts nobody for the withdrawn ticket').toHaveLength(1)
+    // A runner that refuses the `gh` CLI widens the gap between the stop and the launch sweep, so wait (issue 161).
+    await until(() => /worker\.launch_skipped .*why="ticket ended"/.test(readFileSync(join(f.dir, 'engine.log'), 'utf8')), 2000)
     expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/worker\.launch_skipped .*why="ticket ended"/)
   })
 
