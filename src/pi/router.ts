@@ -42,6 +42,17 @@ export interface RouterConfig {
    */
   watchRepoIsAsks?: boolean
   judgeThinking?: string
+  /**
+   * What the judge session gets to open and to start its first run. Default 2 min against a measured 20-45 s
+   * open; past it the session is wedged, so its evals go back for a retry and its tab is reaped.
+   */
+  judgeReadyMs?: number
+  /** No decision for this long while evals keep arriving is a stalled judge (default 15 min). */
+  judgeStallMs?: number
+  /** How often one judge stall is repeated into the log and the board. Default 5 min. */
+  judgeStallReportMs?: number
+  /** Issue to post fleet alerts on. Unset, a stall files a new issue on the watched repository. */
+  alertIssue?: number
   /** 'herdr': each worker is its own pi session in a herdr tab. Unset, workers run in-process (tests only). */
   workers?: 'herdr'
   herdrBin?: string

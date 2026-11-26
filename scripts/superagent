@@ -351,6 +351,23 @@ stale_health() {
 health_age_min() { node -e 'const s=require("fs").statSync(process.argv[1]);console.log(Math.floor((Date.now()-s.mtimeMs)/60000))' "$STATE/health.json" 2>/dev/null || echo '?'; }
 setup_needed() { [ -f "$STATE/setup.json" ] && grep -q '"problem": *{' "$STATE/setup.json" 2>/dev/null; }
 
+# The engine's tabs leak, and a restart did not clear them: every `start` opens one labelled `engine`, a start
+# whose pi died leaves it behind, and 10 of them (`agent_status=unknown`) were still there after the restart that
+# fixed the stall on 2026-11-25 (agent-inbox#1022). `unknown` is herdr's own word for a tab with no pi in it, so
+# closing one ends nobody's session; the live tab answers idle/working, and the log tail is `engine log`, so both
+# survive. The engine's sweep closes these too while a router is up; this is the pass that runs when it is not.
+reap_engine_tabs() {
+  local ws="$1" ids tab closed=0
+  ids="$("$HERDR_BIN" tab list 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const t=(JSON.parse(d).result?.tabs??[]).filter(t=>t.label==="engine"&&t.workspace_id===process.argv[1]&&t.agent_status==="unknown");process.stdout.write(t.map(t=>t.tab_id).join("\n"))})' "$ws" 2>/dev/null)" || return 0
+  [ -n "$ids" ] || return 0
+  while IFS= read -r tab; do
+    [ -n "$tab" ] || continue
+    "$HERDR_BIN" tab close "$tab" >/dev/null 2>&1 && closed=$((closed+1))
+  done <<<"$ids"
+  [ "$closed" -gt 0 ] && echo "closed $closed leaked engine tab(s) with no pi behind them"
+  return 0
+}
+
 start() {
   # A deployment that stores its credential in a world-readable URL is not a deployment to bring up: the
   # router's own workers are the readers. Refuse before herdr, the port and the tab, so the fix is the first
@@ -433,6 +450,7 @@ start() {
   while IFS= read -r name; do
     [ -n "${!name:-}" ] && env+=(--env "$name=${!name}")
   done < <(compgen -v PI_SUPERAGENT_ | grep -vE '^PI_SUPERAGENT_(ROLE|STATE|WORKTREES|PANEL_PORT|SESSION_ID|HERDR_BIN|HERDR_WORKSPACE)$')
+  reap_engine_tabs "$ws"
   local tab; tab="$("$HERDR_BIN" tab create --workspace "$ws" --cwd "$STATE" --label engine "${env[@]}" --no-focus)" || return 1
   local pane_id tab_id
   pane_id="$(printf '%s' "$tab" | field result root_pane pane_id)"

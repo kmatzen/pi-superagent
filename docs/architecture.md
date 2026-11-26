@@ -88,7 +88,9 @@ forward from the saved position.
 decision, `assessor.ts` assembles the thread, messages, existing tickets and issue link.
 `judge.ts` runs one candidate at a time in a headless pi session with a single tool, `ticket_decide`.
 The session excludes extensions, skills and context files. The router overrides an acceptance if
-an open ticket already owns the thread.
+an open ticket already owns the thread. Its first prompt is also its readiness probe: a session
+that accepts a prompt and starts no run is disposed, its evals go back for a retry, and the
+watchdog in `extension.ts` publishes the age of the last decision (`lastDecisionAgeSec`).
 
 ### Workers
 
@@ -172,6 +174,8 @@ To start over, stop the router and delete the directory. On the next start, the 
 | A ticket with a pull request ends with it, as merged or closed | binding before the report, `threadClosed` | tests only |
 | A live agent's tab is never swept | the liveness check in `closeStaleTabs` | `Workers.tla` W2, W4 |
 | Dead workers' tabs do not pile up | the sweep and the linger close | `Workers.tla` W5 |
+| A judge that stops answering is noticed, not fed | the readiness probe, and `lastDecisionAgeSec` in health.json | tests only |
+| An `engine` tab with no pi behind it does not survive a start | `closeDeadEngineTabs`, `reap_engine_tabs` | tests only |
 
 ## Related designs
 

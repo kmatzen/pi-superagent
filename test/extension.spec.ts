@@ -86,13 +86,15 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
                    workerQuietMinutes?: number; pullApi?: PullApi; blocked?: string[];
                    judgeFails?: boolean; workerTokenFile?: string; claimsFile?: string; watchRepoIsAsks?: boolean;
                    maxConcurrent?: number; launchDrainMs?: number; tickStallMs?: number; tickStallReportMs?: number; tickAbandonMs?: number;
-                   workerStartMs?: number; closeRecheckMs?: number; scopesWork?: boolean; groupCap?: boolean; clock?: () => number; sizeOf?: (dir: string) => Promise<number> } = {}) {
+                   workerStartMs?: number; closeRecheckMs?: number; scopesWork?: boolean; groupCap?: boolean; clock?: () => number; sizeOf?: (dir: string) => Promise<number>;
+                   judgeReadyMs?: number; judgeStallMs?: number; judgeStallReportMs?: number; alertIssue?: number } = {}) {
   const dir = reuse ?? tmp()
   const feed: Feed = { issues: options.issues ?? [], comments: [], posts: [], closedIssues: [] }
   const closes: number[] = []
   // One ordered log of the writes to GitHub, so a test can pin the order a person reads the thread in.
   const calls: string[] = []
   const trackers: Array<{ issue: number; id: number; edit: boolean; body: string }> = []
+  const created: Array<{ title: string; body: string }> = []
   const api: GithubApi = options.githubApi ?? {
     // The fakes deliver everything and let the source's own rules do the filtering, as server.spec does.
     issues: async () => [...feed.issues],
@@ -100,6 +102,8 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     comments: async () => [...feed.comments],
     postComment: async (issue, body, repo) => { calls.push(`post:${issue}`); feed.posts.push({ issue, body, ...(repo ? { repo } : {}) }) },
     closeIssue: async issue => { calls.push(`close:${issue}`); closes.push(issue) },
+    // A fleet alert is an issue on the board: the test reads what a person would see without ssh.
+    createIssue: async (title, body) => { created.push({ title, body }); return 900 + created.length },
     // Apart from `calls`: the status comment is edited in place, and the call-order tests pin what a person is notified of.
     upsertComment: async (issue, id, body) => {
       const comment = id ?? 900 + trackers.length
@@ -136,6 +140,10 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     ...(options.claimsFile ? { claimsFile: options.claimsFile } : {}),
     ...(options.workerStartMs ? { workerStartMs: options.workerStartMs } : {}),
     ...(options.closeRecheckMs === undefined ? {} : { closeRecheckMs: options.closeRecheckMs }),
+    ...(options.judgeReadyMs === undefined ? {} : { judgeReadyMs: options.judgeReadyMs }),
+    ...(options.judgeStallMs === undefined ? {} : { judgeStallMs: options.judgeStallMs }),
+    ...(options.judgeStallReportMs === undefined ? {} : { judgeStallReportMs: options.judgeStallReportMs }),
+    ...(options.alertIssue === undefined ? {} : { alertIssue: options.alertIssue }),
   }
   const workers: Spy[] = []
   const judge: Spy = { prompts: [], report: undefined, disposed: false, events: [] }
@@ -151,7 +159,7 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
         if (judgeFails) throw new Error('no sdk for the judge')
         judgeSessions.push('opened')
         judge.report = args => tool.execute('judge-1', args as never)
-        return { session: { sessionId: 'judge', prompt: async (t: string) => { judge.prompts.push(t) }, subscribe: (l: (event: { type: string }) => void) => { judgeListeners.push(l); return () => {} }, abort: () => {}, dispose: () => {} } }
+        return { session: { sessionId: 'judge', prompt: async (t: string) => { judge.prompts.push(t) }, subscribe: (l: (event: { type: string }) => void) => { judgeListeners.push(l); return () => {} }, abort: () => {}, dispose: () => { judge.disposed = true } } }
       }
       const spy: Spy = { prompts: [], report: args => tool.execute('call-1', args as never), disposed: false, events: [] }
       workers.push(spy)
@@ -180,9 +188,11 @@ function fixture(accept = true, before?: (dir: string) => void, reuse?: string, 
     }
   }
   const settleJudge = () => { for (const l of judgeListeners) l({ type: 'agent_settled' }) }
+  /** The probe's answer: this session takes a prompt and turns it into a run. */
+  const startJudgeRun = () => { for (const l of judgeListeners) l({ type: 'agent_start' }) }
   // The Session's own events, so a test can die one: the pane closes, the process exits, a restart adopts a ticket whose session is gone.
   const events = (i = 0) => workers[i]!.events
-  return { dir, feed, addComment, receipts, config, pi, running, workers, judge, judgeSessions, events, loaders, settleJudge, sdk, accept, decide, closes, calls, trackers }
+  return { dir, feed, addComment, receipts, config, pi, running, workers, judge, judgeSessions, events, loaders, settleJudge, startJudgeRun, sdk, accept, decide, closes, calls, trackers, created }
 }
 
 describe('the router extension', () => {
@@ -3042,5 +3052,105 @@ describe('the first post on a thread (agent-inbox#1005)', () => {
     expect(ack, 'the composed first post is in blocks').toBe('On it.\n\nI\'m working on: Fix the first post formatting.\n\n'
       + 'A worker runs this now. It reports on this issue, and a comment here reaches it.')
     expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/ack\.replaced .*Fix the first post formatting/)
+  })
+})
+
+describe('the judge wedges (agent-inbox#1022)', () => {
+  // Measured on the fleet box 2026-11-25: triage decided nothing for 47 minutes while the engine kept ticking
+  // and kept feeding prompts to one judge session — 182 prompts, 80 runs, 69 settles. Every existing check read
+  // "running". These tests pin the three things that were missing: the probe that notices, the retry that
+  // follows, and the number that makes it visible from outside the process.
+
+  it('a judge that never reports ready is reaped, its eval goes back, and it is fed nothing more', async () => {
+    let now = Date.parse('2026-11-05T12:00:00Z')
+    const f = fixture(true, undefined, undefined, undefined, { judgeReadyMs: 40, clock: () => now })
+    f.addComment('900', 'octocat', 'rotate the staging keys tonight')
+    await f.running.tick()
+    await until(() => f.judge.prompts.length > 0)
+    expect(f.judge.prompts, 'the first candidate reaches the session: the probe needs a prompt to probe').toHaveLength(1)
+
+    await until(() => /judge\.reaped/.test(readFileSync(join(f.dir, 'engine.log'), 'utf8')), 2000)
+    const log = readFileSync(join(f.dir, 'engine.log'), 'utf8')
+    expect(log).toMatch(/judge\.unready session=judge ms=40 prompts=1/)
+    expect(log).toMatch(/judge\.eval_requeued eval=\w+ reason="no run within 40 ms/)
+    expect(log, 'the pane takes the judgements, and `superagent restart` rebuilds the session').toMatch(/judge\.reaped reason="no run within 40 ms/)
+    expect(f.judge.disposed, 'its session is disposed: a reaped judge left open is the leak').toBe(true)
+
+    // Nothing further goes to the dead session, and the eval is not lost: it leaves the in-flight slot, and its
+    // own deadline requeues the triggers for a fresh ask.
+    const asked = f.judge.prompts.length
+    const firstEval = /Assess eval (\S+)/.exec(f.judge.prompts[0]!)![1]
+    for (let i = 0; i < 4; i++) { await f.running.tick(); await settle() }
+    expect(f.judge.prompts.length, 'a wedged session takes no more prompts').toBe(asked)
+    expect(f.running.assessor.waiting().some(w => w.evalId === firstEval), 'the dead eval left the in-flight slot').toBe(false)
+
+    now += 6 * 60_000
+    for (let i = 0; i < 4; i++) { await f.running.tick(); await settle() }
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8'), 'the expired eval queued its triggers again')
+      .toMatch(/eval\.deliver eval=\w+ bytes=\d+ target=pane-fallback/)
+    expect(f.pi.modes.includes('followUp'), 'the operator session answers while no judge is open').toBe(true)
+    expect(f.judge.prompts.length, 'and the reaped session stayed shut').toBe(asked)
+  })
+
+  it('the watchdog names the stall, publishes the age, and tells the board', async () => {
+    const f = fixture(true, undefined, undefined, undefined, { judgeFails: true, judgeStallMs: 250, judgeStallReportMs: 200 })
+    f.addComment('901', 'octocat', 'rotate the staging keys tonight')
+    await f.running.tick()
+    await settle()
+    // judgeFails: every candidate goes to the pane, so nothing is ever decided and the age of the last
+    // decision grows while evals keep arriving — the stall, in its simplest reproducible shape.
+    f.addComment('902', 'octocat', 'and rotate the production keys too', '2026-11-05T09:10:00Z')
+    await f.running.tick()
+    await until(() => /judge\.stalled/.test(readFileSync(join(f.dir, 'engine.log'), 'utf8')), 3000)
+
+    const log = readFileSync(join(f.dir, 'engine.log'), 'utf8')
+    const line = /judge\.stalled.*$/m.exec(log)![0]
+    expect(line).toMatch(/ageSec=\d+ thresholdSec=\d+/)
+    expect(line, 'the counters the operator read by hand this time').toMatch(/prompts=\d+ runs=\d+ settled=\d+ queued=\d+/)
+    const reports = (log.match(/judge\.stalled/g) ?? []).length
+    expect(reports, 'one loud line per report window, not one per beat').toBeLessThanOrEqual(3)
+
+    const health = JSON.parse(readFileSync(join(f.dir, 'health.json'), 'utf8'))
+    expect(health.judge.state).toBe('error')
+    expect(health.judge.detail).toMatch(/no decision for \d+ min while \d+ eval\(s\) were delivered/)
+    expect(typeof health.judge.lastDecisionAgeSec, 'the stall as one number').toBe('number')
+    expect(health.judge.lastDecisionAgeSec).toBeGreaterThanOrEqual(0)
+
+    expect(f.created, 'a person sees it on the board without ssh').toHaveLength(1)
+    expect(f.created[0]!.title).toMatch(/judge decided nothing for \d+ minutes/)
+    expect(f.created[0]!.body).toMatch(/Last decision: `[^`]+`/)
+    expect(f.created[0]!.body).toMatch(/superagent restart/)
+    expect(f.running.judgeState().stalled, 'the panel and /api/state read the same verdict').toBe(true)
+
+    // A decision lands: the alarm clears, and the number goes back to the clock.
+    f.decide('accept')
+    await f.running.tick()
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/judge\.stall_cleared/)
+    expect(f.running.judgeState().stalled).toBe(false)
+  })
+
+  it('a quiet board is not a stalled judge: no deliveries, no alarm', async () => {
+    const f = fixture(true, undefined, undefined, undefined, { judgeStallMs: 60 })
+    await f.running.tick()
+    await settle()
+    await new Promise(resolve => setTimeout(resolve, 150))
+    await f.running.tick()
+    const log = readFileSync(join(f.dir, 'engine.log'), 'utf8')
+    expect(log, 'an old decision with nothing to judge is what an idle fleet looks like').not.toMatch(/judge\.stalled/)
+    const health = JSON.parse(readFileSync(join(f.dir, 'health.json'), 'utf8')).judge
+    expect(health.state, 'the age is published every beat, so the alarm is not the only way to see it').toBe('ok')
+    expect(typeof health.lastDecisionAgeSec).toBe('number')
+  })
+
+  it('the alert goes to the named issue, and one stall is one alert per day', async () => {
+    const f = fixture(true, undefined, undefined, undefined, { judgeFails: true, judgeStallMs: 250, alertIssue: 7 })
+    f.addComment('903', 'octocat', 'rotate the staging keys tonight')
+    await f.running.tick()
+    await until(() => /judge\.stall_reported/.test(readFileSync(join(f.dir, 'engine.log'), 'utf8')), 3000)
+    expect(f.created, 'a named alert issue takes the comment, not a new issue').toHaveLength(0)
+    expect(f.feed.posts.filter(p => p.issue === 7), 'one comment per day').toHaveLength(1)
+    expect(readFileSync(join(f.dir, 'engine.log'), 'utf8')).toMatch(/judge\.stall_reported issue=7/)
+    for (let i = 0; i < 5; i++) { await f.running.tick(); await settle() }
+    expect(f.feed.posts.filter(p => p.issue === 7), 'the repeat is a log line, not a second comment').toHaveLength(1)
   })
 })

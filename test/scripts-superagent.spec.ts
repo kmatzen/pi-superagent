@@ -261,6 +261,36 @@ describe('scripts/superagent', { timeout: 30_000 }, () => {
     expect(run(['status']).status).toBe(3)
   })
 
+  it('a start closes the engine tabs a dead pi left behind (agent-inbox#1022)', () => {
+    // Measured 2026-11-25: 10 tabs labelled `engine` with `agent_status=unknown` were still standing after the
+    // `superagent restart` that fixed the stall, and 26 tabs were there after a boot. Each `start` opens one;
+    // nothing had ever closed one. `unknown` is herdr's own word for a tab with no pi in it.
+    for (let i = 2; i <= 11; i++) writeFileSync(join(herdrDir, `tab.${i}.args`), '--label engine --workspace w1\n')
+    writeFileSync(join(herdrDir, 'tab.12.args'), '--label worker-12 --workspace w1\n')
+    started()
+    const closed = readFileSync(join(herdrDir, 'closed'), 'utf8').trim().split('\n').sort()
+    expect(closed, 'all ten, in the same start that fixed the stall').toEqual(
+      Array.from({ length: 10 }, (_, i) => `w1:t${i + 2}`).sort())
+    expect(closed, 'a worker tab is nobody\u2019s leak').not.toContain('w1:t12')
+    expect(readFileSync(join(herdrDir, 'tab.1.args'), 'utf8'), 'and the new router got its own tab').toContain('--label engine')
+    const r = run(['start'])
+    expect(r.stderr).toMatch(/already running/)
+    expect(readFileSync(join(herdrDir, 'closed'), 'utf8').trim().split('\n'), 'a second start closes nothing new').toHaveLength(10)
+  })
+
+  it('a stalled judge is a failing part, and a restart clears it', () => {
+    started()
+    writeFileSync(join(state, 'health.json'), JSON.stringify({
+      runtime: { state: 'ready' }, tick: { state: 'ok', n: 900 },
+      judge: { state: 'error', detail: 'no decision for 47 min while 6 eval(s) were delivered', lastDecisionAgeSec: 2820 },
+    }))
+    const r = run(['status'])
+    expect(r.status, 'loud from outside the process: this is the number the health check reads').toBe(4)
+    expect(r.stderr).toMatch(/1 failing part\(s\).*no decision for 47 min/)
+    writeFileSync(join(state, 'health.json'), JSON.stringify({ runtime: { state: 'ready' }, tick: { state: 'ok', n: 901 } }))
+    expect(run(['status']).status, 'the block goes when the judge decides again').toBe(0)
+  })
+
   it('a stalled tick block is 2: up, and not beating, which is the fault a restart clears', () => {
     started()
     writeFileSync(join(state, 'health.json'), '{"runtime":{"state":"ready"},"tick":{"state":"error","stage":"poll","detail":"stalled in poll 240000ms"},"source":{"state":"ok"}}')

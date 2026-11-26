@@ -479,3 +479,33 @@ describe('what the panel offers for a ticket it says needs a person', () => {
     await s.close()
   })
 })
+
+describe('the judge on the panel (agent-inbox#1022)', () => {
+  // The stall was read by hand off engine.log for 47 minutes: 182 prompts, 80 runs, no decision. The panel is
+  // where an operator looks, so the age of the last decision has to be a number it answers with.
+  const hdr = { host: '127.0.0.1', 'x-superagent-request': '1' }
+  const stalledJudge = {
+    session: 'abc123', ready: false, wedged: true, prompts: 182, runs: 80, settled: 69, queued: 11,
+    lastDecisionAt: '2026-11-25T19:43:57.217Z', lastDecisionAgeSec: 2820, deliveriesSinceDecision: 6, stalled: true,
+  }
+
+  it('answers the age of the last decision as one number, on /api/state and on the page', async () => {
+    const s = await serve(source({ judge: () => stalledJudge }))
+    const state = await (await fetch(`http://127.0.0.1:${s.port}/api/state`, { headers: hdr })).json() as Record<string, unknown>
+    expect(state.lastDecisionAgeSec, 'one number, no log parsing').toBe(2820)
+    expect(state.judge).toMatchObject({ stalled: true, prompts: 182, runs: 80, settled: 69, wedged: true })
+    const page = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
+    expect(page, 'the stall is on the front page, not in a tab the operator has to open').toMatch(/decided nothing for 47 minutes/)
+    expect(page).toMatch(/prompts 182/)
+    await s.close()
+  })
+
+  it('says nothing about the judge when the router has no judge to report', async () => {
+    const s = await serve(source({}))
+    const state = await (await fetch(`http://127.0.0.1:${s.port}/api/state`, { headers: hdr })).json() as Record<string, unknown>
+    expect(state.lastDecisionAgeSec, 'absent, not zero: zero would read as "it just decided"').toBe(-1)
+    const page = await (await fetch(`http://127.0.0.1:${s.port}/`, { headers: { host: '127.0.0.1' } })).text()
+    expect(page).not.toMatch(/decided nothing for/)
+    await s.close()
+  })
+})
