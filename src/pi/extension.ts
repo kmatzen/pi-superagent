@@ -854,6 +854,7 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   }
   // Marks telling each (ticket, pull request) pair that its pull request is unreadable, so a restart says it once.
   const BLIND_KEY = 'pull-blind-notices'
+  const CLOSED_NOTICE_KEY = 'conversation-closed-notices'
   const follower = new PullFollower({
     home, api: pullApi,
     openThreads: () => github?.openThreads(), positions: repos.kv,
@@ -1351,9 +1352,23 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const openThreads = github?.openThreads()
     enter('conversations')
     if (openThreads) {
+      // One closed conversation says it ONCE. A thread can carry more than one ticket — a re-dispatch leaves the
+      // first row bound to the same issue — and this notice was keyed per ticket, so measured 2026-11-09 the board
+      // read "Stopped: this conversation closed on GitHub" twice within 46 ms and a third time 30 s later: three
+      // sentences for one fact. Every ticket is still stopped; only the speech is keyed by the thread, which is the
+      // thing that closed. A router post is speech on a thread, and speech is what recruits a session (#309).
+      const closedSaid = repos.kv.get<Record<string, string>>(CLOSED_NOTICE_KEY) ?? {}
+      const saidAt = deps.now ? deps.now() : new Date().toISOString()
+      let closedSpoke = false
       for (const ticket of repos.tickets.open()) {
         const channel = ticket.channels[0]
-        if (!channel || channel.source !== 'github' || !channel.thread.startsWith('#') || openThreads.has(channel.thread)) continue
+        if (!channel || channel.source !== 'github' || !channel.thread.startsWith('#')) continue
+        if (openThreads.has(channel.thread)) {
+          // Open again, so its next close is a new fact: drop the mark, rather than let a 30-day window be the
+          // reason a reopened issue that closes a second time is silent about it.
+          if (closedSaid[channel.thread]) { delete closedSaid[channel.thread]; closedSpoke = true }
+          continue
+        }
         // A merge closes the issue it names: the ticket ends with its pull request once the work finishes, not as a stop.
         if (ticket.follows?.some(f => f.own && f.closed)) continue
         // Absence from the open list is the hint; GitHub's answer on this issue is the fact. Measured
@@ -1366,16 +1381,27 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         }
         try {
           engine.stopTicket(ticket.id, 'the conversation closed on GitHub', 'conversation')
-          outbox.send({
-            id: `closed:${ticket.id}`,
-            channel,
-            kind: 'notice', ticketId: ticket.id,
-            text: 'Stopped: this conversation closed on GitHub. Reopen it, or comment on it, and the work resumes.',
-          })
-          log.line('info', 'ticket.conversation_closed', { ticket: ticket.id, thread: channel.thread })
+          const said = Boolean(closedSaid[channel.thread])
+          if (!said) {
+            closedSaid[channel.thread] = saidAt
+            closedSpoke = true
+            outbox.send({
+              // The outbox is idempotent by id, and a reopened conversation resumes the SAME ticket, so an id keyed
+              // by the ticket would make the second close of a thread undeliverable. The pass's stamp is the event.
+              id: `closed:${channel.thread}:${saidAt}`,
+              channel,
+              kind: 'notice', ticketId: ticket.id,
+              text: 'Stopped: this conversation closed on GitHub. Reopen it, or comment on it, and the work resumes.',
+            })
+          }
+          log.line('info', 'ticket.conversation_closed', { ticket: ticket.id, thread: channel.thread, said })
         } catch {
           // A stop raced with this poll; the ticket is already ended, which is the same outcome.
         }
+      }
+      if (closedSpoke) {
+        repos.kv.set(CLOSED_NOTICE_KEY, Object.fromEntries(Object.entries(closedSaid)
+          .filter(([, when]) => Date.parse(when) > Date.parse(saidAt) - 30 * 86_400_000)))
       }
     }
     // evaluateDue runs on every pass: it is the only thing that expires a stuck eval, and gating it once left
