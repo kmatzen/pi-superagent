@@ -20,6 +20,11 @@ export interface GhOptions {
    * counted, so this is the number that goes into the tick's log line.
    */
   onCall?: (args: readonly string[]) => void
+  /**
+   * How long a repository's readability is trusted before it gets probed again (default 15 minutes): "grant that
+   * account read access" is the fix a ticket asks a human for, and an answer that never expires lands it at restart.
+   */
+  visibilityTtlMs?: number
 }
 
 export interface GithubApiOptions extends GhOptions {
@@ -270,22 +275,26 @@ export function ghPulls(options: GhOptions = {}): PullApi {
    * the private repository its own code lives in, so it told the board twice in one day that an open, ready, mergeable
    * pull request had "closed without merging, so this ticket ends" — a false terminal end on the live fix, posted
    * in the router's own voice. Absent and unreadable are different answers, and only the first one ends a wait.
+   *
+   * The answer EXPIRES, because a grant is the fix this tells a human to make: measured 2026-11-09, a human answered
+   * that ask with "addressed" and the running router kept answering 404 to a ticket it told twice a day the door was open.
    */
-  const visibility = new Map<string, boolean>()
+  const visibility = new Map<string, { readable: boolean; at: number }>()
+  const visibilityTtlMs = options.visibilityTtlMs ?? 15 * 60_000
   /**
-   * Whether this account can read a repository, asked once per repository — but only a 404 is a definitive
+   * Whether this account can read a repository, asked once per visibility window — but only a 404 is a definitive
    * "no", and only it is cached. A probe that fails any other way (a rate limit, a bad minute) says nothing
    * about tomorrow: cached, it marked a readable repository unreadable for the life of the process, and every
    * later 404 on its pulls read as permanently unreadable instead of absent. Uncached, the next pass asks again.
    */
   const repoReadable = async (repo: string): Promise<boolean> => {
     const known = visibility.get(repo)
-    if (known !== undefined) return known
+    if (known !== undefined && Date.now() - known.at < visibilityTtlMs) return known.readable
     const readable = await call(['api', `repos/${repo}`]).then(() => true, (error: unknown) => {
       if (!/HTTP 404/.test(String(error))) throw error
       return false
     })
-    visibility.set(repo, readable)
+    visibility.set(repo, { readable, at: Date.now() })
     return readable
   }
   return {

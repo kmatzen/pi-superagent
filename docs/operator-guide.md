@@ -323,6 +323,13 @@ would wait forever and the board issue would be asked again. Say the word and th
 work that landed, closes the board issue, and touches nothing on GitHub. Measured 2026-11-24 on an
 ask whose fix merged upstream while its duplicate pull request sat uncloseable in an archived fork.
 
+**A ticket says it cannot read the pull request it waits on.** GitHub answers 404 for a private repository the
+account cannot see, and the ticket names the fix: grant that account read access, or comment when the work has
+landed. The grant needs no restart — the router re-asks each repository on a 15-minute window, so a read that was
+blind becomes a fact on its own. Check the repository's collaborator list rather than the intention behind it:
+measured 2026-11-09, an operator answered the ask with "addressed" while the account still had no access, and the
+running router went on answering 404 to a ticket whose receipt said the door was open.
+
 **Status exits 2.** Read `~/.pi/superagent/health.json` to identify the failing component. For a
 GitHub source error, check `gh auth status`. The next successful poll clears the error.
 
