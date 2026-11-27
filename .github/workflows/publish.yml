@@ -1,0 +1,55 @@
+name: publish
+# Publishes the artifact a consumer installs: pack, install into a throwaway prefix, run the bin through the
+# symlink npm leaves, require output. scripts/check-packed does that with a live engine and needs a herdr a runner
+# cannot give, so prepublishOnly aborts here; the job runs ci.yml's checks, the symlinked bin, and --ignore-scripts.
+on:
+  push: { tags: ['v*'] }
+  workflow_dispatch:
+    inputs:
+      tag: { description: 'tag to publish, e.g. v0.3.0', required: true, type: string }
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    # id-token: npm provenance and OIDC trusted publishing, so the registry needs no stored token here.
+    # contents: write only for the release page the job creates after a publish that succeeded.
+    permissions: { contents: write, id-token: write }
+    env: { TAG: '${{ github.event.inputs.tag || github.ref_name }}' }
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.TAG }}' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', registry-url: 'https://registry.npmjs.org' }
+      - name: the tag names the version this tree ships
+        run: |
+          v=${TAG#v}; p=$(node -p "require('./package.json').version")
+          [ "$v" = "$p" ] || { echo "tag $TAG names $v, package.json names $p"; exit 1; }
+          npm view "pi-superagent@$v" version >/dev/null 2>&1 \
+            && { echo "$v is already on the registry: a release needs a new version, not a re-tag"; exit 1; } \
+            || echo "$v is not on the registry yet"
+      - run: npm ci
+      # Trusted publishing needs a CLI new enough to exchange the OIDC token; the runner image's npm is not.
+      - run: npm install -g npm@latest
+      - run: npx tsc --noEmit
+      - run: npx vitest run
+      - name: the packed bin speaks from a symlinked install
+        run: |
+          npm pack --pack-destination /tmp/pkg
+          npm install -g --prefix /tmp/inst /tmp/pkg/*.tgz --no-audit --no-fund
+          out=$(/tmp/inst/bin/superagent 2>&1) || true
+          bytes=$(printf '%s' "$out" | wc -c | tr -d ' ')
+          echo "exit path taken, $bytes bytes: $out"
+          [ "$bytes" -gt 0 ] || { echo "the shipped bin produced no output through a symlink: silent success"; exit 1; }
+      - name: publish
+        env: { NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}' }
+        run: npm publish --provenance --access public --ignore-scripts
+      # The tag exists to mark a release, so a publish that succeeds leaves no tag without a page behind it.
+      - name: the release page
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          if [ -f docs/release-notes/"$TAG".md ]; then
+            gh release create "$TAG" --title "$TAG" --notes-file docs/release-notes/"$TAG".md
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
