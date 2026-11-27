@@ -1821,6 +1821,64 @@ describe('a pull request per ticket', () => {
     expect(f.receipts('492').split('I cannot follow'), 'once per ticket, not once per poll').toHaveLength(2)
   })
 
+  it('a conversation that closed says it once, whatever number of tickets are bound to it', async () => {
+    // Measured 2026-11-09 on the live board: the operator read "Stopped: this conversation closed on GitHub" twice
+    // within 46 ms and a third time 30 s later — three sentences for one fact, because the notice is keyed by ticket
+    // and a re-dispatch leaves the first row bound to the same issue. Both tickets still stop; the thread is the thing
+    // that closed, so the thread gets the sentence.
+    const f = fixture()
+    f.addComment('481', 'octocat', 'rotate the api tokens')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    const repos = new SqliteRepositories(`${f.dir}/tickets.db`)
+    const first = repos.tickets.open()[0]!
+    repos.tickets.save({ ...first, id: 'twin-of-481', assignments: [] } as never)
+    f.feed.issues.length = 0
+    f.feed.comments.length = 0
+    f.feed.closedIssues = [481]
+    await f.running.tick()
+    expect(repos.tickets.get(first.id)!.ended, 'the first ticket stops').toBeTruthy()
+    expect(repos.tickets.get('twin-of-481')!.ended, 'the duplicate bound to the same thread stops too').toBeTruthy()
+    expect(f.receipts('481').split('Stopped: this conversation closed'), 'one sentence for one closed thread').toHaveLength(2)
+    await f.running.tick()
+    expect(f.receipts('481').split('Stopped: this conversation closed'), 'and it is not said again next pass').toHaveLength(2)
+  })
+
+  it('a conversation reopened and closed again is said again', async () => {
+    // The 30-day window is a backstop, not the mechanism: the mark drops while the thread is open, because a reopen
+    // is a person changing their mind and the next close is a new fact, not an echo of the first.
+    const f = fixture()
+    f.addComment('481', 'octocat', 'rotate the api tokens')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    const repos = new SqliteRepositories(`${f.dir}/tickets.db`)
+    f.feed.issues.length = 0
+    f.feed.comments.length = 0
+    f.feed.closedIssues = [481]
+    await f.running.tick()
+    expect(f.receipts('481')).toContain('Stopped: this conversation closed')
+    // Reopen it the way the board does: the issue answers as open again, and a fresh request on it binds a live ticket.
+    f.feed.closedIssues = []
+    f.addComment('481', 'octocat', 'reopened, and it still needs doing')
+    await f.running.tick()
+    await settle()
+    f.decide('accept')
+    await f.running.tick()
+    expect(repos.tickets.open().map(t => t.channels[0]?.thread), 'the reopen bound a live ticket to the thread').toContain('#481')
+    // One pass with the thread open and a live ticket on it is what clears the mark, and a real thread stays open
+    // for many passes between a reopen and the next close.
+    await f.running.tick()
+    f.feed.issues.length = 0
+    f.feed.closedIssues = [481]
+    await f.running.tick()
+    expect(f.receipts('481').split('Stopped: this conversation closed'), 'the second close is a new fact').toHaveLength(3)
+  })
+
+
 
   it('a close recorded by a read that failed is repaired, and the pull request ends the ticket when it really lands', async () => {
     // The mirror of #309's ask 1: a terminal end must be a *true* one. GitHub answers 404 for a repository the

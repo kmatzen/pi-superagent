@@ -352,6 +352,16 @@ process lands that grant at the next restart rather than when the human makes it
 window bounds the cost — 41 followed pull requests measured a 12 s pass (2026-11-09), so a probe per blind read
 would tax every grant that never lands.
 
+## One closed conversation says it once
+
+The conversations pass stops every ticket bound to a thread that closed, which is right: a re-dispatch leaves the
+first row bound to the same issue, and both rows have to stop. The speech is keyed by the thread, because the thread
+is the thing that closed — measured 2026-11-09, the board read "Stopped: this conversation closed on GitHub" twice
+within 46 ms and a third time 30 s later, three sentences for one fact. The journal lives in kv with a 30-day window,
+and the mark drops while the thread is open, because a reopen is a person changing their mind and the next close is a
+new fact. The notice's outbox id carries the speaking pass, because the outbox is idempotent by id and a reopened
+conversation resumes the same ticket: an id keyed by the ticket would make the second close undeliverable.
+
 ## Maintaining the engine
 
 The engine and its test suite match the pinned upstream revision. Local adapters live in
