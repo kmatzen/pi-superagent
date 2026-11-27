@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { PARK_AFTER_FAILURES, PullFollower, unreadableKey, type PullApi, type PullState } from '../src/pi/pulls.ts'
+import { unreadablePullError } from '../src/pi/gh-api.ts'
 import type { Ticket, Trigger } from '../src/core/index.ts'
 
 /**
@@ -10,6 +11,7 @@ import type { Ticket, Trigger } from '../src/core/index.ts'
 function harness(api: PullApi, limits: { cooldownMs?: number } = {}) {
   const kv = new Map<string, unknown>()
   const warns: Array<{ event: string, fields: Record<string, unknown> }> = []
+  const blinder: Array<{ id: string, repo: string, number: number, problem: string }> = []
   const reads: string[] = []
   const counted: PullApi = { ...api, pull: async (repo, n) => { reads.push(`${repo}#${n}`); return api.pull(repo, n) } }
   let clock = Date.now()
@@ -28,6 +30,7 @@ function harness(api: PullApi, limits: { cooldownMs?: number } = {}) {
     },
     self: 'agent-bot', closed: () => {}, reopened: () => 0, receive: (_t: Trigger) => {},
     warn: (event, fields) => { warns.push({ event, fields }) },
+    blind: (thread, pull, problem) => { blinder.push({ id: thread.id, repo: pull.repo, number: pull.number, problem }) },
     now: () => clock, everyMs: INTERVAL, cooldownMs: limits.cooldownMs ?? COOLDOWN,
   })
   const run = async (passes: number, gapMs = INTERVAL): Promise<void> => {
@@ -38,7 +41,8 @@ function harness(api: PullApi, limits: { cooldownMs?: number } = {}) {
     }
   }
   const eventCount = (event: string): number => warns.filter(w => w.event === event).length
-  return { kv, warns, reads, eventCount, run, unreadable: () => kv.get(unreadableKey('other/r#14')) }
+  return { kv, warns, reads, eventCount, run, blinder, isBlind: () => start().isBlind('other/r#14'),
+    unreadable: () => kv.get(unreadableKey('other/r#14')) }
 }
 
 const MIN = 60_000
@@ -56,6 +60,45 @@ const unreadable = (pull?: PullApi['pull']): PullApi => ({
 })
 
 describe('a pull request in a repository this account cannot read', () => {
+
+  const blind404 = (repo: string, n: number): Error =>
+    unreadablePullError(`HTTP 404 reading pull request ${repo}#${n}, and this account cannot read ${repo} either`)
+
+  it('names the blind spot to its caller on every pass that finds it, and keeps the mark while it lasts', async () => {
+    // Measured 2026-11-09: the router's account cannot read the private repository its own workers push into, so
+    // every follow there answers identically forever — 24 failed reads in a day, one WARN each, while the tickets
+    // parked behind them said nothing to the people who could open the door. Parking is the router's quiet; naming
+    // the blind spot is speech the caller owns, so the follower keeps offering it on every pass that finds it.
+    const h = harness({ pull: async (repo, n) => { throw blind404(repo, n) }, comments: async () => [], reviews: async () => [] })
+    await h.run(1)
+    expect(h.blinder).toEqual([{ id: 'other/r#14', repo: 'other/r', number: 14, problem: expect.any(String) }])
+    expect(h.isBlind(), 'the router knows this thread is a fact it cannot see').toBe(true)
+    await h.run(3)
+    expect(h.blinder.length, "a ticket opened later is told too: the dedup is the caller's journal, not this call")
+      .toBeGreaterThanOrEqual(2)
+  })
+
+  it('does not call a rate limit a blind spot, and clears the mark when the grant lands', async () => {
+    const limit = harness({
+      pull: async () => { throw new Error('gh api exited 1: API rate limit exceeded') },
+      comments: async () => [], reviews: async () => [],
+    })
+    await limit.run(3)
+    expect(limit.blinder, 'a read that may succeed next pass is not a door to ask anyone to open').toEqual([])
+    expect(limit.isBlind()).toBe(false)
+
+    let granted = false
+    const h = harness({
+      pull: async (repo, n) => { if (!granted) throw blind404(repo, n); return open() },
+      comments: async () => [], reviews: async () => [],
+    })
+    await h.run(1)
+    expect(h.isBlind()).toBe(true)
+    granted = true
+    await h.run(1)
+    expect(h.isBlind(), 'the read that works ends the blindness, so a terminal end is a fact again').toBe(false)
+  })
+
   it('parks it after a streak of 404s, with one escalation, and stops reading it', async () => {
     const h = harness(unreadable())
     await h.run(PARK_AFTER_FAILURES)

@@ -251,6 +251,15 @@ export function ghApi(options: GithubApiOptions): GithubApi {
 const CHECKS_QUERY = 'query($owner:String!,$name:String!,$ref:String!){ repository(owner:$owner,name:$name){'
   + ' object(expression:$ref){ ... on Commit { statusCheckRollup { state } } } } }'
 
+/** The 404 no retry answers: GitHub says 404 for a private repository the token cannot see, so "I can never read
+ * this" (a door a person can grant, and a waiting ticket must be told) stays separable from "the network failed
+ * this time" (a retry). Measured 2026-11-09: 24 unreadable reads in one day, logged and never said. */
+export interface UnreadablePullError extends Error { readonly unreadablePull: true }
+export const unreadablePullError = (message: string): UnreadablePullError =>
+  Object.assign(new Error(message), { unreadablePull: true as const })
+export const isUnreadablePull = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && (error as { unreadablePull?: unknown }).unreadablePull === true
+
 /** Pull requests in any repository the operator's gh can read, by number: the ones tickets follow. */
 export function ghPulls(options: GhOptions = {}): PullApi {
   const call = ghCall(options)
@@ -294,7 +303,7 @@ export function ghPulls(options: GhOptions = {}): PullApi {
       } catch (error) {
         if (!/HTTP 404|Not Found/i.test(String(error))) throw error
         if (await repoReadable(repo)) return undefined
-        throw new Error(`HTTP 404 reading pull request ${repo}#${number}, and this account cannot read ${repo} either: `
+        throw unreadablePullError(`HTTP 404 reading pull request ${repo}#${number}, and this account cannot read ${repo} either: `
           + 'GitHub answers 404 for a private repository it cannot see, so the pull request is unreadable, not absent')
       }
     },

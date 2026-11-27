@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { isListed } from './authors.ts'
 import { CURSOR_LAG_MS, REPLY_MARKER, type IngestSurface, type IssueComment, type PositionStore, type PrReview } from './source-github.ts'
 import { countCredentials, redactCredentials } from './git-credentials.ts'
+import { isUnreadablePull } from './gh-api.ts'
 import type { Ticket, ThreadRef, Trigger } from '../core/index.ts'
 
 export interface PullRef { repo: string; number: number }
@@ -106,6 +107,10 @@ export interface FollowerOptions {
   reopened(thread: ThreadRef, pull: PullRef): number
   receive(trigger: Trigger): void
   warn(event: string, fields: Record<string, unknown>): void
+  /** A followed pull request this account can **never** read: GitHub answers 404 for the repository, so the read
+   *  fails identically forever. Called on every pass that finds it, so the router can say it where the operator
+   *  reads — a ticket parked on such a pull request ends by nothing, and the log is not where they look. */
+  blind?(thread: ThreadRef, pull: PullRef, problem: string): void
   /** A followed pull request's checks reached a final state on a head SHA (inbox#667). Detection lives in the
    *  pass that already reads the pull; who the outcome is for is the caller's, because only a ticket that asked for
    *  a check gets a session — CI churn recruited one worker 48 times on ticket #205. */
@@ -199,6 +204,9 @@ export interface UnreadableRead {
   nextProbeAt: number
   /** The park was announced: the one escalation per park, so a probe that fails again says nothing. */
   announced?: boolean
+  /** The last failure was the 404 on a repository this account cannot see: nothing this thread does can change that
+   *  answer, so its recorded state is a note from a read that failed, never an observation. */
+  blind?: boolean
 }
 
 /** The streak that stops being read as a bad minute: three is a network, four is a repository this account cannot see. */
@@ -329,6 +337,15 @@ export class PullFollower {
   }
 
   /**
+   * Whether the last failed read of this thread was the 404 on a repository this account cannot see: a recorded
+   * outcome for such a thread is a note a failed read left, not something the router watched, so a terminal end must
+   * not state it as one. Durable in the position store, so a restart cannot clear the answer.
+   */
+  isBlind(id: string): boolean {
+    return this.options.positions.get<UnreadableRead>(unreadableKey(id))?.blind === true
+  }
+
+  /**
    * Count a failed state read, and say something twice at most: once per blip streak, once when the thread parks.
    * Parked probes are silent because GitHub's 404 for a repository it cannot see is the same answer every probe.
    */
@@ -339,17 +356,24 @@ export class PullFollower {
     const ms = this.options.cooldownMs ?? 30 * 60_000
     // Parking costs one read per `cooldownMs` from here, so a repository granted mid-day is back within one probe.
     const parked = !local && ms > 0 && fails >= PARK_AFTER_FAILURES
+    const blind = isUnreadablePull(error)
+    const target = parseThread(id, this.options.home)
+    // The park is the router's quiet; a ticket parked behind it needs the door, so the caller hears it on every pass
+    // and journals what it said. Parked probes land here too, which is what re-tells a ticket that arrives late.
+    if (blind && target) this.options.blind?.({ source: 'github', id }, target, String(error).slice(0, 200))
     if (parked && !before?.announced) {
-      this.options.positions.set(key, { fails, nextProbeAt: now + ms, announced: true })
+      this.options.positions.set(key, { fails, nextProbeAt: now + ms, announced: true, ...(blind ? { blind: true } : {}) })
       this.unread.add(id)
-      const target = parseThread(id, this.options.home)
       this.options.warn('pull.thread_unreadable', {
         thread: id, ...(target ? { url: pullUrl(target) } : {}), fails,
         retryMinutes: Math.round(ms / 60_000), error: String(error).slice(0, 200),
       })
       return
     }
-    this.options.positions.set(key, { fails, nextProbeAt: parked ? now + ms : 0, ...(before?.announced ? { announced: true } : {}) })
+    this.options.positions.set(key, {
+      fails, nextProbeAt: parked ? now + ms : 0,
+      ...(before?.announced ? { announced: true } : {}), ...(blind ? { blind: true } : {}),
+    })
     // A park already announced says nothing more, across restarts: the durable flag is what makes "one escalation"
     // mean one, where the per-process set below only silences a blip for the process that saw it.
     if (before?.announced || this.unread.has(id)) return
