@@ -342,6 +342,16 @@ sqlite-safe copy, integrity-checked, 14 kept.
 and requires `x-superagent-request: 1` for API calls. These checks prevent a page on another
 site from reading the queue or pausing the router through DNS rebinding.
 
+## A repository's readability expires
+
+GitHub answers 404 for a private repository the token cannot see, the same answer it gives for a pull request that
+does not exist, so the router probes the repository to tell "absent" from "unreadable": reading a 404 as absence
+ended tickets that waited on live, mergeable work, in the router's own voice. The probe's answer EXPIRES, 15 minutes
+by default, because the fix a blind ticket asks a human for is a grant, and an answer held for the life of the
+process lands that grant at the next restart rather than when the human makes it. One probe per repository per
+window bounds the cost — 41 followed pull requests measured a 12 s pass (2026-11-09), so a probe per blind read
+would tax every grant that never lands.
+
 ## Maintaining the engine
 
 The engine and its test suite match the pinned upstream revision. Local adapters live in

@@ -268,6 +268,48 @@ esac
     expect(calls.filter(c => c === 'api repos/x/y'), 'the probe ran on both reads').toHaveLength(2)
   })
 
+  it('a read grant made while the router runs takes effect, because the answer expires', async () => {
+    // The notice a blind ticket gets says "grant that account read access". Measured 2026-11-09, a human answered
+    // that ask with "addressed"; had the grant landed, the cached answer would have kept the running router
+    // answering 404 until its next restart, on a ticket whose own receipt said the door was open.
+    const dir = tmp()
+    const gate = join(dir, 'granted')
+    writeFileSync(gate, 'no')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+case "$*" in
+  "api repos/private/secret") if [ "$(cat ${gate})" = yes ]; then echo '{"full_name":"p/secret"}'; else echo 'gh: Not Found (HTTP 404)' >&2; exit 1; fi ;;
+  "api repos/private/secret/pulls/31") if [ "$(cat ${gate})" = yes ]; then echo '{"state":"closed","merged_at":"2026-11-09T10:00:00Z","closed_at":"2026-11-09T10:00:00Z","created_at":"2026-11-08T09:00:00Z"}'; else echo 'gh: Not Found (HTTP 404)' >&2; exit 1; fi ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const api = ghPulls({ bin, visibilityTtlMs: 0 })
+    await expect(api.pull('private/secret', 31)).rejects.toThrow(/cannot read/)
+    writeFileSync(gate, 'yes')
+    expect(await api.pull('private/secret', 31), 'the merge is visible the moment the grant is').toMatchObject({ open: false, merged: true })
+  })
+
+  it('probes a repository once per window, not once per blind read', async () => {
+    // The window is what makes expiring cheap. The board pays 41 followed pull requests and 12 s per pass, so one
+    // probe per blind read would have been the new cost of a grant that has not landed.
+    const dir = tmp()
+    const probes = join(dir, 'probes')
+    const bin = join(dir, 'gh')
+    writeFileSync(bin, `#!/bin/bash
+case "$*" in
+  "api repos/private/secret") echo x >> ${probes}; echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  "api repos/private/secret/pulls/"*) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`)
+    chmodSync(bin, 0o755)
+    const api = ghPulls({ bin, visibilityTtlMs: 60_000 })
+    for (const n of [31, 32, 33]) await expect(api.pull('private/secret', n)).rejects.toThrow(/cannot read/)
+    expect(readFileSync(probes, 'utf8').trim().split('\n'), 'three blind reads, one probe').toHaveLength(1)
+  })
+
+
   it("reads one pull request's comments from a time, and its submitted reviews, with each author's standing", async () => {
     const gh = fakePullsGh()
     const api = ghPulls({ bin: gh.bin })
