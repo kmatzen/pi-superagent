@@ -9,6 +9,7 @@ import { HUMAN_LABEL, REPLY_MARKER, type GithubApi, type IssueComment, type Issu
 import { SqliteRepositories } from '../src/pi/store.ts'
 import type { AgentInfo, Herdr } from '../src/pi/herdr.ts'
 import type { ChecksState, PullApi, PullState } from '../src/pi/pulls.ts'
+import { unreadablePullError } from '../src/pi/gh-api.ts'
 import { paneKeysScrubbed, scrubPaneEnv } from './setup.ts'
 
 import { PRIORITY_REGRANT_CAP, REGRANT_CAP, regrantable, regrantPlan, standingAskEntitled } from '../src/pi/extension.ts'
@@ -1794,6 +1795,32 @@ describe('a pull request per ticket', () => {
     expect(receipt, 'the merged pull request is not reported as a close').toMatch(/github\.com\/o\/r\/pull\/81 merged/)
     expect(receipt).toMatch(/github\.com\/o\/r\/pull\/82 closed without merging/)
   })
+
+  it('a pull request this account can never read is said on the ticket, once, and names the door', async () => {
+    // Measured 2026-11-09: the router's GitHub account gets 404 from the private repository its own workers push
+    // into. 24 reads failed that way in one day, each answer identical and permanent, and the only trace was a WARN
+    // in the router's own log. A ticket parked behind such a pull request ends by nothing, so the ticket is where
+    // the block and its one door have to appear.
+    const pulls = pullsFake()
+    const blindApi: PullApi = {
+      ...pulls.api,
+      pull: async (repo, n) => {
+        if (repo === 'private/secret') {
+          throw unreadablePullError(`HTTP 404 reading pull request ${repo}#${n}, and this account cannot read ${repo} either`)
+        }
+        return pulls.api.pull(repo, n)
+      },
+    }
+    const f = fixture(true, undefined, undefined, undefined, { pullApi: blindApi })
+    const ticket = await working(f, '492')
+    f.workers[0]!.report!({ state: 'ready', summary: 'pushed it', pullRequests: ['https://github.com/private/secret/pull/5'] })
+    await f.running.tick()
+    expect(f.receipts('492')).toMatch(/I cannot follow https:\/\/github\.com\/private\/secret\/pull\/5[\s\S]*grant that account read access to `private\/secret`/)
+    expect(ticket().ended, 'a pull request the router cannot read ends nothing').toBeUndefined()
+    for (let pass = 0; pass < 3; pass++) await f.running.tick()
+    expect(f.receipts('492').split('I cannot follow'), 'once per ticket, not once per poll').toHaveLength(2)
+  })
+
 
   it('a close recorded by a read that failed is repaired, and the pull request ends the ticket when it really lands', async () => {
     // The mirror of #309's ask 1: a terminal end must be a *true* one. GitHub answers 404 for a repository the

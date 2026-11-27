@@ -822,7 +822,10 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const pulls = (ticket.follows ?? []).filter(f => f.own && f.closed)
       .flatMap(f => { const pull = parseThread(f.thread.replace(/^github:/, ''), home)
         // To the thread's reader the pull request did not merge, whoever ended the wait on it.
-        return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome === 'merged' ? 'merged' as const : 'closed' as const }] : [] })
+        // `confirmed` says whether this account could see it at all: an unreadable repository's state is a record, and
+        // a terminal end that states it as an observation is how a merged pull request got posted as closed (#309).
+        return pull ? [{ url: pullUrl(pull), outcome: f.closed!.outcome === 'merged' ? 'merged' as const : 'closed' as const,
+          confirmed: !follower.isBlind(f.thread.replace(/^github:/, '')) }] : [] })
     // One note per end: a ticket resumed on a reopened issue ends again, and its first end's note id silenced the second (2026-11-13, #387).
     outbox.send({ id: `pull-end:${ticket.id}:${ticket.ended.at}`, channel, kind: 'notice', ticketId: ticket.id,
       text: pullEndText(channel.thread, pulls, wakes()[ticket.id]?.at, question) })
@@ -849,6 +852,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     })
     log.line('info', 'pull.merged_part', { ticket: ticketId, thread: thread.id, left: left.length })
   }
+  // Marks telling each (ticket, pull request) pair that its pull request is unreadable, so a restart says it once.
+  const BLIND_KEY = 'pull-blind-notices'
   const follower = new PullFollower({
     home, api: pullApi,
     openThreads: () => github?.openThreads(), positions: repos.kv,
@@ -861,6 +866,33 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     ...(cfg.pullReadBudgetMs === undefined ? {} : { budgetMs: cfg.pullReadBudgetMs }),
     receive: trigger => { engine.receive(trigger) },
     warn: (event, fields) => log.line('warn', event, fields),
+    // A pull request this account can never read is the operator's to unblock, and the ticket is where they read.
+    // The follower calls this every pass it finds the 404; the journal, not the pass, is what keeps the quiet, and a
+    // router post is speech on a thread — speech is what recruits a session (#309).
+    blind: (thread, pull, problem) => {
+      const key = `github:${thread.id}`
+      const journal = repos.kv.get<Record<string, string>>(BLIND_KEY) ?? {}
+      const at = deps.now ? deps.now() : new Date().toISOString()
+      let said = 0
+      for (const ticket of repos.tickets.open()) {
+        const channel = ticket.channels[0]
+        const mark = `${ticket.id}|${thread.id}`
+        if (!channel || journal[mark] || !ticket.follows?.some(f => f.thread === key && !f.closed)) continue
+        outbox.send({
+          id: `pull-blind:${ticket.id}:${thread.id}`, channel, kind: 'notice', ticketId: ticket.id,
+          text: `${channel.thread}: I cannot follow ${pullUrl(pull)}, so this ticket can never end on it. GitHub `
+            + `answers 404 for \`${pull.repo}\`, which is what it says of a repository the account I run as `
+            + `(${cfg.githubSelf ?? cfg.self}) cannot read — I cannot tell when this pull request merges, and I will `
+            + `not guess. Two doors: grant that account read access to \`${pull.repo}\`, or comment here when the work `
+            + `has landed and I will take your word for it.\n\n${problem}`,
+        })
+        journal[mark] = at
+        said++
+        log.line('warn', 'pull.blind_notice', { ticket: ticket.id, thread: thread.id, url: pullUrl(pull) })
+      }
+      if (said) repos.kv.set(BLIND_KEY, Object.fromEntries(Object.entries(journal)
+        .filter(([, when]) => Date.parse(when) > Date.parse(at) - 30 * 86_400_000)))
+    },
     observed: (thread, _pull, state) => {
       // GitHub answers `unknown` while it recomputes after a push: the last known verdict stands until it answers.
       const before = pullStates.get(thread.id)

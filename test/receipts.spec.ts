@@ -86,4 +86,23 @@ describe('what the thread reads when a run ends', () => {
     expect(pullEndText('#387', [pr(9, 'merged'), pr(12, 'closed')], '2026-11-13T03:56:17.558Z'))
       .toMatch(/^#387: https:\/\/github.com\/o\/r\/pull\/9 merged and https:\/\/github.com\/o\/r\/pull\/12 closed without merging\. A fresh worker/)
   })
+
+  it('an outcome the router cannot see is never stated as one', () => {
+    // Measured 2026-11-09 on board #309: the close the router held for a pull request in a repository it cannot read
+    // came from a read that failed, and the board was told "closed without merging, so this ticket ends" about a pull
+    // request that merged. A fact nobody observed is said as a fact, and a person acts on it.
+    const blind = { url: 'https://github.com/o/r/pull/9', outcome: 'closed' as const, confirmed: false }
+    const text = pullEndText('#400', [blind])
+    expect(text).not.toMatch(/closed without merging/)
+    expect(text).toMatch(/I cannot say how https:\/\/github\.com\/o\/r\/pull\/9 ended/)
+    expect(text).toMatch(/Comment here when the work has landed/)
+    // One observed merge and one pull request the router cannot read: the merged work stays a fact, and does not
+    // drag the blind one's uncertainty over the sentence.
+    const both = pullEndText('#400', [{ url: 'https://github.com/o/r/pull/9', outcome: 'merged' as const },
+      { url: 'https://github.com/o/r/pull/12', outcome: 'closed' as const, confirmed: false }])
+    expect(both).toMatch(/merged: https:\/\/github\.com\/o\/r\/pull\/9\. This ticket is done\./)
+    expect(both).toMatch(/I cannot see https:\/\/github\.com\/o\/r\/pull\/12/)
+    expect(both).not.toMatch(/pull\/12 closed without merging/)
+  })
 })
+

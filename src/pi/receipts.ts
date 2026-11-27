@@ -67,20 +67,29 @@ export function receiptText(thread: string, origin: ReportOrigin, run: ReportedR
  * naming every pull by that one outcome told the person that a merged pull request had been closed. A question the
  * worker asked and nobody answered rides along, because the ticket's end clears it and this is the thread's last word.
  */
-export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; outcome: 'merged' | 'closed' }>,
+export function pullEndText(thread: string, pulls: ReadonlyArray<{ url: string; outcome: 'merged' | 'closed'; confirmed?: boolean }>,
                             checkAt?: string, question?: string): string {
   const urls = (list: string[]): string => list.join(', ') || 'its pull request'
   const asked = question ? `\n\n**The question that was open when it ended:** ${question}` : ''
-  const merged = pulls.filter(p => p.outcome === 'merged').map(p => p.url)
-  const closed = pulls.filter(p => p.outcome === 'closed').map(p => p.url)
+  // `confirmed: false` is a record a failed read left, not an outcome this account watched: GitHub answers 404 for a
+  // repository it cannot see, and a board issue closed on "closed without merging" about a pull request that merged.
+  const unseen = pulls.filter(p => p.confirmed === false).map(p => p.url)
+  const seen = pulls.filter(p => p.confirmed !== false)
+  const door = unseen.length
+    ? `\n\n**I cannot see ${urls(unseen)}:** GitHub answers 404 for that repository, so its state is a record from a read `
+      + 'I cannot repeat, not something I watched. Comment here when the work has landed and I will take your word for it.'
+    : ''
+  const merged = seen.filter(p => p.outcome === 'merged').map(p => p.url)
+  const closed = seen.filter(p => p.outcome === 'closed').map(p => p.url)
+  if (!seen.length && unseen.length) return `${thread}: this ticket ends, and I cannot say how ${urls(unseen)} ended.${door}${asked}`
   if (checkAt) {
     const what = [merged.length ? `${urls(merged)} merged` : '', closed.length ? `${urls(closed)} closed without merging` : ''].filter(Boolean).join(' and ')
     return `${thread}: ${what || `${urls([])} ended`}. A fresh worker still makes the check the last one asked for at ${checkAt.slice(11, 16)} UTC, `
-      + 'and this issue stays open until it reports.' + asked
+      + 'and this issue stays open until it reports.' + door + asked
   }
-  if (!closed.length) return `${thread} merged: ${urls(merged)}. This ticket is done.${asked}`
-  if (!merged.length) return `${thread}: ${urls(closed)} closed without merging, so this ticket ends. A comment here starts the work again.${asked}`
+  if (!closed.length) return `${thread} merged: ${urls(merged)}. This ticket is done.${door}${asked}`
+  if (!merged.length) return `${thread}: ${urls(closed)} closed without merging, so this ticket ends. A comment here starts the work again.${door}${asked}`
   return `${thread}: ${urls(merged)} merged and ${urls(closed)} closed without merging, so this ticket ends with the work that landed. `
-    + `A comment here starts the work again.${asked}`
+    + `A comment here starts the work again.${door}${asked}`
 }
 
