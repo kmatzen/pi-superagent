@@ -31,6 +31,12 @@ export type WorkerEvent =
   | { type: 'failed'; error: string }
   /** Any other session event: tool calls and model output are what a busy worker emits for minutes on end. */
   | { type: 'activity' }
+  /**
+   * One model turn ended, reported by the worker's own role: `effects` says the turn wrote a file, ran
+   * a test, committed, or opened a pull request; `reasoning` carries its last assistant text when it did
+   * not, so the swamp guard can quote what a spinning worker was thinking about (agent-inbox#1085).
+   */
+  | { type: 'turn'; effects: boolean; reasoning?: string }
 
 export interface WorkerLauncher {
   launch(input: {
@@ -99,6 +105,12 @@ interface Live {
    *  overwrite this, because a worker whose last word was `ready` finished the work. */
   lastState: string
   assignmentId: string
+  /** Consecutive finished turns that wrote, tested, committed and opened nothing (agent-inbox#1085). */
+  spinTurns: number
+  /** The last assistant text of the current spin streak, for the stop comment's quote. */
+  spinReasoning: string
+  /** The spin guard speaks once per streak: one stop, one quote, one redirect by a person. */
+  spinReported: boolean
 }
 
 export interface WorkerView {
@@ -256,6 +268,7 @@ export class PiExecutor {
       // A worker this process adopted already has a report on the record, and a crash must not erase it: after a
       // restart the router's memory of what a worker finished lives in that record, not in this map.
       lastState: assignment.report?.state ?? '', assignmentId: assignment.id,
+      spinTurns: 0, spinReasoning: '', spinReported: false,
     }
     // Registered before it subscribes: subscribing reads the worker's file at once, and a report it filed while no router
     // ran found no live worker and was dropped (2026-11-13: a waiting report, read 5 ms before its worker was adopted).
@@ -266,6 +279,14 @@ export class PiExecutor {
       live.quietReported = false
       // An adopted worker's turn began before this process subscribed, so no turnStarted ever marks it busy.
       live.busy = event.type !== 'settled'
+      if (event.type === 'turn') {
+        // A streak speaks once; an effectful turn ends it, so the next streak can speak too.
+        if (event.effects) { live.spinTurns = 0; live.spinReported = false; live.spinReasoning = '' }
+        else {
+          live.spinTurns += 1
+          if (event.reasoning) live.spinReasoning = event.reasoning
+        }
+      }
       if (event.type === 'turnStarted') {
         const ids = live.pendingRead.splice(0).flatMap(batch => batch.ids)
         if (ids.length) this.engine.inputsRead(ticket.id, ids)
@@ -393,6 +414,29 @@ export class PiExecutor {
     const due = this.workers().filter(w => w.busy && w.ageSeconds >= hours * 3600 && !this.live.get(w.ticketId)?.deadlineReported)
     for (const w of due) this.live.get(w.ticketId)!.deadlineReported = true
     return due
+  }
+
+  /**
+   * Parked (not-on-a-run) workers quiet past `minutes`: the slot reclamation rule's candidates
+   * (agent-inbox#1085). Measured 2026-11-28: a worker sat `busy: false, quietSeconds: 3485` and the panel
+   * still showed `running: 8` of 8 while 20 asks starved. No once-flag: the rule ends by releasing the
+   * worker, which removes its live entry, so a worker cannot be parked twice.
+   */
+  idleParked(minutes: number): WorkerView[] {
+    return this.workers().filter(w => !w.busy && w.quietSeconds >= minutes * 60)
+  }
+
+  /**
+   * Workers on a run whose last `turns` consecutive turns produced no file write, no test run, no commit
+   * and no pull request (agent-inbox#1085). Each streak speaks once: the guard stops the worker, and a
+   * second report would bury the quote a person is meant to redirect from. The view carries the streak
+   * length and the last reasoning block the worker emitted between effects.
+   */
+  spinning(turns: number): Array<WorkerView & { spinTurns: number; reasoning: string }> {
+    const due = this.workers().filter(w => w.busy && !this.live.get(w.ticketId)!.spinReported
+      && this.live.get(w.ticketId)!.spinTurns >= turns)
+    for (const w of due) this.live.get(w.ticketId)!.spinReported = true
+    return due.map(w => ({ ...w, spinTurns: this.live.get(w.ticketId)!.spinTurns, reasoning: this.live.get(w.ticketId)!.spinReasoning }))
   }
 
   // Launches are serialised behind each other: the cap bounds how many workers are on a run at once, and

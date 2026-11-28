@@ -37,7 +37,8 @@ function fakePi() {
   const f = {
     pi, tools, sent, emit, turn,
     report: (args: Record<string, unknown>) => { f.emit('agent_start'); f.tools.find(t => t.name === 'ticket_report')!.execute('c1', args); f.emit('agent_settled') },
-    types: () => lines(join(dir, 'events.jsonl')).map(e => e.type),
+    // `turn` (agent-inbox#1085) is the swamp guard's witness; these specs pin nudge/file bookkeeping only.
+    types: () => lines(join(dir, 'events.jsonl')).filter(e => e.type !== 'turn').map(e => e.type),
     reports: () => lines(join(dir, 'reports.jsonl')),
     nudged: () => existsSync(join(dir, 'inbox', SILENT_NUDGE_FILE)),
   }

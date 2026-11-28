@@ -271,7 +271,8 @@ describe('the worker role', () => {
     f.emit('agent_start')
     for (let i = 0; i < 50; i++) f.emit('message_update')
     f.emit('agent_settled')
-    expect(lines(join(dir, 'events.jsonl')).map(e => e.type)).toEqual(['turnStarted', 'activity', 'selfNudge', 'settled'])
+    // agent-inbox#1085: the bare run now also reports its `turn` witness, with no effects.
+    expect(lines(join(dir, 'events.jsonl')).map(e => e.type)).toEqual(['turnStarted', 'activity', 'selfNudge', 'turn', 'settled'])
   })
 
   it('a command streaming output is activity, so a long build does not read as silence', () => {

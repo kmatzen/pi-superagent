@@ -36,6 +36,16 @@ export interface RouterConfig {
   /** Report a worker that has run this long without finishing. Reports; never kills. */
   workerDeadlineHours?: number
   /**
+   * Park a worker whose session is settled (not on a run) and quiet this long: its slot goes back to the
+   * queue, its tab closes, its ticket gets a comment. Default 20 min. (agent-inbox#1085)
+   */
+  workerIdleParkMinutes?: number
+  /**
+   * Stop a worker after this many consecutive turns that wrote no file, ran no test, made no commit and
+   * opened no pull request, quoting its last reasoning block on the ticket. Default 12. (agent-inbox#1085)
+   */
+  workerSpinTurns?: number
+  /**
    * The watched repository carries asks, not code: don't hand a worker a checkout of the ask board, and tell it
    * to clone the repository the request names. Off by default, since a single-repository deployment works code
    * out of the repository it watches.
@@ -184,6 +194,9 @@ export const briefFor = (ticket: Ticket, worktree: string): string => [
   'nearly full.',
   'Waiting on CI: poll it one step per command (`gh pr checks`, then `sleep 60` at most, and again), never one long',
   'wait: a person\'s review reaches you only between commands, and the guard refuses longer waits.',
+  'The fleet stops a worker whose turns keep producing no file write, no test run, no commit and no pull',
+  'request, and posts what it was reasoning about for a person to redirect. Reasoning that changes nothing',
+  'is not progress: when the mandate asks for code, write it; when it asks a question, report it.',
 ].join('\n')
 
 /** How work reaches a repository: a pull request the ticket then waits on. Work that changes no repository ends as before. */

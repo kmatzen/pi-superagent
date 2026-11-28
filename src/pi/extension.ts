@@ -35,6 +35,7 @@ import { workerRole } from './worker-role.ts'
 import { createPanelServer } from './server.ts'
 import { checkoutRepository, guardExtension, prepareWorkspace, setupProblems } from './workspace.ts'
 import { briefFor, ghAccounts, loadSdk, policyOf, pullBrief, scopeOf, type RouterConfig, type SdkSurface } from './router.ts'
+import { escapeControlTokens, unescapeControlTokens } from './chatml.ts'
 
 /**
  * A standing ask re-earns its launch a bounded number of times per day. The counter lives in the store,
@@ -519,10 +520,12 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
   })
 
   const renderInput = (input: TicketInput): string | undefined => input.kind === 'trigger'
-    ? (repos.triggers.get(input.triggerId) ? `${repos.triggers.get(input.triggerId)!.actor.id}: ${repos.triggers.get(input.triggerId)!.text}` : undefined)
+    // Control tokens in a person's message, an issue body, or an agent post reach the worker's context
+    // through this render: armor them at the boundary (agent-inbox#1085).
+    ? (repos.triggers.get(input.triggerId) ? escapeControlTokens(`${repos.triggers.get(input.triggerId)!.actor.id}: ${repos.triggers.get(input.triggerId)!.text}`) : undefined)
     // A text Input is the operator's own words: rendering it as `[text]` would deliver the literal
     // string to the worker and mark the answer read.
-    : input.kind === 'text' ? input.text : `[${input.kind}]`
+    : input.kind === 'text' ? escapeControlTokens(input.text) : `[${input.kind}]`
 
   // The release rule, in one place: a settled report frees the agent, whoever filed it. It lived twice — in
   // this callback and in the silence sweep, which files through the domain and so never reached this code —
@@ -569,7 +572,9 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
     const said = origin === 'launch' ? ''
       : createHash('sha1').update(JSON.stringify([run.state, run.summary, run.question ?? null, run.pullRequests ?? []])).digest('hex').slice(0, 12)
     outbox.send({ id: `report:${assignmentId}:${origin}:${said}`, channel, kind: 'reply', ticketId: ticket.id,
-      text: receiptText(channel.thread, origin, run, relaunched, tracker.url(ticket.id), checksPending(ticket)) })
+      // The receipt is egress to a human-facing issue: restore control tokens the boundary escaped, so
+      // quoted context reads as its author wrote it (agent-inbox#1085).
+      text: unescapeControlTokens(receiptText(channel.thread, origin, run, relaunched, tracker.url(ticket.id), checksPending(ticket))) })
   }
   // One fresh worker per crash, per ticket per process; the engine's retry requeues comments the dead one never read.
   const relaunched = new Set<string>()
@@ -1097,6 +1102,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         subscribe: (listener) => session.subscribe(event => {
           if (event.type === 'agent_start') listener({ type: 'turnStarted' })
           else if (event.type === 'agent_settled') listener({ type: 'settled' })
+          else if (event.type === 'turn') {
+            const reasoning = (event as { reasoning?: unknown }).reasoning
+            listener({ type: 'turn', effects: (event as { effects?: unknown }).effects === true,
+              ...(typeof reasoning === 'string' ? { reasoning: reasoning.slice(0, 4000) } : {}) })
+          }
           else listener({ type: 'activity' })
         }),
         abort: () => session.abort(),
@@ -1124,7 +1134,11 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         : `\n${cfg.workerTokenFile
           ? pullBrief(issue && repo ? `${repo}#${issue}` : undefined)
           : pullBrief(undefined, false)}`
-      if (!issue || !repo) return brief + pulls + words
+      // The mandate scope, the title, the person's words, the last worker's notes and its failure summary all
+      // ride out here, so the whole rendered brief is armored in one place: idempotent, so the engine's own
+      // prose (which carries no control tokens) passes through untouched (agent-inbox#1085).
+      const full = (head: string): string => escapeControlTokens(head + pulls + words)
+      if (!issue || !repo) return full(brief)
       // A comment the worker posts itself carries no reply footer, so the router would read it as the
       // operator asking again on this thread.
       const clone = cfg.watchRepoIsAsks
@@ -1132,8 +1146,8 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
           + 'request changes. Clone the repository the request names into your workspace before you change anything, '
           + 'and if it names none, report blocked and say what you need. '
         : ''
-      return `${brief}\nThe request is GitHub issue ${repo}#${issue}: read it with \`gh issue view ${issue} --repo ${repo} --comments\`. `
-        + clone + 'Do not comment on the issue yourself; ticket_report is how your result reaches it.' + pulls + words
+      return full(`${brief}\nThe request is GitHub issue ${repo}#${issue}: read it with \`gh issue view ${issue} --repo ${repo} --comments\`. `
+        + clone + 'Do not comment on the issue yourself; ticket_report is how your result reaches it.')
     },
     renderInput,
     reported,
@@ -1449,6 +1463,41 @@ export function createRouterExtension(pi: PiLike, deps: ExtensionDeps): RunningR
         summary: `the worker has run ${Math.round(late.ageSeconds / 3600)} hours in ${late.workspace} without finishing`,
         question: 'accept the work, steer it, or stop it on the panel',
       } as never)
+    }
+    // Idle slot reclamation (agent-inbox#1085): a parked worker quiet past the threshold is not work in
+    // progress. Measured 2026-11-28: one sat `busy: false` for 58 minutes while 20 asks starved, and a
+    // person's `stop-ticket` freed two launches within 40 s — the slot was real and held by nothing.
+    // Releasing keeps the worktree and the ticket; the released assignment is the resume path (a message
+    // on the thread wakes a fresh worker into the same workspace), and the panel's `running` drops at once.
+    for (const idle of executor.idleParked(cfg.workerIdleParkMinutes ?? 20)) {
+      const parked = repos.tickets.get(idle.ticketId)
+      const assignment = parked?.assignments.at(-1)
+      if (!parked || !assignment) continue
+      releaseIfWaiting(idle.ticketId, assignment.id, 'idle')
+      log.line('info', 'worker.idle_parked', { ticket: idle.ticketId, assignment: assignment.id,
+        quietSeconds: idle.quietSeconds, thresholdMinutes: cfg.workerIdleParkMinutes ?? 20 })
+      const channel = parked.channels[0]
+      if (channel) outbox.send({ id: `idle:${assignment.id}`, channel, kind: 'notice', ticketId: idle.ticketId,
+        text: `Parked: this ticket's worker ran dry — ${Math.round(idle.quietSeconds / 60)} minutes with no turn. `
+          + 'Its slot is released to the queue and its tab closed; the workspace and every change in it are kept. '
+          + 'Comment here to start a fresh worker on the same workspace.' })
+    }
+    // The swamp guard (agent-inbox#1085): turns that write, test, commit and open nothing are reasoning
+    // eating a slot. Measured the same day: 17 h, 60 assistant turns, no artifact — hand-built tokenizer
+    // fixtures the mandate never asked for. Stop once, quote the last reasoning block, let a person redirect;
+    // the worktree is preserved by the release, and the streak flag makes this fire exactly once per streak.
+    for (const spin of executor.spinning(cfg.workerSpinTurns ?? 12)) {
+      const spinning = repos.tickets.get(spin.ticketId)
+      const assignment = spinning?.assignments.at(-1)
+      if (!spinning || !assignment) continue
+      releaseIfWaiting(spin.ticketId, assignment.id, 'spinning')
+      log.line('info', 'worker.spinning', { ticket: spin.ticketId, assignment: assignment.id, turns: spin.spinTurns })
+      const channel = spinning.channels[0]
+      if (channel) outbox.send({ id: `spin:${assignment.id}`, channel, kind: 'notice', ticketId: spin.ticketId,
+        text: `Stopped the worker: ${spin.spinTurns} turns in a row wrote no file, ran no test, made no commit and opened no pull request. `
+          + 'What it was reasoning about last:\n\n'
+          + (spin.reasoning ? spin.reasoning.split('\n').map(line => `> ${line}`).join('\n') : '> (it emitted no text to quote)')
+          + '\n\nThe workspace and every change in it are kept. Comment here to redirect it.' })
     }
     outbox.flush()
     // The disk floor is checked every beat, and swept only when breached: the startup pass only runs at startup.
@@ -2497,6 +2546,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
   const workerStartMs = positiveNumber('PI_SUPERAGENT_WORKER_START_MS', env.PI_SUPERAGENT_WORKER_START_MS)
   const workerQuietMinutes = positiveNumber('PI_SUPERAGENT_WORKER_QUIET_MINUTES', env.PI_SUPERAGENT_WORKER_QUIET_MINUTES)
   const deadlineHours = positiveNumber('PI_SUPERAGENT_WORKER_DEADLINE_HOURS', env.PI_SUPERAGENT_WORKER_DEADLINE_HOURS)
+  const idleParkMinutes = positiveNumber('PI_SUPERAGENT_WORKER_IDLE_PARK_MINUTES', env.PI_SUPERAGENT_WORKER_IDLE_PARK_MINUTES)
+  const spinTurns = positiveNumber('PI_SUPERAGENT_WORKER_SPIN_TURNS', env.PI_SUPERAGENT_WORKER_SPIN_TURNS)
   const reportCap = positiveNumber('PI_SUPERAGENT_REPORT_CAP', env.PI_SUPERAGENT_REPORT_CAP)
   const regrantCap = positiveNumber('PI_SUPERAGENT_REGRANT_CAP', env.PI_SUPERAGENT_REGRANT_CAP)
   const priorityRegrantCap = positiveNumber('PI_SUPERAGENT_PRIORITY_REGRANT_CAP', env.PI_SUPERAGENT_PRIORITY_REGRANT_CAP)
@@ -2533,6 +2584,8 @@ export function configFrom(env: NodeJS.ProcessEnv): RouterConfig | null {
     ...(alertIssue === undefined ? {} : { alertIssue: Math.floor(alertIssue) }),
     ...(workerQuietMinutes === undefined ? {} : { workerQuietMinutes }),
     ...(deadlineHours === undefined ? {} : { workerDeadlineHours: deadlineHours }),
+    ...(idleParkMinutes === undefined ? {} : { workerIdleParkMinutes: idleParkMinutes }),
+    ...(spinTurns === undefined ? {} : { workerSpinTurns: Math.floor(spinTurns) }),
     ...(reportCap === undefined ? {} : { reportCap: Math.floor(reportCap) }),
     ...(regrantCap === undefined ? {} : { regrantCap: Math.floor(regrantCap) }),
     ...(priorityRegrantCap === undefined ? {} : { priorityRegrantCap: Math.floor(priorityRegrantCap) }),

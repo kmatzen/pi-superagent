@@ -6,11 +6,23 @@ import { guardExtension } from './workspace.ts'
 import { NOT_ENGLISH, nonEnglish, publishedText } from './english.ts'
 import { PUBLISH_REFUSED, runOnProblems } from './firstpost.ts'
 import { closesBoardIssue, closingRefused } from './closing.ts'
+import { escapeToolResultContent } from './chatml.ts'
 
 export interface WorkerPi {
   registerTool(tool: ReturnType<typeof reportTool>): void
   on(event: string, handler: (event?: unknown) => unknown): unknown
   sendUserMessage(content: string, options?: { deliverAs?: 'steer' | 'followUp' }): Promise<void> | void
+}
+
+/** Tool names whose call writes a file: the "wrote a file" effect of the swamp guard (agent-inbox#1085). */
+const WRITE_TOOLS = new Set(['write', 'edit', 'multiedit', 'str_replace_editor', 'apply_patch', 'notebook_edit'])
+/** A bash command that runs a test suite, a build, a commit, a pre-commit gate, or opens a pull request. */
+const EFFECTFUL_COMMAND = /\b(pytest|vitest|jest|npm (run )?test\b|pnpm (run )?test\b|yarn test\b|make\b|cmake --build|cargo test|go test\b|\.\/gradlew|pre-commit run\b|git(?: -C \S+)? commit(\s|$)|gh pr create\b|npm run (build|check|lint)\b|pnpm (build|check|lint)\b)/
+
+/** Whether one tool call is an effect the swamp guard counts: a file write, a test, a build, a commit, a PR. */
+export function isEffectiveCall(toolName: string, input: Record<string, unknown> | undefined): boolean {
+  if (WRITE_TOOLS.has(toolName)) return true
+  return toolName === 'bash' && typeof input?.command === 'string' && EFFECTFUL_COMMAND.test(input.command)
 }
 
 /** The ask's own words and its choices, as one block: the person answers on the issue, where the options
@@ -167,6 +179,18 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   // multi-input deliveries on 2026-11-11). Idle, one input goes and the rest wait for agent_start.
   let running = false
   let starting: { name: string; at: number } | undefined
+  // The swamp guard's witness (agent-inbox#1085): the worker's own role knows which calls wrote, tested,
+  // committed and opened, and which text the model reasoned between them. One `turn` event per settled
+  // run tells the router both, so a streak of effect-free turns can be stopped with its reasoning quoted.
+  let turnEffects = false
+  let lastReasoning = ''
+  pi.on('tool_call', (event?: unknown) => {
+    const call = event as { toolName?: string; input?: Record<string, unknown> }
+    if (isEffectiveCall(String(call.toolName), call.input)) turnEffects = true
+  })
+  // Tool output is where a file's bytes enter the model's context: armor control tokens here, at the
+  // worker's own boundary, the same way the operator's gateway does (agent-inbox#1085).
+  pi.on('tool_result', (event?: unknown) => escapeToolResultContent((event as { content?: unknown } | undefined)?.content))
   pi.on('agent_start', () => {
     running = true
     starting = undefined
@@ -200,6 +224,8 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
     }
     reported = false
     const aborted = Boolean((event as { aborted?: boolean } | undefined)?.aborted)
+    append('events.jsonl', { type: 'turn', effects: turnEffects, ...(turnEffects ? {} : { reasoning: lastReasoning.slice(0, 4000) }) })
+    turnEffects = false
     for (const [name, { file }] of inflight) {
       // Aborted: the run gave the message back, so the next drain sends it to the idle session as its own turn.
       if (aborted) continue
@@ -225,6 +251,12 @@ export function workerRole(pi: WorkerPi, env: NodeJS.ProcessEnv, pollMs = 1000, 
   // A steer or follow-up joins the run without an agent_start, the router's only other sign of a read.
   pi.on('message_end', (event?: unknown) => {
     const message = (event as { message?: { role?: string; content?: unknown } } | undefined)?.message
+    if (message?.role === 'assistant') {
+      const blocks = Array.isArray(message.content) ? message.content : []
+      const text = blocks.map(part => (part as { type?: string; text?: string }).type === 'text' ? (part as { text?: string }).text ?? '' : '').join('\n').trim()
+      if (text) lastReasoning = text
+      return
+    }
     if (message?.role !== 'user') return
     const content = message.content
     const text = typeof content === 'string' ? content : Array.isArray(content)

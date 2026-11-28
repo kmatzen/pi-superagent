@@ -279,6 +279,16 @@ instructions ask them to limit parallel jobs and clean up any processes they sta
 goes quiet for 15 minutes, it appears under *Needs a person* on the panel. A long build can be
 quiet, too. Take a look in the tab before interrupting it.
 
+Two rules take slots back without you typing anything (agent-inbox#1085, measured 2026-11-28: a
+worker sat `busy: false` for 58 minutes inside `running: 8` of 8 while 20 asks starved). A worker
+whose session has **settled and stayed quiet** for 20 minutes (`PI_SUPERAGENT_WORKER_IDLE_PARK_MINUTES`)
+is parked: its slot goes to the queue, its tab closes, and its ticket gets a comment saying it ran
+dry — engine.log says `worker.idle_parked`. A worker whose turns keep producing **no file write, no
+test run, no commit and no pull request** is stopped after 12 of them
+(`PI_SUPERAGENT_WORKER_SPIN_TURNS`), once, and the ticket gets a comment quoting the last thing it
+was reasoning about so you can redirect it — `worker.spinning`. Neither deletes anything: the
+workspace keeps every change, and a comment on the ticket starts a fresh worker there.
+
 Label an open issue `priority:high` to put it in the next free slot. The launch queue is ordered
 by that label first and oldest updated second, so a flagged thread whose worker is already queued
 takes the slot the moment one frees, and one priority launch per tick, because 38 pending tickets

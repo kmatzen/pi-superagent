@@ -357,6 +357,11 @@ export class HerdrWorkers {
       const before = `${cursor.events}/${cursor.reports}`
       for (const event of fresh('events.jsonl', 'events')) {
         if (event.type === 'turnStarted' || event.type === 'settled' || event.type === 'activity') listener?.({ type: event.type })
+        else if (event.type === 'turn') {
+          const reasoning = event.reasoning
+          listener?.({ type: 'turn', effects: event.effects === true,
+            ...(typeof reasoning === 'string' ? { reasoning: reasoning.slice(0, 4000) } : {}) })
+        }
         else if (event.type === 'input_read' && typeof event.name === 'string') listener?.({ type: 'inputRead', name: event.name })
         else if (event.type === 'inbox_error') log.line('warn', 'worker.inbox_error', { agent: record.agent, error: String(event.error) })
       }
